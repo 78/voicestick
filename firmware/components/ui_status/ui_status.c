@@ -433,6 +433,22 @@ void ui_status_set_partial_text(const char *text)
     set_scene(UI_STATUS_ICON_TRANSCRIBING, "Thinking", text ? text : "");
 }
 
+void ui_status_set_ota_progress(uint32_t written, uint32_t size)
+{
+    char hint[32];
+    uint32_t percent = 0;
+    if (size > 0) {
+        percent = MIN(100, (written * 100) / size);
+    }
+    snprintf(hint, sizeof(hint), "%" PRIu32 "%%", percent);
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Updating", hint);
+}
+
+void ui_status_set_ota_rebooting(void)
+{
+    set_scene(UI_STATUS_ICON_TRANSCRIBING, "Rebooting", "Firmware updated");
+}
+
 void ui_status_set_error(const char *message)
 {
     ESP_LOGE(TAG, "%s", message ? message : "unknown error");

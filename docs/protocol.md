@@ -26,6 +26,8 @@ Characteristics:
 | `audio_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5101` | StickS3 -> Mac | notify |
 | `state_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5102` | StickS3 -> Mac | notify |
 | `control_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5103` | Mac -> StickS3 | write without response |
+| `ota_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5104` | Mac -> StickS3 | write, write without response |
+| `ota_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105` | StickS3 -> Mac | notify |
 
 The desktop app scans for this service and only connects to devices whose `VS-XXXX` ID is present in the local paired-device list.
 
@@ -90,6 +92,84 @@ Current desktop events:
 ```
 
 The desktop helper always includes a `text` field, even for events without text content.
+
+## BLE OTA
+
+The firmware uses a custom OTA channel over the same Voice Stick service. The macOS app writes OTA `begin` and `end` frames with BLE write-with-response, and streams OTA `data` frames with write-without-response using CoreBluetooth flow control.
+The device sends progress notifications roughly every 32 KB of accepted firmware data.
+
+The 8 MB flash layout uses two 3 MB OTA app slots and keeps the remaining flash as a reserved SPIFFS data partition:
+
+| Name | Offset | Size |
+| --- | ---: | ---: |
+| `ota_0` | `0x10000` | 3 MB |
+| `ota_1` | `0x310000` | 3 MB |
+| `storage` | `0x610000` | 1984 KB |
+
+All multibyte fields are little-endian.
+
+```text
+struct OtaBeginFrame {
+  uint8_t  version;       // 1
+  uint8_t  type;          // 0x20 begin
+  uint16_t header_len;    // 12
+  uint32_t image_size;
+  uint32_t transfer_id;
+}
+
+struct OtaDataFrame {
+  uint8_t  version;       // 1
+  uint8_t  type;          // 0x21 data
+  uint16_t header_len;    // 12
+  uint32_t transfer_id;
+  uint32_t offset;
+  uint8_t  payload[];
+}
+
+struct OtaEndFrame {
+  uint8_t  version;       // 1
+  uint8_t  type;          // 0x22 end
+  uint16_t header_len;    // 12
+  uint32_t transfer_id;
+  uint32_t image_size;
+}
+
+struct OtaAbortFrame {
+  uint8_t  version;       // 1
+  uint8_t  type;          // 0x23 abort
+  uint16_t header_len;    // 8
+  uint32_t transfer_id;
+}
+```
+
+`ota_tx` sends a state frame:
+
+```text
+struct OtaStateFrame {
+  uint8_t  version;       // 1
+  uint8_t  type;          // 0x30 OTA state
+  uint16_t payload_len;
+  uint8_t  json[payload_len];
+}
+```
+
+OTA state events include:
+
+```json
+{"event":"ready","transfer_id":1,"size":1385760,"partition":"ota_1"}
+{"event":"progress","transfer_id":1,"written":32768,"size":1385760}
+{"event":"done","transfer_id":1,"reboot_ms":500}
+{"event":"error","code":"bad_offset","esp_err":258}
+{"event":"aborted"}
+```
+
+On the device display, OTA switches the normal idle/recording UI into an update state:
+
+- `Updating` with percentage while the image is being written.
+- `Rebooting` after the new boot partition is selected.
+
+While OTA is active, the device ignores push-to-talk input and pauses display dimming/deep sleep timers. After a successful transfer, the firmware waits about 500 ms after sending the `done` event and then calls `esp_restart()`.
+The desktop updater can cancel an in-progress transfer by sending `OtaAbortFrame`; the device aborts the OTA handle and keeps booting the current firmware.
 
 ## Runtime State Machine
 

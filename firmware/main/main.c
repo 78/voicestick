@@ -31,8 +31,10 @@ static const char *TAG = "voice_stick";
 #define DEEP_SLEEP_TIMEOUT_US (DEEP_SLEEP_TIMEOUT_MS * 1000ULL)
 
 static bool s_recording;
+static bool s_ota_updating;
 static bool s_display_dimmed;
 static bool s_recording_pm_locked;
+static bool s_ota_pm_locked;
 static bool s_battery_charging;
 static bool s_usb_powered;
 static esp_pm_lock_handle_t s_cpu_freq_lock;
@@ -53,10 +55,21 @@ typedef enum {
     APP_EVENT_POWER_IRQ,
     APP_EVENT_BATTERY_REFRESH,
     APP_EVENT_ENTER_DEEP_SLEEP,
+    APP_EVENT_OTA_BEGIN,
+    APP_EVENT_OTA_PROGRESS,
+    APP_EVENT_OTA_DONE,
+    APP_EVENT_OTA_END,
+} app_event_type_t;
+
+typedef struct {
+    app_event_type_t type;
+    uint32_t written;
+    uint32_t size;
 } app_event_t;
 
 static void update_battery_status(void);
-static void queue_app_event(app_event_t event);
+static void queue_app_event(app_event_type_t type);
+static void queue_app_event_with_ota(app_event_type_t type, uint32_t written, uint32_t size);
 
 static bool is_external_powered(void)
 {
@@ -106,6 +119,31 @@ static void release_recording_pm_locks(void)
     s_recording_pm_locked = false;
 }
 
+static esp_err_t acquire_ota_pm_locks(void)
+{
+    if (s_ota_pm_locked) {
+        return ESP_OK;
+    }
+
+    esp_err_t err = esp_pm_lock_acquire(s_cpu_freq_lock);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    s_ota_pm_locked = true;
+    return ESP_OK;
+}
+
+static void release_ota_pm_locks(void)
+{
+    if (!s_ota_pm_locked) {
+        return;
+    }
+
+    (void)esp_pm_lock_release(s_cpu_freq_lock);
+    s_ota_pm_locked = false;
+}
+
 static void restart_display_dim_timer(void)
 {
     if (!s_display_dim_timer) {
@@ -113,7 +151,7 @@ static void restart_display_dim_timer(void)
     }
 
     (void)esp_timer_stop(s_display_dim_timer);
-    if (!s_recording) {
+    if (!s_recording && !s_ota_updating) {
         esp_err_t err = esp_timer_start_once(s_display_dim_timer, DISPLAY_DIM_TIMEOUT_US);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "start dim timer failed: %s", esp_err_to_name(err));
@@ -128,7 +166,7 @@ static void restart_deep_sleep_timer(void)
     }
 
     (void)esp_timer_stop(s_deep_sleep_timer);
-    if (!s_recording && !is_external_powered()) {
+    if (!s_recording && !s_ota_updating && !is_external_powered()) {
         esp_err_t err = esp_timer_start_once(s_deep_sleep_timer, DEEP_SLEEP_TIMEOUT_US);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "start deep sleep timer failed: %s", esp_err_to_name(err));
@@ -155,7 +193,7 @@ static void note_activity(void)
 
 static void enter_deep_sleep(void)
 {
-    if (s_recording) {
+    if (s_recording || s_ota_updating || voice_ble_ota_is_active()) {
         restart_deep_sleep_timer();
         return;
     }
@@ -209,7 +247,8 @@ static void enter_deep_sleep(void)
 
 static void start_recording(void)
 {
-    if (s_recording || !voice_ble_is_connected()) {
+    if (s_recording || s_ota_updating || voice_ble_ota_is_active() ||
+        !voice_ble_is_connected()) {
         return;
     }
 
@@ -251,16 +290,31 @@ static void stop_recording(void)
     restart_deep_sleep_timer();
 }
 
-static void queue_app_event(app_event_t event)
+static void queue_app_event(app_event_type_t type)
+{
+    queue_app_event_with_ota(type, 0, 0);
+}
+
+static void queue_app_event_with_ota(app_event_type_t type, uint32_t written, uint32_t size)
 {
     if (s_app_event_queue) {
+        app_event_t event = {
+            .type = type,
+            .written = written,
+            .size = size,
+        };
         (void)xQueueSend(s_app_event_queue, &event, 0);
     }
 }
 
-static void queue_app_event_from_isr(app_event_t event, BaseType_t *high_task_woken)
+static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_task_woken)
 {
     if (s_app_event_queue) {
+        app_event_t event = {
+            .type = type,
+            .written = 0,
+            .size = 0,
+        };
         (void)xQueueSendFromISR(s_app_event_queue, &event, high_task_woken);
     }
 }
@@ -291,6 +345,25 @@ static void ble_connection_cb(bool connected)
     queue_app_event(connected ? APP_EVENT_BLE_CONNECTED : APP_EVENT_BLE_DISCONNECTED);
 }
 
+static void ble_ota_cb(voice_ble_ota_event_t event, uint32_t written, uint32_t size)
+{
+    switch (event) {
+    case VOICE_BLE_OTA_EVENT_BEGIN:
+        queue_app_event_with_ota(APP_EVENT_OTA_BEGIN, written, size);
+        break;
+    case VOICE_BLE_OTA_EVENT_PROGRESS:
+        queue_app_event_with_ota(APP_EVENT_OTA_PROGRESS, written, size);
+        break;
+    case VOICE_BLE_OTA_EVENT_DONE:
+        queue_app_event_with_ota(APP_EVENT_OTA_DONE, written, size);
+        break;
+    case VOICE_BLE_OTA_EVENT_ERROR:
+    case VOICE_BLE_OTA_EVENT_ABORT:
+        queue_app_event(APP_EVENT_OTA_END);
+        break;
+    }
+}
+
 static void app_event_task(void *arg)
 {
     (void)arg;
@@ -300,7 +373,7 @@ static void app_event_task(void *arg)
             continue;
         }
 
-        switch (event) {
+        switch (event.type) {
         case APP_EVENT_FRONT_DOWN:
             note_activity();
             start_recording();
@@ -320,8 +393,10 @@ static void app_event_task(void *arg)
             break;
         case APP_EVENT_BLE_DISCONNECTED:
             s_recording = false;
+            s_ota_updating = false;
             audio_pipeline_stop();
             release_recording_pm_locks();
+            release_ota_pm_locks();
             ui_status_set_pairing(voice_ble_device_name());
             break;
         case APP_EVENT_POWER_IRQ:
@@ -330,6 +405,35 @@ static void app_event_task(void *arg)
             break;
         case APP_EVENT_ENTER_DEEP_SLEEP:
             enter_deep_sleep();
+            break;
+        case APP_EVENT_OTA_BEGIN:
+            s_ota_updating = true;
+            if (s_recording) {
+                s_recording = false;
+                audio_pipeline_stop();
+                voice_ble_send_press_end(audio_pipeline_session_id());
+                release_recording_pm_locks();
+            }
+            esp_err_t ota_pm_err = acquire_ota_pm_locks();
+            if (ota_pm_err != ESP_OK) {
+                ESP_LOGW(TAG, "acquire OTA pm lock failed: %s", esp_err_to_name(ota_pm_err));
+            }
+            note_activity();
+            ui_status_set_ota_progress(event.written, event.size);
+            break;
+        case APP_EVENT_OTA_PROGRESS:
+            s_ota_updating = true;
+            ui_status_set_ota_progress(event.written, event.size);
+            break;
+        case APP_EVENT_OTA_DONE:
+            ui_status_set_ota_rebooting();
+            break;
+        case APP_EVENT_OTA_END:
+            s_ota_updating = false;
+            release_ota_pm_locks();
+            ui_status_set_idle();
+            restart_display_dim_timer();
+            restart_deep_sleep_timer();
             break;
         }
     }
@@ -348,7 +452,7 @@ static esp_err_t init_gpio_button(gpio_num_t gpio_num, button_handle_t *button)
 
 static esp_err_t init_buttons(void)
 {
-    s_app_event_queue = xQueueCreate(8, sizeof(app_event_t));
+    s_app_event_queue = xQueueCreate(12, sizeof(app_event_t));
     if (!s_app_event_queue) {
         return ESP_ERR_NO_MEM;
     }
@@ -387,7 +491,7 @@ static void display_dim_timer_cb(void *arg)
 {
     (void)arg;
 
-    if (!s_display_dimmed && !s_recording) {
+    if (!s_display_dimmed && !s_recording && !s_ota_updating) {
         esp_err_t err = ui_status_set_brightness(DISPLAY_DIM_BRIGHTNESS);
         if (err == ESP_OK) {
             s_display_dimmed = true;
@@ -522,6 +626,7 @@ void app_main(void)
     ESP_ERROR_CHECK(init_deep_sleep_timer());
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
+    voice_ble_set_ota_callback(ble_ota_cb);
 
     esp_err_t err = voice_ble_init();
     if (err != ESP_OK) {

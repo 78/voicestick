@@ -14,4 +14,6 @@ void ui_status_set_idle_dimmed(bool dimmed);
 void ui_status_set_recording(uint32_t session_id);
 void ui_status_set_battery(int level_percent, bool charging, bool usb_powered);
 void ui_status_set_partial_text(const char *text);
+void ui_status_set_ota_progress(uint32_t written, uint32_t size);
+void ui_status_set_ota_rebooting(void);
 void ui_status_set_error(const char *message);
