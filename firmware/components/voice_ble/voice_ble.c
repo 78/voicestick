@@ -438,6 +438,19 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             s_conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "connected handle=%u", s_conn_handle);
             stop_advertising();
+            // Some BLE centrals (notably WinRT on Windows) do not always
+            // initiate the ATT MTU exchange themselves. Without it the MTU
+            // stays at the BLE default of 23 bytes, which means our state
+            // notifications (~170+ bytes including device_info) get dropped
+            // by NimBLE with BLE_HS_EMSGSIZE before they ever reach the
+            // peer. Initiate the exchange from our side as a defensive
+            // measure so the link is usable for both audio and state.
+            {
+                int mtu_rc = ble_gattc_exchange_mtu(s_conn_handle, NULL, NULL);
+                if (mtu_rc != 0 && mtu_rc != BLE_HS_EALREADY) {
+                    ESP_LOGW(TAG, "mtu exchange request failed rc=%d", mtu_rc);
+                }
+            }
             if (s_connection_cb) {
                 s_connection_cb(true);
             }
@@ -473,16 +486,36 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == s_audio_attr_handle) {
             s_audio_subscribed = event->subscribe.cur_notify;
+            ESP_LOGI(TAG, "audio subscribe=%d", s_audio_subscribed);
         } else if (event->subscribe.attr_handle == s_state_attr_handle) {
             s_state_subscribed = event->subscribe.cur_notify;
+            ESP_LOGI(TAG, "state subscribe=%d", s_state_subscribed);
             if (s_state_subscribed) {
-                (void)voice_ble_send_device_info();
+                esp_err_t rc = voice_ble_send_device_info();
+                if (rc != ESP_OK) {
+                    // Most likely BLE_HS_EMSGSIZE because MTU is still 23.
+                    // We will retry from BLE_GAP_EVENT_MTU once the central
+                    // (or our own initiator) raises the MTU.
+                    ESP_LOGW(TAG, "device_info send failed err=0x%x; will retry on MTU update", rc);
+                }
             }
         }
         return 0;
 
     case BLE_GAP_EVENT_MTU:
-        ESP_LOGD(TAG, "mtu=%u", event->mtu.value);
+        ESP_LOGI(TAG, "mtu=%u", event->mtu.value);
+        // If the central enabled state notifications before MTU was
+        // negotiated, our initial device_info send was likely dropped
+        // because the JSON exceeded MTU - 3. Now that we know the real MTU,
+        // try again so the desktop client can finish the pairing handshake.
+        if (s_state_subscribed && event->mtu.value >= 64) {
+            esp_err_t rc = voice_ble_send_device_info();
+            if (rc != ESP_OK) {
+                ESP_LOGW(TAG, "device_info resend after mtu update failed err=0x%x", rc);
+            } else {
+                ESP_LOGI(TAG, "device_info resent after mtu update");
+            }
+        }
         return 0;
 
     default:
