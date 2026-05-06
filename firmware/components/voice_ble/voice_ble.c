@@ -12,7 +12,6 @@
 #include "esp_mac.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -35,9 +34,6 @@ static bool s_connected;
 static bool s_audio_subscribed;
 static bool s_state_subscribed;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static esp_timer_handle_t s_device_info_retry_timer;
-static bool s_device_info_pending;
-static int s_device_info_retry_count;
 static uint8_t s_own_addr_type;
 static uint16_t s_audio_attr_handle;
 static uint16_t s_state_attr_handle;
@@ -429,62 +425,6 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
     {0},
 };
 
-static void cancel_device_info_retry(void)
-{
-    s_device_info_pending = false;
-    s_device_info_retry_count = 0;
-    if (s_device_info_retry_timer) {
-        (void)esp_timer_stop(s_device_info_retry_timer);
-    }
-}
-
-static void schedule_device_info_retry(uint32_t delay_ms)
-{
-    if (!s_device_info_retry_timer) {
-        return;
-    }
-    (void)esp_timer_stop(s_device_info_retry_timer);
-    esp_err_t rc = esp_timer_start_once(s_device_info_retry_timer,
-                                        (uint64_t)delay_ms * 1000ULL);
-    if (rc != ESP_OK) {
-        ESP_LOGW(TAG, "device_info retry timer start failed err=0x%x", rc);
-    }
-}
-
-static void try_send_device_info(const char *origin)
-{
-    if (!s_state_subscribed) {
-        return;
-    }
-    esp_err_t rc = voice_ble_send_device_info();
-    if (rc == ESP_OK) {
-        ESP_LOGI(TAG, "device_info sent (%s, attempt=%d)",
-                 origin, s_device_info_retry_count + 1);
-        cancel_device_info_retry();
-        return;
-    }
-    s_device_info_pending = true;
-    if (s_device_info_retry_count >= 5) {
-        ESP_LOGE(TAG, "device_info giving up after %d attempts (last err=0x%x)",
-                 s_device_info_retry_count + 1, rc);
-        cancel_device_info_retry();
-        return;
-    }
-    s_device_info_retry_count += 1;
-    ESP_LOGW(TAG, "device_info send failed (%s, attempt=%d) err=0x%x; retry in 500ms",
-             origin, s_device_info_retry_count, rc);
-    schedule_device_info_retry(500);
-}
-
-static void device_info_retry_cb(void *arg)
-{
-    (void)arg;
-    if (!s_device_info_pending) {
-        return;
-    }
-    try_send_device_info("retry");
-}
-
 static int gap_event_cb(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
@@ -496,7 +436,6 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             s_audio_subscribed = false;
             s_state_subscribed = false;
             s_conn_handle = event->connect.conn_handle;
-            cancel_device_info_retry();
             ESP_LOGI(TAG, "connected handle=%u", s_conn_handle);
             stop_advertising();
             // Some BLE centrals (notably WinRT on Windows) do not always
@@ -538,7 +477,6 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_audio_subscribed = false;
         s_state_subscribed = false;
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        cancel_device_info_retry();
         start_advertising();
         if (s_connection_cb) {
             s_connection_cb(false);
@@ -558,26 +496,19 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         }
         if (event->subscribe.attr_handle == s_audio_attr_handle) {
             s_audio_subscribed = event->subscribe.cur_notify;
-            ESP_LOGI(TAG, "audio subscribe=%d", s_audio_subscribed);
         } else if (event->subscribe.attr_handle == s_state_attr_handle) {
             s_state_subscribed = event->subscribe.cur_notify;
-            ESP_LOGI(TAG, "state subscribe=%d", s_state_subscribed);
             if (s_state_subscribed) {
-                s_device_info_retry_count = 0;
-                try_send_device_info("subscribe");
-            } else {
-                cancel_device_info_retry();
+                esp_err_t rc = voice_ble_send_device_info();
+                if (rc != ESP_OK) {
+                    ESP_LOGW(TAG, "device_info send failed err=0x%x", rc);
+                }
             }
         }
         return 0;
 
     case BLE_GAP_EVENT_MTU:
-        ESP_LOGI(TAG, "mtu=%u", event->mtu.value);
-        // If state was already subscribed and a previous device_info attempt
-        // failed (e.g., MTU was still 23 at the time), nudge a retry now.
-        if (s_device_info_pending && event->mtu.value >= 64) {
-            try_send_device_info("mtu_update");
-        }
+        ESP_LOGD(TAG, "mtu=%u", event->mtu.value);
         return 0;
 
     default:
@@ -713,18 +644,6 @@ esp_err_t voice_ble_init(void)
     ESP_RETURN_ON_FALSE(rc == 0, ESP_FAIL, TAG, "count gatt failed rc=%d", rc);
     rc = ble_gatts_add_svcs(s_gatt_services);
     ESP_RETURN_ON_FALSE(rc == 0, ESP_FAIL, TAG, "add gatt failed rc=%d", rc);
-
-    if (!s_device_info_retry_timer) {
-        const esp_timer_create_args_t timer_args = {
-            .callback = &device_info_retry_cb,
-            .arg = NULL,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "voice_ble_dev_info",
-            .skip_unhandled_events = true,
-        };
-        ESP_RETURN_ON_ERROR(esp_timer_create(&timer_args, &s_device_info_retry_timer),
-                            TAG, "create device_info retry timer failed");
-    }
 
     nimble_port_freertos_init(nimble_host_task);
     ESP_LOGI(TAG, "BLE initialized as %s", s_device_name);
