@@ -37,7 +37,7 @@ static const char *TAG = "ui_status";
 #define LCD_PARAM_BITS 8
 #define LCD_BACKLIGHT_PWM_HZ 5000
 #define LCD_BACKLIGHT_PWM_MAX 255
-#define LCD_BACKLIGHT_DEFAULT 96
+#define LCD_BACKLIGHT_DEFAULT 128
 
 #define LVGL_DRAW_BUF_LINES 24
 #define LVGL_TICK_PERIOD_MS 10

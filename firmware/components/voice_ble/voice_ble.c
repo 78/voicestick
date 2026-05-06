@@ -31,6 +31,8 @@ static const char *TAG = "voice_ble";
 #define OTA_PROGRESS_NOTIFY_BYTES (32 * 1024)
 
 static bool s_connected;
+static bool s_audio_subscribed;
+static bool s_state_subscribed;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t s_own_addr_type;
 static uint16_t s_audio_attr_handle;
@@ -431,6 +433,8 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             s_connected = true;
+            s_audio_subscribed = false;
+            s_state_subscribed = false;
             s_conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "connected handle=%u", s_conn_handle);
             stop_advertising();
@@ -457,6 +461,8 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "OTA aborted after disconnect");
         }
         s_connected = false;
+        s_audio_subscribed = false;
+        s_state_subscribed = false;
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         start_advertising();
         if (s_connection_cb) {
@@ -465,11 +471,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
-        ESP_LOGD(TAG, "subscribe attr=%u notify=%d",
-                 event->subscribe.attr_handle, event->subscribe.cur_notify);
-        if (event->subscribe.attr_handle == s_state_attr_handle &&
-            event->subscribe.cur_notify) {
-            (void)voice_ble_send_device_info();
+        if (event->subscribe.attr_handle == s_audio_attr_handle) {
+            s_audio_subscribed = event->subscribe.cur_notify;
+        } else if (event->subscribe.attr_handle == s_state_attr_handle) {
+            s_state_subscribed = event->subscribe.cur_notify;
+            if (s_state_subscribed) {
+                (void)voice_ble_send_device_info();
+            }
         }
         return 0;
 
@@ -646,6 +654,11 @@ bool voice_ble_is_connected(void)
     return s_connected;
 }
 
+bool voice_ble_is_ready(void)
+{
+    return s_connected && s_audio_subscribed && s_state_subscribed;
+}
+
 bool voice_ble_ota_is_active(void)
 {
     return s_ota.active;
@@ -654,7 +667,7 @@ bool voice_ble_ota_is_active(void)
 esp_err_t voice_ble_send_audio(uint32_t session_id, uint32_t seq, uint8_t flags,
                                const uint8_t *opus_payload, size_t len)
 {
-    if (!s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+    if (!voice_ble_is_ready() || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         return ESP_ERR_INVALID_STATE;
     }
     if (len > UINT16_MAX) {
@@ -706,7 +719,7 @@ esp_err_t voice_ble_send_audio(uint32_t session_id, uint32_t seq, uint8_t flags,
 
 static esp_err_t send_state_json(const char *json)
 {
-    if (!s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+    if (!s_connected || !s_state_subscribed || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         return ESP_ERR_INVALID_STATE;
     }
 

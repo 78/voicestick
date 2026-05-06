@@ -25,12 +25,14 @@ static const char *TAG = "voice_stick";
 
 #define BATTERY_REFRESH_FALLBACK_MS (10 * 1000)
 #define DISPLAY_DIM_TIMEOUT_MS (30 * 1000)
-#define DISPLAY_ACTIVE_BRIGHTNESS 96
-#define DISPLAY_DIM_BRIGHTNESS 16
+#define DISPLAY_ACTIVE_BRIGHTNESS 128
+#define DISPLAY_DIM_BRIGHTNESS 32
 #define DISPLAY_DIM_TIMEOUT_US (DISPLAY_DIM_TIMEOUT_MS * 1000ULL)
 #define BATTERY_REFRESH_FALLBACK_US (BATTERY_REFRESH_FALLBACK_MS * 1000ULL)
 #define DEEP_SLEEP_TIMEOUT_MS (5 * 60 * 1000)
 #define DEEP_SLEEP_TIMEOUT_US (DEEP_SLEEP_TIMEOUT_MS * 1000ULL)
+#define HOST_RESPONSE_TIMEOUT_MS (8 * 1000)
+#define HOST_RESPONSE_TIMEOUT_US (HOST_RESPONSE_TIMEOUT_MS * 1000ULL)
 
 static bool s_recording;
 static bool s_ota_updating;
@@ -43,6 +45,7 @@ static esp_pm_lock_handle_t s_cpu_freq_lock;
 static esp_timer_handle_t s_display_dim_timer;
 static esp_timer_handle_t s_deep_sleep_timer;
 static esp_timer_handle_t s_battery_refresh_timer;
+static esp_timer_handle_t s_host_response_timer;
 static uint32_t s_session_id = 1;
 static QueueHandle_t s_app_event_queue;
 static button_handle_t s_front_button;
@@ -76,6 +79,7 @@ typedef enum {
     APP_EVENT_OTA_PROGRESS,
     APP_EVENT_OTA_DONE,
     APP_EVENT_OTA_END,
+    APP_EVENT_HOST_RESPONSE_TIMEOUT,
 } app_event_type_t;
 
 typedef struct {
@@ -211,6 +215,26 @@ static void note_activity(void)
     restart_deep_sleep_timer();
 }
 
+static void stop_host_response_timer(void)
+{
+    if (s_host_response_timer) {
+        (void)esp_timer_stop(s_host_response_timer);
+    }
+}
+
+static void restart_host_response_timer(void)
+{
+    if (!s_host_response_timer) {
+        return;
+    }
+
+    (void)esp_timer_stop(s_host_response_timer);
+    esp_err_t err = esp_timer_start_once(s_host_response_timer, HOST_RESPONSE_TIMEOUT_US);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "start host response timer failed: %s", esp_err_to_name(err));
+    }
+}
+
 static void enter_deep_sleep(void)
 {
     if (s_recording || s_ota_updating || voice_ble_ota_is_active()) {
@@ -268,7 +292,7 @@ static void enter_deep_sleep(void)
 static uint32_t start_recording(void)
 {
     if (s_recording || s_ota_updating || voice_ble_ota_is_active() ||
-        !voice_ble_is_connected() || s_app_ui_state != APP_UI_STATE_READY) {
+        !voice_ble_is_ready() || s_app_ui_state != APP_UI_STATE_READY) {
         return 0;
     }
 
@@ -423,6 +447,7 @@ static uint32_t elapsed_button_ms(int64_t down_us)
 
 static void apply_app_ui_state(const char *state, const char *text)
 {
+    stop_host_response_timer();
     if (strcmp(state, "ready") == 0) {
         s_app_ui_state = APP_UI_STATE_READY;
         ui_status_set_idle();
@@ -479,7 +504,13 @@ static void app_event_task(void *arg)
             note_activity();
             s_primary_down_us = esp_timer_get_time();
             s_primary_session_id = start_recording();
-            voice_ble_send_button_down("primary", s_primary_session_id);
+            esp_err_t primary_down_err = voice_ble_send_button_down("primary",
+                                                                    s_primary_session_id);
+            if (s_primary_session_id != 0 && primary_down_err != ESP_OK) {
+                (void)stop_recording();
+                s_primary_session_id = 0;
+                apply_app_ui_state("ready", "");
+            }
             break;
         case APP_EVENT_FRONT_UP:
             note_activity();
@@ -487,7 +518,15 @@ static void app_event_task(void *arg)
             if (s_recording) {
                 s_primary_session_id = stop_recording();
             }
-            voice_ble_send_button_up("primary", primary_duration_ms, s_primary_session_id);
+            esp_err_t primary_up_err = voice_ble_send_button_up("primary", primary_duration_ms,
+                                                                s_primary_session_id);
+            if (s_primary_session_id != 0 && primary_up_err != ESP_OK) {
+                apply_app_ui_state("ready", "");
+            } else if (s_primary_session_id != 0) {
+                s_app_ui_state = APP_UI_STATE_THINKING;
+                ui_status_set_partial_text("");
+                restart_host_response_timer();
+            }
             s_primary_down_us = 0;
             s_primary_session_id = 0;
             break;
@@ -513,6 +552,7 @@ static void app_event_task(void *arg)
             s_recording = false;
             s_ota_updating = false;
             s_app_ui_state = APP_UI_STATE_READY;
+            stop_host_response_timer();
             audio_pipeline_stop();
             release_recording_pm_locks();
             release_ota_pm_locks();
@@ -550,8 +590,16 @@ static void app_event_task(void *arg)
             s_ota_updating = false;
             release_ota_pm_locks();
             s_app_ui_state = APP_UI_STATE_READY;
+            stop_host_response_timer();
             ui_status_set_idle();
             note_activity();
+            break;
+        case APP_EVENT_HOST_RESPONSE_TIMEOUT:
+            if (!s_recording && (s_app_ui_state == APP_UI_STATE_RECORDING ||
+                                 s_app_ui_state == APP_UI_STATE_THINKING)) {
+                ESP_LOGW(TAG, "host response timeout, returning to ready");
+                apply_app_ui_state("ready", "");
+            }
             break;
         }
     }
@@ -641,6 +689,12 @@ static void deep_sleep_timer_cb(void *arg)
     queue_app_event(APP_EVENT_ENTER_DEEP_SLEEP);
 }
 
+static void host_response_timer_cb(void *arg)
+{
+    (void)arg;
+    queue_app_event(APP_EVENT_HOST_RESPONSE_TIMEOUT);
+}
+
 static esp_err_t init_deep_sleep_timer(void)
 {
     const esp_timer_create_args_t timer_args = {
@@ -648,6 +702,15 @@ static esp_err_t init_deep_sleep_timer(void)
         .name = "deep_sleep",
     };
     return esp_timer_create(&timer_args, &s_deep_sleep_timer);
+}
+
+static esp_err_t init_host_response_timer(void)
+{
+    const esp_timer_create_args_t timer_args = {
+        .callback = host_response_timer_cb,
+        .name = "host_response",
+    };
+    return esp_timer_create(&timer_args, &s_host_response_timer);
 }
 
 static void battery_refresh_timer_cb(void *arg)
@@ -747,6 +810,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ui_status_init());
     ESP_ERROR_CHECK(init_display_dim_timer());
     ESP_ERROR_CHECK(init_deep_sleep_timer());
+    ESP_ERROR_CHECK(init_host_response_timer());
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
     voice_ble_set_control_callback(ble_control_cb);
