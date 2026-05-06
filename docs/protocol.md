@@ -72,7 +72,7 @@ business actions such as "cancel" or "confirm"; the app owns that interpretation
 Currently emitted state events:
 
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.2.1","buttons":["primary","secondary"],"ui_states":["ready","recording","thinking","pending_confirmation","error"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.2.2","buttons":["primary","secondary"],"ui_states":["ready","recording","thinking","pending_confirmation","error"]}
 {"event":"button_down","button":"primary","session_id":1234}
 {"event":"button_up","button":"primary","duration_ms":620,"session_id":1234}
 {"event":"button_down","button":"secondary"}
