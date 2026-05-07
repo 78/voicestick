@@ -7,8 +7,8 @@
   "hero": {
     "eyebrow": "Portable BLE voice input",
     "title": "VoiceStick",
-    "lead": "A compact voice stick based on M5Stack StickS3. It connects to your Mac over BLE, uses the Doubao speech foundation model for recognition, and turns real-time feedback into text at your cursor.",
-    "download": "Download macOS DMG",
+    "lead": "A compact voice stick based on M5Stack StickS3. It connects to macOS or Windows over BLE, uses the Doubao speech foundation model for recognition, and turns real-time feedback into text at your cursor.",
+    "download": "Download apps",
     "flash": "Flash firmware online",
     "source": "View source",
     "imageAlt": "VoiceStick portable voice input device based on M5Stack StickS3"
@@ -31,7 +31,7 @@
   "story": {
     "eyebrow": "Small, portable, always nearby",
     "title": "Pick it up to speak. Put it down to keep writing.",
-    "body": "VoiceStick turns M5Stack StickS3 into a dedicated voice input button. Keep it near your keyboard, slip it into a pocket, or carry it with your Mac. Hold to talk, and the recognized text comes back to your cursor."
+    "body": "VoiceStick turns M5Stack StickS3 into a dedicated voice input button. Keep it near your keyboard, slip it into a pocket, or carry it with your laptop. Hold to talk, and the recognized text comes back to your cursor."
   },
   "flasher": {
     "eyebrow": "Direct browser connection",
@@ -81,8 +81,20 @@
   },
   "download": {
     "title": "Download the latest release",
-    "body": "After installing the macOS app, future versions can be offered through the built-in update checker.",
-    "cta": "Go to GitHub Release"
+    "body": "Install the desktop app for your platform. Future app updates are delivered through the built-in updater, and firmware updates are offered from the device menu.",
+    "mac": {
+      "platform": "macOS 12+",
+      "title": "VoiceStick for macOS",
+      "body": "Notarized DMG for the menu bar app, Sparkle updates, Bluetooth pairing, and OTA firmware updates.",
+      "cta": "Download DMG"
+    },
+    "windows": {
+      "platform": "Windows",
+      "title": "VoiceStick for Windows",
+      "body": "Signed MSI installer with WinSparkle updates, tray controls, Bluetooth pairing, and OTA firmware updates.",
+      "cta": "Download MSI"
+    },
+    "allReleases": "View all GitHub Release assets"
   },
   "footer": {
     "appcast": "Appcast"

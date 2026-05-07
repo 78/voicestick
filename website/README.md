@@ -52,7 +52,7 @@ https://78.github.io/voicestick/appcast.xml
    - `sparkle:edSignature`: content from `build/VoiceStick-<version>.signature`
    - `length`: byte size from `wc -c build/VoiceStick-<version>.zip`
 
-The homepage download button points at the latest GitHub Release so users can install the notarized DMG. The browser flasher reads the firmware manifest from `VITE_FIRMWARE_MANIFEST_URL` and uses `merged_url`; if the manifest cannot be loaded, it falls back to the versioned merged firmware URL derived from `website/package.json`.
+The homepage download section links directly to the current versioned macOS DMG and Windows MSI. Keep `website/package.json` in sync with the latest public release so those direct links and the firmware fallback URL point at the right version. The browser flasher reads the firmware manifest from `VITE_FIRMWARE_MANIFEST_URL` and uses `merged_url`; if the manifest cannot be loaded, it falls back to the versioned merged firmware URL derived from `website/package.json`.
 
 ## Develop
 

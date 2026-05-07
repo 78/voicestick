@@ -7,8 +7,8 @@
   "hero": {
     "eyebrow": "BLE 随身语音输入器",
     "title": "VoiceStick",
-    "lead": "基于 M5Stack StickS3 的小巧语音棒。通过 BLE 低功耗蓝牙连接 Mac，接入豆包语音大模型，并把实时反馈的文本输入到当前光标位置。",
-    "download": "下载 macOS DMG",
+    "lead": "基于 M5Stack StickS3 的小巧语音棒。通过 BLE 低功耗蓝牙连接 macOS 或 Windows，接入豆包语音大模型，并把实时反馈的文本输入到当前光标位置。",
+    "download": "下载客户端",
     "flash": "在线烧录固件",
     "source": "查看源码",
     "imageAlt": "VoiceStick 基于 M5Stack StickS3 的随身语音输入器"
@@ -31,7 +31,7 @@
   "story": {
     "eyebrow": "小巧玲珑，随身携带",
     "title": "拿起来就能说，放下继续写",
-    "body": "VoiceStick 把 M5Stack StickS3 变成一个独立的语音输入按钮。它可以挂在桌边、放进口袋，或者随笔记本一起带走；需要输入时按住说话，识别结果就回到 Mac 上。"
+    "body": "VoiceStick 把 M5Stack StickS3 变成一个独立的语音输入按钮。它可以挂在桌边、放进口袋，或者随笔记本一起带走；需要输入时按住说话，识别结果就回到当前光标位置。"
   },
   "flasher": {
     "eyebrow": "浏览器直连 StickS3",
@@ -81,8 +81,20 @@
   },
   "download": {
     "title": "下载最新版",
-    "body": "安装 macOS App 后，后续版本会通过内置更新检查自动提示。",
-    "cta": "前往 GitHub Release"
+    "body": "选择你的桌面平台安装。后续客户端版本会通过内置更新器提示，固件更新会在设备菜单中出现。",
+    "mac": {
+      "platform": "macOS 12+",
+      "title": "VoiceStick macOS 版",
+      "body": "已公证的 DMG 安装包，支持菜单栏应用、Sparkle 更新、蓝牙配对和 OTA 固件更新。",
+      "cta": "下载 DMG"
+    },
+    "windows": {
+      "platform": "Windows",
+      "title": "VoiceStick Windows 版",
+      "body": "已签名的 MSI 安装包，支持 WinSparkle 更新、托盘控制、蓝牙配对和 OTA 固件更新。",
+      "cta": "下载 MSI"
+    },
+    "allReleases": "查看 GitHub Release 全部文件"
   },
   "footer": {
     "appcast": "Appcast"

@@ -9,6 +9,9 @@ import packageInfo from '../package.json'
 const { locale, t } = useI18n()
 const releaseUrl = 'https://github.com/78/voicestick/releases/latest'
 const githubUrl = 'https://github.com/78/voicestick'
+const releaseDownloadBase = `https://github.com/78/voicestick/releases/download/v${packageInfo.version}`
+const macDownloadUrl = `${releaseDownloadBase}/VoiceStick-${packageInfo.version}.dmg`
+const windowsDownloadUrl = `${releaseDownloadBase}/VoiceStick_${packageInfo.version}.msi`
 const defaultFirmwareUrl = `https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/voicestick-firmware-sticks3-merged-${packageInfo.version}.bin`
 const firmwareManifestUrl = import.meta.env.VITE_FIRMWARE_MANIFEST_URL || 'https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/manifest.json'
 const firmwareUrl = ref(import.meta.env.VITE_FIRMWARE_URL || defaultFirmwareUrl)
@@ -181,7 +184,7 @@ async function flashFirmware() {
       </a>
       <nav>
         <a href="#flash">{{ t('nav.flash') }}</a>
-        <a :href="releaseUrl">{{ t('nav.download') }}</a>
+        <a href="#download">{{ t('nav.download') }}</a>
         <a :href="githubUrl">{{ t('nav.github') }}</a>
         <button class="language-button" type="button" :aria-label="t('language.label')" @click="toggleLanguage">
           {{ languageLabel }}
@@ -197,7 +200,7 @@ async function flashFirmware() {
         <h1>{{ t('hero.title') }}</h1>
         <p class="lead">{{ t('hero.lead') }}</p>
         <div class="actions">
-          <a class="button primary" :href="releaseUrl">{{ t('hero.download') }}</a>
+          <a class="button primary" href="#download">{{ t('hero.download') }}</a>
           <a class="button secondary" href="#flash">{{ t('hero.flash') }}</a>
           <a class="button secondary" :href="githubUrl">{{ t('hero.source') }}</a>
         </div>
@@ -280,11 +283,29 @@ async function flashFirmware() {
 
     <section class="download-band" id="download">
       <div class="section-inner download-inner">
-        <div>
+        <div class="download-copy">
           <h2>{{ t('download.title') }}</h2>
           <p>{{ t('download.body') }}</p>
         </div>
-        <a class="button primary" :href="releaseUrl">{{ t('download.cta') }}</a>
+        <div class="download-options">
+          <article class="download-card">
+            <div>
+              <span class="platform-label">{{ t('download.mac.platform') }}</span>
+              <h3>{{ t('download.mac.title') }}</h3>
+              <p>{{ t('download.mac.body') }}</p>
+            </div>
+            <a class="button primary" :href="macDownloadUrl">{{ t('download.mac.cta') }}</a>
+          </article>
+          <article class="download-card">
+            <div>
+              <span class="platform-label">{{ t('download.windows.platform') }}</span>
+              <h3>{{ t('download.windows.title') }}</h3>
+              <p>{{ t('download.windows.body') }}</p>
+            </div>
+            <a class="button primary" :href="windowsDownloadUrl">{{ t('download.windows.cta') }}</a>
+          </article>
+          <a class="release-link" :href="releaseUrl">{{ t('download.allReleases') }}</a>
+        </div>
       </div>
     </section>
   </main>
