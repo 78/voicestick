@@ -284,6 +284,11 @@ jobs:
             dist/VoiceStick-${{ steps.ver.outputs.version }}.zip
             dist/VoiceStick-${{ steps.ver.outputs.version }}.zip.sha256
             dist/VoiceStick-${{ steps.ver.outputs.version }}.signature
+            dist/voicestick-firmware-sticks3-ota-${{ steps.ver.outputs.version }}.bin
+            dist/voicestick-firmware-sticks3-ota-${{ steps.ver.outputs.version }}.bin.sha256
+            dist/voicestick-firmware-sticks3-merged-${{ steps.ver.outputs.version }}.bin
+            dist/voicestick-firmware-sticks3-merged-${{ steps.ver.outputs.version }}.bin.sha256
+            dist/manifest.json
 
   request-website-deploy:
     name: Request Website Deploy
