@@ -8,7 +8,8 @@
     "eyebrow": "Portable BLE voice input",
     "title": "VoiceStick",
     "lead": "A compact voice stick based on M5Stack StickS3. It connects to macOS or Windows over BLE, uses the Doubao speech foundation model for recognition, and turns real-time feedback into text at your cursor.",
-    "download": "Download apps",
+    "downloadMac": "Download macOS",
+    "downloadWindows": "Download Windows",
     "flash": "Flash firmware online",
     "source": "View source",
     "imageAlt": "VoiceStick portable voice input device based on M5Stack StickS3"
@@ -80,21 +81,9 @@
     }
   },
   "download": {
-    "title": "Download the latest release",
-    "body": "Install the desktop app for your platform. Future app updates are delivered through the built-in updater, and firmware updates are offered from the device menu.",
-    "mac": {
-      "platform": "macOS 12+",
-      "title": "VoiceStick for macOS",
-      "body": "Notarized DMG for the menu bar app, Sparkle updates, Bluetooth pairing, and OTA firmware updates.",
-      "cta": "Download DMG"
-    },
-    "windows": {
-      "platform": "Windows",
-      "title": "VoiceStick for Windows",
-      "body": "Signed MSI installer with WinSparkle updates, tray controls, Bluetooth pairing, and OTA firmware updates.",
-      "cta": "Download MSI"
-    },
-    "allReleases": "View all GitHub Release assets"
+    "title": "Need another file?",
+    "body": "GitHub Releases also include checksums, appcast assets, and firmware images.",
+    "cta": "View all release assets"
   },
   "footer": {
     "appcast": "Appcast"

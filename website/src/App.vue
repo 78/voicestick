@@ -200,7 +200,8 @@ async function flashFirmware() {
         <h1>{{ t('hero.title') }}</h1>
         <p class="lead">{{ t('hero.lead') }}</p>
         <div class="actions">
-          <a class="button primary" href="#download">{{ t('hero.download') }}</a>
+          <a class="button primary" :href="macDownloadUrl">{{ t('hero.downloadMac') }}</a>
+          <a class="button primary windows" :href="windowsDownloadUrl">{{ t('hero.downloadWindows') }}</a>
           <a class="button secondary" href="#flash">{{ t('hero.flash') }}</a>
           <a class="button secondary" :href="githubUrl">{{ t('hero.source') }}</a>
         </div>
@@ -283,29 +284,11 @@ async function flashFirmware() {
 
     <section class="download-band" id="download">
       <div class="section-inner download-inner">
-        <div class="download-copy">
+        <div>
           <h2>{{ t('download.title') }}</h2>
           <p>{{ t('download.body') }}</p>
         </div>
-        <div class="download-options">
-          <article class="download-card">
-            <div>
-              <span class="platform-label">{{ t('download.mac.platform') }}</span>
-              <h3>{{ t('download.mac.title') }}</h3>
-              <p>{{ t('download.mac.body') }}</p>
-            </div>
-            <a class="button primary" :href="macDownloadUrl">{{ t('download.mac.cta') }}</a>
-          </article>
-          <article class="download-card">
-            <div>
-              <span class="platform-label">{{ t('download.windows.platform') }}</span>
-              <h3>{{ t('download.windows.title') }}</h3>
-              <p>{{ t('download.windows.body') }}</p>
-            </div>
-            <a class="button primary" :href="windowsDownloadUrl">{{ t('download.windows.cta') }}</a>
-          </article>
-          <a class="release-link" :href="releaseUrl">{{ t('download.allReleases') }}</a>
-        </div>
+        <a class="button secondary" :href="releaseUrl">{{ t('download.cta') }}</a>
       </div>
     </section>
   </main>

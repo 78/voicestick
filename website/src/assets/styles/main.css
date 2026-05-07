@@ -152,6 +152,11 @@ h1 {
   border-color: var(--accent);
 }
 
+.button.windows {
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+}
+
 .button.secondary {
   color: var(--ink);
   background: var(--panel);
@@ -200,18 +205,10 @@ h1 {
   padding-top: 0;
 }
 
-h2,
-h3 {
-  margin: 0;
-  letter-spacing: 0;
-}
-
 h2 {
+  margin: 0;
   font-size: clamp(22px, 3vw, 32px);
-}
-
-h3 {
-  font-size: 20px;
+  letter-spacing: 0;
 }
 
 .features p,
@@ -227,53 +224,16 @@ h3 {
 }
 
 .download-inner {
-  display: grid;
-  grid-template-columns: minmax(260px, 0.72fr) minmax(320px, 1.28fr);
-  align-items: start;
-  gap: clamp(24px, 5vw, 54px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
   padding-top: clamp(34px, 6vw, 64px);
   padding-bottom: clamp(34px, 6vw, 64px);
 }
 
-.download-copy {
-  max-width: 420px;
-}
-
-.download-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.download-card {
-  min-height: 248px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 20px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-}
-
-.download-card .button {
-  width: 100%;
-}
-
-.platform-label {
-  display: block;
-  margin-bottom: 10px;
-  color: var(--accent-dark);
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.release-link {
-  grid-column: 1 / -1;
-  color: var(--accent-dark);
-  font-size: 15px;
-  font-weight: 720;
+.download-inner > div {
+  max-width: 620px;
 }
 
 .story {
@@ -430,7 +390,8 @@ footer {
   }
 
   .download-inner {
-    grid-template-columns: 1fr;
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .story-grid {
@@ -441,9 +402,6 @@ footer {
     grid-template-columns: 1fr;
   }
 
-  .download-copy {
-    max-width: none;
-  }
 }
 
 @media (max-width: 520px) {
@@ -465,9 +423,5 @@ footer {
 
   .product-visual {
     min-height: 500px;
-  }
-
-  .download-options {
-    grid-template-columns: 1fr;
   }
 }
