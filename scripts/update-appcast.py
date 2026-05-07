@@ -47,7 +47,6 @@ def main() -> None:
         </ul>
       ]]></description>
       <pubDate>{pub_date}</pubDate>
-      <sparkle:minimumSystemVersion>10.0</sparkle:minimumSystemVersion>
       <enclosure
         url="{html.escape(args.msi_url)}"
         sparkle:os="windows"
