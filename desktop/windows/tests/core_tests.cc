@@ -445,8 +445,7 @@ void TestCoordinatorPrimaryDuringFinalizingRefreshesThinking() {
     ble_ptr->on_audio_frame("5A74", AudioDataFrame(7, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
     ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 7));
-    assert(asr_ptr->started);
-    assert(asr_ptr->last_chunk_was_final);
+    assert(!asr_ptr->started);
 
     const auto before = ble_ptr->sent_ui_states.size();
     ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", std::nullopt));
@@ -454,6 +453,10 @@ void TestCoordinatorPrimaryDuringFinalizingRefreshesThinking() {
     assert(ble_ptr->sent_ui_states.size() == before + 1);
     assert(ble_ptr->sent_ui_states.back().state == "thinking");
     assert(ble_ptr->sent_ui_states.back().device_id == std::optional<std::string>("5A74"));
+
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(7, 2));
+    assert(asr_ptr->started);
+    assert(asr_ptr->last_chunk_was_final);
 }
 
 void TestCoordinatorSecondaryCancelsFinalizing() {
@@ -478,6 +481,31 @@ void TestCoordinatorSecondaryCancelsFinalizing() {
     assert(HasUiState(*ble_ptr, "ready", "5A74"));
 }
 
+void TestCoordinatorAcceptsAudioFramesAfterButtonUpUntilEnd() {
+    auto ble = std::make_unique<FakeBleCentral>();
+    auto* ble_ptr = ble.get();
+    auto asr = std::make_unique<FakeAsrClient>();
+    auto* asr_ptr = asr.get();
+    FakeUi ui;
+    FakeInputInjector input;
+    VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
+    coordinator.Start();
+
+    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 14));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(14, 1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(520));
+    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 14));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(14, 2));
+
+    assert(!asr_ptr->started);
+
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(14, 3));
+
+    assert(asr_ptr->started);
+    assert(asr_ptr->sent_chunks >= 3);
+    assert(asr_ptr->last_chunk_was_final);
+}
+
 void TestCoordinatorPrimaryPausesPendingConfirmation() {
     auto ble = std::make_unique<FakeBleCentral>();
     auto* ble_ptr = ble.get();
@@ -492,6 +520,7 @@ void TestCoordinatorPrimaryPausesPendingConfirmation() {
     ble_ptr->on_audio_frame("5A74", AudioDataFrame(9, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
     ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 9));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(9, 2));
     asr_ptr->on_final("hello");
 
     ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary"));
@@ -662,6 +691,7 @@ int main() {
     TestCoordinatorCancelsShortPrimaryPress();
     TestCoordinatorPrimaryDuringFinalizingRefreshesThinking();
     TestCoordinatorSecondaryCancelsFinalizing();
+    TestCoordinatorAcceptsAudioFramesAfterButtonUpUntilEnd();
     TestCoordinatorPrimaryPausesPendingConfirmation();
     TestCoordinatorOtherDeviceDuringRecordingGetsReady();
     TestCoordinatorSubtitleOutputSkipsPaste();

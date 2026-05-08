@@ -112,7 +112,7 @@ private:
     static constexpr float kTextLineHeightMultiplier = 1.5f;
     static constexpr float kTextBaselineMultiplier = 0.92f;
     static constexpr int kHintFontSize = 14;
-    static constexpr BYTE kBackgroundAlpha = 204;
+    static constexpr BYTE kBackgroundAlpha = 219;
     static constexpr BYTE kInkRgb = 40;
     static constexpr BYTE kTextAlpha = 216;
     static constexpr BYTE kHintAlpha = 108;

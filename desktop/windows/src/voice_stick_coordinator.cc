@@ -106,6 +106,7 @@ void VoiceStickCoordinator::Shutdown() {
     subtitle_cycles_.clear();
     active_subtitle_sessions_.clear();
     ui_->HideSubtitles();
+    CancelAudioEndTimeout();
     active_session_id_.reset();
     active_device_id_.reset();
     active_session_started_at_ = {};
@@ -368,13 +369,10 @@ void VoiceStickCoordinator::HandlePrimaryButtonUp(const std::string& device_id) 
     std::lock_guard lock(audio_mutex_);
     if (!active_session_id_.has_value() || active_device_id_ != device_id) return;
     const double duration = CurrentRecordingDurationSeconds();
-    active_session_id_.reset();
     if (duration < kMinimumRecordingDurationSeconds) {
         CancelShortRecording();
-    } else if (received_audio_frames_ == 0) {
-        FinishWithAsrError("No audio frames from device");
     } else {
-        SendFinalOggChunkIfNeeded(duration);
+        BeginWaitingForAudioEnd("button_up");
     }
 }
 
@@ -389,6 +387,7 @@ void VoiceStickCoordinator::HandleAudioFrame(const AudioFrame& frame, const std:
         return;
     }
     if (frame.IsEnd() && frame.payload.empty()) {
+        CancelAudioEndTimeout();
         SendFinalOggChunkIfNeeded(CurrentRecordingDurationSeconds());
         return;
     }
@@ -405,6 +404,7 @@ void VoiceStickCoordinator::HandleAudioFrame(const AudioFrame& frame, const std:
     debug_audio_recorder_.Append(ogg_chunk);
     SendOrBufferOggChunk(ogg_chunk, frame.IsEnd(), CurrentRecordingDurationSeconds() >= kMinimumRecordingDurationSeconds);
     if (frame.IsEnd()) {
+        CancelAudioEndTimeout();
         sent_final_audio_chunk_ = true;
         active_session_id_.reset();
         debug_audio_recorder_.Finish();
@@ -576,8 +576,14 @@ bool VoiceStickCoordinator::StartSubtitleAsrAndFlushBufferedChunks(SubtitleCycle
 void VoiceStickCoordinator::SendFinalOggChunkIfNeeded(double recording_duration_seconds) {
     if (sent_final_audio_chunk_) return;
     sent_final_audio_chunk_ = true;
+    CancelAudioEndTimeout();
     if (!asr_started_ && recording_duration_seconds < kMinimumRecordingDurationSeconds) {
         CancelShortRecording();
+        return;
+    }
+    if (received_audio_frames_ == 0) {
+        active_session_id_.reset();
+        FinishWithAsrError("No audio frames from device");
         return;
     }
     auto final_chunk = ogg_muxer_.Finish();
@@ -621,6 +627,9 @@ bool VoiceStickCoordinator::StartAsrAndFlushBufferedChunks(bool last_chunk_is_fi
 }
 
 void VoiceStickCoordinator::CancelShortRecording() {
+    active_session_id_.reset();
+    active_session_started_at_ = {};
+    CancelAudioEndTimeout();
     buffered_ogg_chunks_.clear();
     asr_->Cancel();
     debug_audio_recorder_.Discard();
@@ -816,7 +825,40 @@ void VoiceStickCoordinator::TransformText(const std::string& text,
     translator_.Translate(text, profile.translation_target, config_.asr_hotwords, std::move(completion));
 }
 
+void VoiceStickCoordinator::BeginWaitingForAudioEnd(std::string_view reason) {
+    if (waiting_for_audio_end_.load()) return;
+    waiting_for_audio_end_.store(true);
+    LogCoordinatorLine(std::string("waiting for audio END") +
+                       (reason.empty() ? std::string() : " reason=" + std::string(reason)));
+    EnterFinalizing("waiting_audio_end");
+    ScheduleAudioEndTimeout(active_session_id_, active_device_id_);
+}
+
+void VoiceStickCoordinator::ScheduleAudioEndTimeout(std::optional<std::uint32_t> session_id,
+                                                    std::optional<std::string> device_id) {
+    const auto generation = audio_end_wait_generation_.fetch_add(1) + 1;
+    std::thread([this, alive = alive_, generation, session_id, device_id = std::move(device_id)] {
+        std::this_thread::sleep_for(kAudioEndTimeout);
+        if (!alive->load()) return;
+        std::lock_guard lock(audio_mutex_);
+        if (audio_end_wait_generation_.load() != generation ||
+            !waiting_for_audio_end_.load() ||
+            active_session_id_ != session_id ||
+            active_device_id_ != device_id) {
+            return;
+        }
+        LogCoordinatorLine("audio END timeout; finalizing buffered audio");
+        SendFinalOggChunkIfNeeded(CurrentRecordingDurationSeconds());
+    }).detach();
+}
+
+void VoiceStickCoordinator::CancelAudioEndTimeout() {
+    waiting_for_audio_end_.store(false);
+    audio_end_wait_generation_.fetch_add(1);
+}
+
 void VoiceStickCoordinator::FinishWithAsrError(const std::string& message) {
+    CancelAudioEndTimeout();
     asr_->Cancel();
     pending_paste_state_ = {};
     active_session_id_.reset();
@@ -863,7 +905,12 @@ bool VoiceStickCoordinator::HandleFrontButtonDuringPendingPaste(const std::strin
 }
 
 void VoiceStickCoordinator::CancelPendingPaste(const std::string& device_id) {
-    if (active_session_id_.has_value()) return;
+    if (active_session_id_.has_value()) {
+        if (waiting_for_audio_end_.load() && active_device_id_ == device_id) {
+            CancelRecognitionInProgress();
+        }
+        return;
+    }
     if (IsWaitingForFinalText()) {
         if (active_device_id_ == device_id) CancelRecognitionInProgress();
         else RefreshDeviceUiState(device_id);
@@ -881,6 +928,8 @@ void VoiceStickCoordinator::CancelPendingPaste(const std::string& device_id) {
 
 void VoiceStickCoordinator::CancelRecognitionInProgress() {
     active_session_id_.reset();
+    active_session_started_at_ = {};
+    CancelAudioEndTimeout();
     asr_->Cancel();
     pending_paste_state_ = {};
     FinishRecognitionCycle();
@@ -902,6 +951,10 @@ void VoiceStickCoordinator::CancelActiveCycleIfDeviceDisconnected() {
         }
     }
     if (active_device_id_.has_value() && !ble_->IsConnected(*active_device_id_)) {
+        if (waiting_for_audio_end_.load()) {
+            SendFinalOggChunkIfNeeded(CurrentRecordingDurationSeconds());
+            return;
+        }
         asr_->Cancel();
         pending_paste_state_ = {};
         active_session_id_.reset();
@@ -912,6 +965,7 @@ void VoiceStickCoordinator::CancelActiveCycleIfDeviceDisconnected() {
 }
 
 void VoiceStickCoordinator::FinishRecognitionCycle() {
+    CancelAudioEndTimeout();
     asr_started_ = false;
     sent_final_audio_chunk_ = false;
     pasted_final_text_ = false;

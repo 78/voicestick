@@ -714,7 +714,13 @@ final class VolcengineASRClient: ASRClient {
 
         case .sessionFinished:
             guard response.sessionID == currentSessionID else { return }
-            let finalText = latestSessionTranscript
+            let finalText = response.payloadText.flatMap { text in
+                let transcript = extractTranscript(from: text)
+                return transcript.isEmpty ? nil : transcript
+            } ?? latestSessionTranscript
+            let definiteSegments = response.payloadText.map {
+                extractNewDefiniteSegments(from: $0)
+            } ?? []
             NSLog("ASR reusable session_finished session_id=\(response.sessionID ?? "") text_len=\(finalText.count)")
             currentSessionID = nil
             latestSessionTranscript = ""
@@ -722,6 +728,9 @@ final class VolcengineASRClient: ASRClient {
             queuedAudioChunks.removeAll(keepingCapacity: true)
             sessionState = .idle
             DispatchQueue.main.async { [weak self] in
+                for segment in definiteSegments {
+                    self?.onSegment?(segment)
+                }
                 self?.onFinal?(finalText)
             }
 

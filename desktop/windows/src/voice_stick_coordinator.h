@@ -219,6 +219,10 @@ private:
     void ShowSubtitleText(const std::string& text, const OutputProfile& profile, const std::string& device_id);
     void TransformText(const std::string& text, const OutputProfile& profile,
                        std::function<void(bool, std::string)> completion);
+    void BeginWaitingForAudioEnd(std::string_view reason);
+    void ScheduleAudioEndTimeout(std::optional<std::uint32_t> session_id,
+                                 std::optional<std::string> device_id);
+    void CancelAudioEndTimeout();
     void SendFinalOggChunkIfNeeded(double recording_duration_seconds);
     void SendOrBufferOggChunk(const ByteVector& chunk, bool is_last, bool can_start_asr);
     bool StartAsrAndFlushBufferedChunks(bool last_chunk_is_final);
@@ -274,6 +278,8 @@ private:
     bool asr_started_ = false;
     bool sent_final_audio_chunk_ = false;
     bool pasted_final_text_ = false;
+    std::atomic_bool waiting_for_audio_end_{false};
+    std::atomic_uint64_t audio_end_wait_generation_{0};
     PendingPasteState pending_paste_state_;
     std::optional<std::string> last_recoverable_text_;
     std::optional<std::string> last_recoverable_device_id_;
@@ -293,6 +299,7 @@ private:
     std::map<std::pair<std::string, std::uint32_t>, std::unique_ptr<SubtitleCycle>> subtitle_cycles_;
     std::map<std::string, std::uint32_t> active_subtitle_sessions_;
     static constexpr double kMinimumRecordingDurationSeconds = 0.5;
+    static constexpr std::chrono::milliseconds kAudioEndTimeout{1000};
     static constexpr std::chrono::hours kFirmwareManifestCacheDuration{24};
 };
 

@@ -947,3 +947,25 @@ esp_err_t voice_ble_send_button_up(const char *button, uint32_t duration_ms,
     }
     return send_state_json(json);
 }
+
+esp_err_t voice_ble_send_button_click(const char *button, uint32_t duration_ms,
+                                      uint32_t session_id)
+{
+    char json[128];
+    if (session_id > 0) {
+        snprintf(json, sizeof(json),
+                 "{\"event\":\"button_click\",\"button\":\"%s\","
+                 "\"duration_ms\":%" PRIu32 ",\"session_id\":%" PRIu32 "}",
+                 button, duration_ms, session_id);
+    } else if (duration_ms > 0) {
+        snprintf(json, sizeof(json),
+                 "{\"event\":\"button_click\",\"button\":\"%s\",\"duration_ms\":%" PRIu32 "}",
+                 button, duration_ms);
+    } else {
+        snprintf(json, sizeof(json),
+                 "{\"event\":\"button_click\",\"button\":\"%s\"}", button);
+    }
+    ESP_LOGI(TAG, "button click button=%s session=%" PRIu32 " duration_ms=%" PRIu32,
+             button, session_id, duration_ms);
+    return send_state_json(json);
+}

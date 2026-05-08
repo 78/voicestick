@@ -10,6 +10,7 @@ final class OverlayController {
     private var hideWorkItem: DispatchWorkItem?
     private var largestVisibleHeight: CGFloat?
     private var pendingHideCompletion: (() -> Void)?
+    private var presentationGeneration = 0
     private let horizontalPadding: CGFloat = 32
     private let verticalPadding: CGFloat = 24
     private let indicatorWidth: CGFloat = 34
@@ -108,7 +109,7 @@ final class OverlayController {
     }
 
     func showListening(text: String) {
-        show(mode: .listening, text: text.isEmpty ? "..." : text, hint: "", autoHideAfter: nil)
+        show(mode: .listening, text: text.isEmpty ? "Listening..." : text, hint: "", autoHideAfter: nil)
     }
 
     func showFinal(text: String, onHidden: (() -> Void)? = nil) {
@@ -149,10 +150,13 @@ final class OverlayController {
         hideWorkItem = nil
         let completion = onHidden ?? pendingHideCompletion
         pendingHideCompletion = nil
+        presentationGeneration += 1
+        let hideGeneration = presentationGeneration
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             window.animator().alphaValue = 0
         } completionHandler: {
+            guard self.presentationGeneration == hideGeneration else { return }
             self.window.orderOut(nil)
             self.largestVisibleHeight = nil
             completion?()
@@ -166,8 +170,9 @@ final class OverlayController {
         autoHideAfter delay: TimeInterval?,
         onHidden: (() -> Void)? = nil
     ) {
-        DispatchQueue.main.async {
+        let update = {
             self.hideWorkItem?.cancel()
+            self.presentationGeneration += 1
             self.pendingHideCompletion = onHidden
             self.indicator.setMode(mode)
             self.applyText(text, shouldWrap: true)
@@ -191,6 +196,11 @@ final class OverlayController {
                 self.hideWorkItem = workItem
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
             }
+        }
+        if Thread.isMainThread {
+            update()
+        } else {
+            DispatchQueue.main.async(execute: update)
         }
     }
 
@@ -334,7 +344,7 @@ final class OverlayController {
     private static func backgroundColor(for color: OverlayThemeColor) -> NSColor {
         switch color {
         case .white:
-            return NSColor.white.withAlphaComponent(0.8)
+            return NSColor.white.withAlphaComponent(0.86)
         case .pink:
             return NSColor(calibratedRed: 1.0, green: 0.84, blue: 0.9, alpha: 0.86)
         case .green:

@@ -32,6 +32,7 @@ static const char *TAG = "audio_pipeline";
 #define TX_RETRY_DELAY_MS 30
 #define TX_MAX_RETRIES 50
 #define TX_DRAIN_TIMEOUT_MS 500
+#define TASK_EXIT_WAIT_MS 800
 
 typedef struct {
     uint32_t session_id;
@@ -51,6 +52,25 @@ static QueueHandle_t s_tx_queue;
 static i2s_chan_handle_t s_rx_handle;
 static esp_codec_dev_handle_t s_codec;
 static OpusEncoder *s_opus_encoder;
+
+static bool tasks_exited(void)
+{
+    return s_audio_task == NULL && s_tx_task == NULL;
+}
+
+static esp_err_t wait_for_tasks_to_exit(TickType_t timeout_ticks)
+{
+    TickType_t deadline = xTaskGetTickCount() + timeout_ticks;
+    while (!tasks_exited()) {
+        if (xTaskGetTickCount() >= deadline) {
+            ESP_LOGW(TAG, "tasks still exiting: audio=%p tx=%p",
+                     s_audio_task, s_tx_task);
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return ESP_OK;
+}
 
 static esp_err_t init_i2s(void)
 {
@@ -291,7 +311,6 @@ drain:
 
         /* Send the END marker over BLE */
         voice_ble_send_audio(s_session_id, s_seq, VOICE_BLE_FLAG_END, NULL, 0);
-        voice_ble_request_slow_interval();
 
         ESP_LOGI(TAG, "tx task exit: sent=%" PRIu32 " dropped=%" PRIu32, sent, tx_dropped);
         s_tx_task = NULL;
@@ -323,6 +342,8 @@ esp_err_t audio_pipeline_start(uint32_t session_id)
     if (atomic_load(&s_running)) {
         return ESP_OK;
     }
+    ESP_RETURN_ON_ERROR(wait_for_tasks_to_exit(pdMS_TO_TICKS(TASK_EXIT_WAIT_MS)),
+                        TAG, "wait previous session exit");
 
     voice_ble_request_fast_interval();
 
@@ -331,7 +352,6 @@ esp_err_t audio_pipeline_start(uint32_t session_id)
     s_seq = 0;
     opus_encoder_ctl(s_opus_encoder, OPUS_RESET_STATE);
     atomic_store(&s_running, true);
-    ESP_LOGI(TAG, "start session %" PRIu32, session_id);
 
     BaseType_t ok = xTaskCreatePinnedToCore(tx_task, "audio_tx", 4096,
                                             NULL, 6, &s_tx_task, 0);
@@ -347,10 +367,17 @@ esp_err_t audio_pipeline_start(uint32_t session_id)
         atomic_store(&s_running, false);
         s_audio_task = NULL;
         /* Signal tx_task to exit */
-        audio_packet_t sentinel = { .flags = VOICE_BLE_FLAG_END, .len = 0 };
+        audio_packet_t sentinel = {
+            .session_id = s_session_id,
+            .seq = s_seq,
+            .flags = VOICE_BLE_FLAG_END,
+            .len = 0,
+        };
         xQueueSend(s_tx_queue, &sentinel, portMAX_DELAY);
+        (void)wait_for_tasks_to_exit(pdMS_TO_TICKS(TASK_EXIT_WAIT_MS));
         return ESP_ERR_NO_MEM;
     }
+    ESP_LOGI(TAG, "start session %" PRIu32, session_id);
     return ESP_OK;
 }
 

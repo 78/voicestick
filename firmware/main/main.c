@@ -31,8 +31,6 @@ static const char *TAG = "voice_stick";
 #define BATTERY_REFRESH_FALLBACK_US (BATTERY_REFRESH_FALLBACK_MS * 1000ULL)
 #define DEEP_SLEEP_TIMEOUT_MS (5 * 60 * 1000)
 #define DEEP_SLEEP_TIMEOUT_US (DEEP_SLEEP_TIMEOUT_MS * 1000ULL)
-#define HOST_RESPONSE_TIMEOUT_MS (8 * 1000)
-#define HOST_RESPONSE_TIMEOUT_US (HOST_RESPONSE_TIMEOUT_MS * 1000ULL)
 
 static bool s_recording;
 static bool s_ota_updating;
@@ -70,6 +68,23 @@ typedef enum {
 } interaction_mode_t;
 
 static interaction_mode_t s_interaction_mode = INTERACTION_MODE_HOLD_TO_TALK;
+
+static const char *app_ui_state_name(app_ui_state_t state)
+{
+    switch (state) {
+    case APP_UI_STATE_READY:
+        return "ready";
+    case APP_UI_STATE_RECORDING:
+        return "recording";
+    case APP_UI_STATE_THINKING:
+        return "thinking";
+    case APP_UI_STATE_PENDING_CONFIRMATION:
+        return "pending_confirmation";
+    case APP_UI_STATE_ERROR:
+        return "error";
+    }
+    return "unknown";
+}
 
 typedef enum {
     APP_EVENT_FRONT_DOWN,
@@ -230,19 +245,6 @@ static void stop_host_response_timer(void)
     }
 }
 
-static void restart_host_response_timer(void)
-{
-    if (!s_host_response_timer) {
-        return;
-    }
-
-    (void)esp_timer_stop(s_host_response_timer);
-    esp_err_t err = esp_timer_start_once(s_host_response_timer, HOST_RESPONSE_TIMEOUT_US);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "start host response timer failed: %s", esp_err_to_name(err));
-    }
-}
-
 static void enter_deep_sleep(void)
 {
     if (s_recording || s_ota_updating || voice_ble_ota_is_active()) {
@@ -297,10 +299,20 @@ static void enter_deep_sleep(void)
     esp_deep_sleep_start();
 }
 
+static bool app_ui_allows_recording_start(void)
+{
+    return s_app_ui_state != APP_UI_STATE_PENDING_CONFIRMATION;
+}
+
 static uint32_t start_recording(void)
 {
-    if (s_recording || s_ota_updating || voice_ble_ota_is_active() ||
-        !voice_ble_is_ready() || s_app_ui_state != APP_UI_STATE_READY) {
+    const bool ble_ready = voice_ble_is_ready();
+    const bool ota_active = voice_ble_ota_is_active();
+    const bool ui_allows_start = app_ui_allows_recording_start();
+    if (s_recording || s_ota_updating || ota_active || !ble_ready || !ui_allows_start) {
+        ESP_LOGW(TAG,
+                 "start recording denied: recording=%d ota=%d ble_ota=%d ble_ready=%d ui_state=%d",
+                 s_recording, s_ota_updating, ota_active, ble_ready, s_app_ui_state);
         return 0;
     }
 
@@ -375,6 +387,9 @@ static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_tas
 static void queue_ui_state_event(const char *state, const char *text)
 {
     if (!s_app_event_queue) {
+        ESP_LOGW(TAG, "drop ui_state state=%s text_len=%u: app queue unavailable",
+                 state ? state : "nil",
+                 (unsigned)(text ? strlen(text) : 0));
         return;
     }
 
@@ -387,7 +402,15 @@ static void queue_ui_state_event(const char *state, const char *text)
     if (text) {
         strlcpy(event.text, text, sizeof(event.text));
     }
-    (void)xQueueSend(s_app_event_queue, &event, 0);
+    ESP_LOGI(TAG, "queue ui_state state=%s text_len=%u current=%s recording=%d",
+             event.state[0] ? event.state : "nil",
+             (unsigned)strlen(event.text),
+             app_ui_state_name(s_app_ui_state),
+             s_recording);
+    if (xQueueSend(s_app_event_queue, &event, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "drop ui_state state=%s: app queue full",
+                 event.state[0] ? event.state : "nil");
+    }
 }
 
 static void front_button_down_cb(void *button_handle, void *usr_data)
@@ -465,11 +488,21 @@ static uint32_t elapsed_button_ms(int64_t down_us)
 
 static void apply_app_ui_state(const char *state, const char *text)
 {
+    ESP_LOGI(TAG, "apply ui_state state=%s text_len=%u current=%s recording=%d",
+             state ? state : "nil",
+             (unsigned)(text ? strlen(text) : 0),
+             app_ui_state_name(s_app_ui_state),
+             s_recording);
     stop_host_response_timer();
     if (strcmp(state, "ready") == 0) {
+        if (s_recording) {
+            ESP_LOGI(TAG, "ignore ready ui_state while recording");
+            return;
+        }
         s_app_ui_state = APP_UI_STATE_READY;
         ui_status_set_idle();
         note_activity();
+        voice_ble_request_slow_interval();
     } else if (strcmp(state, "recording") == 0) {
         s_app_ui_state = APP_UI_STATE_RECORDING;
         if (!s_recording) {
@@ -487,6 +520,9 @@ static void apply_app_ui_state(const char *state, const char *text)
     } else {
         ESP_LOGW(TAG, "unknown ui_state %s", state);
     }
+    ESP_LOGI(TAG, "applied ui_state current=%s recording=%d",
+             app_ui_state_name(s_app_ui_state),
+             s_recording);
 }
 
 static void apply_interaction_mode(interaction_mode_t mode)
@@ -535,22 +571,29 @@ static void app_event_task(void *arg)
             if (s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK && s_recording) {
                 const uint32_t primary_duration_ms = elapsed_button_ms(s_primary_down_us);
                 s_primary_session_id = stop_recording();
-                esp_err_t primary_up_err = voice_ble_send_button_up("primary", primary_duration_ms,
-                                                                    s_primary_session_id);
+                esp_err_t primary_up_err = voice_ble_send_button_click("primary", primary_duration_ms,
+                                                                       s_primary_session_id);
                 if (s_primary_session_id != 0 && primary_up_err != ESP_OK) {
                     apply_app_ui_state("ready", "");
-                } else if (s_primary_session_id != 0) {
-                    s_app_ui_state = APP_UI_STATE_THINKING;
-                    ui_status_set_partial_text("");
-                    restart_host_response_timer();
                 }
                 s_primary_down_us = 0;
                 s_primary_session_id = 0;
             } else {
                 s_primary_down_us = esp_timer_get_time();
+                if (s_app_ui_state == APP_UI_STATE_PENDING_CONFIRMATION) {
+                    ESP_LOGI(TAG, "button front down as pending confirmation control");
+                    s_primary_session_id = 0;
+                    (void)voice_ble_send_button_click("primary", 0, 0);
+                    break;
+                }
                 s_primary_session_id = start_recording();
-                esp_err_t primary_down_err = voice_ble_send_button_down("primary",
-                                                                        s_primary_session_id);
+                if (s_primary_session_id == 0) {
+                    s_primary_down_us = 0;
+                    break;
+                }
+                esp_err_t primary_down_err = s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK
+                    ? voice_ble_send_button_click("primary", 0, s_primary_session_id)
+                    : voice_ble_send_button_down("primary", s_primary_session_id);
                 if (s_primary_session_id != 0 && primary_down_err != ESP_OK) {
                     (void)stop_recording();
                     s_primary_session_id = 0;
@@ -564,6 +607,9 @@ static void app_event_task(void *arg)
             if (s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK) {
                 break;
             }
+            if (!s_recording && s_primary_session_id == 0 && s_primary_down_us == 0) {
+                break;
+            }
             const uint32_t primary_duration_ms = elapsed_button_ms(s_primary_down_us);
             if (s_recording) {
                 s_primary_session_id = stop_recording();
@@ -572,10 +618,6 @@ static void app_event_task(void *arg)
                                                                 s_primary_session_id);
             if (s_primary_session_id != 0 && primary_up_err != ESP_OK) {
                 apply_app_ui_state("ready", "");
-            } else if (s_primary_session_id != 0) {
-                s_app_ui_state = APP_UI_STATE_THINKING;
-                ui_status_set_partial_text("");
-                restart_host_response_timer();
             }
             s_primary_down_us = 0;
             s_primary_session_id = 0;
@@ -584,12 +626,11 @@ static void app_event_task(void *arg)
             ESP_LOGI(TAG, "button side down");
             note_activity();
             s_secondary_down_us = esp_timer_get_time();
-            voice_ble_send_button_down("secondary", 0);
             break;
         case APP_EVENT_SIDE_UP:
             ESP_LOGI(TAG, "button side up");
             note_activity();
-            voice_ble_send_button_up("secondary", elapsed_button_ms(s_secondary_down_us), 0);
+            voice_ble_send_button_click("secondary", elapsed_button_ms(s_secondary_down_us), 0);
             s_secondary_down_us = 0;
             break;
         case APP_EVENT_UI_STATE:
