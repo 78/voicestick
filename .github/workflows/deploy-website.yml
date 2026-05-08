@@ -37,7 +37,6 @@ jobs:
         working-directory: website
 
       - name: Update appcast from latest release
-        continue-on-error: true
         run: |
           set -euo pipefail
           curl -fsSL "https://78.github.io/voicestick/appcast.xml" \

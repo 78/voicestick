@@ -3,6 +3,7 @@ import argparse
 import email.utils
 import html
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,13 @@ def main() -> None:
     parser.add_argument("--output", default="website/public/appcast.xml")
     parser.add_argument("--release-notes", default="VoiceStick macOS release.")
     args = parser.parse_args()
+
+    if args.length <= 0:
+        sys.exit("Error: --length must be greater than 0 for Sparkle updates.")
+    if "REPLACE_WITH" in args.signature or not args.signature.strip():
+        sys.exit("Error: --signature must be a real Sparkle EdDSA signature.")
+    if args.msi_url and (not args.msi_length or args.msi_length <= 0):
+        sys.exit("Error: --msi-length must be greater than 0 when --msi-url is set.")
 
     notes = "".join(f"<li>{html.escape(line)}</li>" for line in args.release_notes.splitlines() if line.strip())
     if not notes:

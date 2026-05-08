@@ -107,12 +107,13 @@ else
 fi
 
 CODESIGN_IDENTITY="-"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID"; then
-    CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep "Developer ID" | head -1 | awk -F'"' '{print $2}')"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+    CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')"
 fi
 
 echo ""
 echo "Signing app..."
+xattr -cr "$APP_DIR" 2>/dev/null || true
 if [ "$CODESIGN_IDENTITY" != "-" ]; then
     echo "Using: $CODESIGN_IDENTITY"
     codesign --deep --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR"
@@ -121,16 +122,19 @@ else
     codesign --deep --force --options runtime --sign - "$APP_DIR"
 fi
 
+echo "Verifying app signature..."
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+
 ZIP_PATH="$BUILD_DIR/VoiceStick-${VERSION}.zip"
 SIGNATURE_PATH="${ZIP_PATH%.zip}.signature"
 STAGING_DIR="$BUILD_DIR/.sparkle-staging"
 rm -rf "$STAGING_DIR" "$ZIP_PATH" "$SIGNATURE_PATH"
 mkdir -p "$STAGING_DIR"
-cp -R "$APP_DIR" "$STAGING_DIR/VoiceStick.app"
+ditto --norsrc --noextattr "$APP_DIR" "$STAGING_DIR/VoiceStick.app"
 
 echo ""
 echo "Creating Sparkle ZIP..."
-ditto -c -k --keepParent "$STAGING_DIR/VoiceStick.app" "$ZIP_PATH"
+ditto -c -k --norsrc --noextattr --keepParent "$STAGING_DIR/VoiceStick.app" "$ZIP_PATH"
 rm -rf "$STAGING_DIR"
 
 SIGN_TOOL="$(find -L "$DESKTOP_DIR/.build-arm64/artifacts" -name sign_update -type f 2>/dev/null | head -1 || true)"

@@ -23,11 +23,12 @@ if [ ! -d "$APP_PATH" ]; then
 fi
 
 CODESIGN_IDENTITY="-"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID"; then
-    CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep "Developer ID" | head -1 | awk -F'"' '{print $2}')"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+    CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')"
 fi
 
 echo "Signing app before DMG packaging..."
+xattr -cr "$APP_PATH" 2>/dev/null || true
 if [ "$CODESIGN_IDENTITY" != "-" ]; then
     echo "Using: $CODESIGN_IDENTITY"
     codesign --deep --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_PATH"
@@ -36,9 +37,12 @@ else
     codesign --deep --force --options runtime --sign - "$APP_PATH"
 fi
 
+echo "Verifying app signature..."
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
 rm -rf "$STAGING_DIR" "$OUTPUT"
 mkdir -p "$STAGING_DIR"
-cp -R "$APP_PATH" "$STAGING_DIR/VoiceStick.app"
+ditto --norsrc --noextattr "$APP_PATH" "$STAGING_DIR/VoiceStick.app"
 ln -s /Applications "$STAGING_DIR/Applications"
 
 echo "Creating DMG..."
