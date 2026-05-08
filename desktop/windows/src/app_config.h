@@ -71,7 +71,7 @@ struct OutputProfile {
 };
 
 struct AppConfig {
-    static constexpr std::string_view minimum_compatible_firmware_version = "0.2.6";
+    static constexpr std::string_view minimum_compatible_firmware_version = "0.3.0";
 
     AsrProvider asr_provider = AsrProvider::kVolcengine;
     std::string voicestick_api_key;
