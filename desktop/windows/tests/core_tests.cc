@@ -137,6 +137,11 @@ public:
         errors.push_back(text);
         error_completion = std::move(on_complete);
     }
+    void ShowCloudUpgrade(const std::string& message,
+                          const std::string& url,
+                          const std::optional<std::string>&) override {
+        cloud_upgrades.push_back(message + "|" + url);
+    }
     void HideOverlay(std::function<void()> on_hidden = {}) override {
         ++hide_overlay_count;
         if (on_hidden) on_hidden();
@@ -158,6 +163,7 @@ public:
     std::vector<std::string> firmware_update_prompts;
     std::vector<std::string> paired_device_ids;
     std::vector<std::string> partials;
+    std::vector<std::string> cloud_upgrades;
     std::vector<std::string> final_countdowns;
     std::vector<std::string> paused_finals;
     std::vector<std::string> errors;
@@ -268,26 +274,38 @@ void TestOggMuxer() {
 void TestAsrProtocol() {
     AppConfig config = AppConfig::Defaults();
     config.asr_hotwords = {"小智", "VoiceStick"};
-    auto request = AsrProtocol::MakeClientRequestFrame(config);
-    assert(request.size() > 8);
+    auto event_payload = [](const ByteVector& frame, const std::string& session_id) {
+        const std::size_t payload_size_offset = 12 + session_id.size();
+        const auto payload_size = ReadBe32(std::span(frame.data() + payload_size_offset, 4));
+        const std::size_t payload_offset = payload_size_offset + 4;
+        assert(payload_size == frame.size() - payload_offset);
+        return std::string(reinterpret_cast<const char*>(frame.data() + payload_offset),
+                           frame.size() - payload_offset);
+    };
+
+    const std::string payload_session_id = "payload-session";
+    auto request = AsrProtocol::MakeStartSessionFrame(config, payload_session_id);
+    assert(request.size() > 16 + payload_session_id.size());
     assert(request[0] == 0x11);
     assert((request[1] >> 4) == 0x01);
-    const auto payload_size = ReadBe32(std::span(request.data() + 4, 4));
-    assert(payload_size == request.size() - 8);
-    const std::string payload(reinterpret_cast<const char*>(request.data() + 8), request.size() - 8);
+    assert(ReadBe32(std::span(request.data() + 4, 4)) == 100);
+    const auto payload = event_payload(request, payload_session_id);
     assert(payload.find("\"corpus\"") != std::string::npos);
     assert(payload.find("\\\"hotwords\\\"") != std::string::npos);
     assert(payload.find("\\\"word\\\":\\\"VoiceStick\\\"") != std::string::npos);
 
-    const std::string body = "{\"result\":{\"text\":\"hello\"}}";
-    ByteVector response = {0x11, 0x93, 0x10, 0x00};
-    AppendBe32(response, 1);
+    const std::string body =
+        "{\"error\":\"invalid_token\",\"message\":\"VoiceStick Cloud API key is invalid.\","
+        "\"upgrade_url\":\"https://example.test/upgrade\"}";
+    ByteVector response = {0x11, 0xf0, 0x10, 0x00};
+    AppendBe32(response, 44002);
     AppendBe32(response, static_cast<std::uint32_t>(body.size()));
     response.insert(response.end(), body.begin(), body.end());
     auto parsed = AsrProtocol::ParseResponse(response);
     assert(parsed.has_value());
-    assert(parsed->is_final);
-    assert(parsed->text == "hello");
+    assert(parsed->is_error);
+    assert(parsed->text == "ASR 44002: VoiceStick Cloud API key is invalid.");
+    assert(parsed->upgrade_url && *parsed->upgrade_url == "https://example.test/upgrade");
 
     auto start_connection = AsrProtocol::MakeStartConnectionFrame(config);
     assert(start_connection.size() > 12);
@@ -324,10 +342,9 @@ void TestAsrProtocol() {
     options.hotwords = {"VoiceStick"};
     options.show_utterances = true;
     options.result_type = AsrResultType::kSingle;
-    auto utterance_request = AsrProtocol::MakeClientRequestFrame(config, options);
-    const std::string utterance_payload(
-        reinterpret_cast<const char*>(utterance_request.data() + 8),
-        utterance_request.size() - 8);
+    const std::string utterance_session_id = "utterance-session";
+    auto utterance_request = AsrProtocol::MakeStartSessionFrame(config, utterance_session_id, options);
+    const auto utterance_payload = event_payload(utterance_request, utterance_session_id);
     assert(utterance_payload.find("\"show_utterances\":true") != std::string::npos);
     assert(utterance_payload.find("\"result_type\":\"single\"") != std::string::npos);
 
@@ -347,6 +364,7 @@ void TestAsrProtocol() {
 
 void TestAppConfig() {
     AppConfig cloud = AppConfig::Defaults();
+    assert(cloud.asr_provider == AsrProvider::kVoiceStickCloud);
     cloud.asr_provider = AsrProvider::kVoiceStickCloud;
     cloud.voicestick_cloud_url = "";
     assert(cloud.ActiveWebsocketUrl() == "wss://api.xiaozhi.me/voicestick/asr/");

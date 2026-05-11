@@ -44,6 +44,9 @@ public:
     void ShowError(const std::string& text,
                    const std::optional<std::string>& device_id,
                    std::function<void()> on_complete) override;
+    void ShowCloudUpgrade(const std::string& message,
+                          const std::string& url,
+                          const std::optional<std::string>& device_id) override;
     void HideOverlay(std::function<void()> on_hidden = {}) override;
     void ShowSubtitle(const std::string& text,
                       const std::string& device_id,

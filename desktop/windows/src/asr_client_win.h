@@ -45,16 +45,11 @@ private:
         bool is_last = false;
     };
 
-    bool StartLegacySession();
     bool StartReusableSession();
-    void CancelLegacySession();
     void CancelReusableSession();
     void ShutdownReusableConnection();
-    void RunWebSocket();
     void RunReusableWebSocket();
-    void FlushQueuedFrames(HINTERNET websocket);
     void FlushQueuedAudioChunks(HINTERNET websocket);
-    void ReceiveOne(HINTERNET websocket);
     void ReceiveOneReusable(HINTERNET websocket);
     void HandleReusableResponse(std::span<const std::uint8_t> data, HINTERNET websocket);
     void SendReusableAudio(std::span<const std::uint8_t> data, bool is_last);
@@ -75,7 +70,6 @@ private:
     std::atomic_bool cancelled_ = false;
     std::thread worker_;
     std::mutex mutex_;
-    std::vector<ByteVector> queued_frames_;
     std::vector<QueuedAudioChunk> queued_audio_chunks_;
     ConnectionState connection_state_ = ConnectionState::kDisconnected;
     SessionState session_state_ = SessionState::kIdle;

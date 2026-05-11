@@ -99,16 +99,6 @@ void AppendUtteranceSegments(cJSON* utterances, std::vector<AsrSegment>* segment
 
 } // namespace
 
-ByteVector AsrProtocol::MakeClientRequestFrame(const AppConfig& config,
-                                               const AsrSessionOptions& options) {
-    const std::string payload = SessionPayload(config, options);
-    return MakeBinaryFrame(0x01, 0x00, 0x01, 0x00, ByteVector(payload.begin(), payload.end()));
-}
-
-ByteVector AsrProtocol::MakeAudioFrame(std::span<const std::uint8_t> ogg_data, bool is_last) {
-    return MakeBinaryFrame(0x02, is_last ? 0x02 : 0x00, 0x00, 0x00, ogg_data);
-}
-
 ByteVector AsrProtocol::MakeStartConnectionFrame(const AppConfig& config,
                                                  const AsrSessionOptions& options) {
     const auto payload = ConnectionPayload(config, options);
@@ -310,21 +300,6 @@ std::string AsrProtocol::SessionPayload(const AppConfig& config, const AsrSessio
 std::string AsrProtocol::ConnectionPayload(const AppConfig& config, const AsrSessionOptions& options) {
     return "{\"namespace\":\"BidirectionalASR\",\"event\":0,\"req_params\":" +
            SessionPayload(config, options) + "}";
-}
-
-ByteVector AsrProtocol::MakeBinaryFrame(std::uint8_t message_type,
-                                          std::uint8_t flags,
-                                          std::uint8_t serialization,
-                                          std::uint8_t compression,
-                                          std::span<const std::uint8_t> payload) {
-    ByteVector frame;
-    frame.push_back(0x11);
-    frame.push_back(static_cast<std::uint8_t>((message_type << 4) | flags));
-    frame.push_back(static_cast<std::uint8_t>((serialization << 4) | compression));
-    frame.push_back(0x00);
-    AppendBe32(frame, static_cast<std::uint32_t>(payload.size()));
-    frame.insert(frame.end(), payload.begin(), payload.end());
-    return frame;
 }
 
 ByteVector AsrProtocol::MakeEventFrame(std::uint8_t message_type,

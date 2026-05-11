@@ -178,7 +178,7 @@ struct AppConfig {
 
     static var defaults: AppConfig {
         AppConfig(
-            asrProvider: .volcengine,
+            asrProvider: .voiceStickCloud,
             voiceStickAPIKey: "",
             voiceStickCloudURL: defaultVoiceStickCloudURL,
             volcengineAPIKey: "",

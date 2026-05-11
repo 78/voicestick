@@ -24,6 +24,11 @@
 	<string>12.0</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>VoiceStick uses Bluetooth to connect to the VoiceStick microphone.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>

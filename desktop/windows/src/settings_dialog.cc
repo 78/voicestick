@@ -1,8 +1,10 @@
 #include "settings_dialog.h"
 #include "dpi_util.h"
+#include "voice_stick_cloud_api_win.h"
 
 #include <ShlObj.h>
 #include <CommCtrl.h>
+#include <Shellapi.h>
 
 #include <algorithm>
 #include <iterator>
@@ -182,8 +184,19 @@ INT_PTR SettingsDialog::HandleMessage(UINT message, WPARAM w_param, LPARAM l_par
         case kIdChooseDir:
             ChooseDebugDirectory();
             return TRUE;
+        case kIdApplyTrialApiKey:
+            ApplyTrialApiKey();
+            return TRUE;
         case kIdProviderCombo:
-            if (HIWORD(w_param) == CBN_SELCHANGE) UpdateProviderVisibility();
+            if (HIWORD(w_param) == CBN_SELCHANGE) {
+                int idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
+                const auto& key = idx == 0 ? config_.voicestick_api_key : config_.volcengine_api_key;
+                SetWindowTextW(api_key_edit_, Utf16(key).c_str());
+                UpdateProviderVisibility();
+            }
+            return TRUE;
+        case kIdApiKeyEdit:
+            if (HIWORD(w_param) == EN_CHANGE) UpdateProviderVisibility();
             return TRUE;
         }
         break;
@@ -215,6 +228,7 @@ INT_PTR SettingsDialog::HandleMessage(UINT message, WPARAM w_param, LPARAM l_par
         hwnd_ = nullptr;
         provider_combo_ = nullptr;
         api_key_edit_ = nullptr;
+        apply_trial_button_ = nullptr;
         resource_combo_ = nullptr;
         hotwords_edit_ = nullptr;
         llm_base_url_edit_ = nullptr;
@@ -276,6 +290,7 @@ void SettingsDialog::DestroyControls() {
     label_controls_.clear();
     provider_combo_ = nullptr;
     api_key_edit_ = nullptr;
+    apply_trial_button_ = nullptr;
     resource_combo_ = nullptr;
     hotwords_edit_ = nullptr;
     llm_base_url_edit_ = nullptr;
@@ -319,8 +334,13 @@ void SettingsDialog::BuildControls() {
 
     remember_label(CreateLabel(hwnd_, L"API Key:", Dp(10), y + Dp(3), label_w,
                                Dp(20), instance_));
-    api_key_edit_ = remember(CreateEdit(hwnd_, ctrl_x, y, ctrl_w, Dp(24),
+    const int apply_btn_w = Dp(102);
+    api_key_edit_ = remember(CreateEdit(hwnd_, ctrl_x, y, ctrl_w - apply_btn_w - Dp(8), Dp(24),
                                         kIdApiKeyEdit, instance_, ES_PASSWORD));
+    apply_trial_button_ = remember(CreateButton(hwnd_, L"Apply Trial",
+                                                ctrl_x + ctrl_w - apply_btn_w, y,
+                                                apply_btn_w, Dp(24),
+                                                kIdApplyTrialApiKey, instance_));
     y += row_h + Dp(10);
 
     resource_label_ = remember_label(CreateLabel(hwnd_, L"Resource ID:", Dp(10),
@@ -452,6 +472,50 @@ void SettingsDialog::UpdateProviderVisibility() {
     bool is_volcengine = (idx == 1);
     ShowWindow(resource_combo_, is_volcengine ? SW_SHOW : SW_HIDE);
     ShowWindow(resource_label_, is_volcengine ? SW_SHOW : SW_HIDE);
+    const bool is_cloud = (idx == 0);
+    const bool api_key_empty = GetWindowText(api_key_edit_).empty();
+    ShowWindow(apply_trial_button_, is_cloud && api_key_empty ? SW_SHOW : SW_HIDE);
+}
+
+void SettingsDialog::ApplyTrialApiKey() {
+    int idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
+    if (idx != 0) return;
+
+    EnableWindow(apply_trial_button_, FALSE);
+    SetWindowTextW(apply_trial_button_, L"Applying...");
+    UpdateWindow(apply_trial_button_);
+
+    const std::string device_id = config_.paired_device_ids.empty()
+                                      ? std::string()
+                                      : config_.paired_device_ids.front();
+    auto result = ApplyVoiceStickCloudTrialApiKey(config_.voicestick_cloud_url, device_id);
+
+    SetWindowTextW(apply_trial_button_, L"Apply Trial");
+    EnableWindow(apply_trial_button_, TRUE);
+
+    if (!result.api_key.empty()) {
+        SetWindowTextW(api_key_edit_, Utf16(result.api_key).c_str());
+        UpdateProviderVisibility();
+        return;
+    }
+
+    if (!result.url.empty()) {
+        const auto wide_url = Utf16(result.url);
+        auto* shell_result = ShellExecuteW(hwnd_, L"open", wide_url.c_str(),
+                                           nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(shell_result) <= 32) {
+            MessageBoxW(hwnd_, L"Could not open the VoiceStick Cloud signup page.",
+                        L"Could Not Apply Trial API Key", MB_ICONERROR | MB_OK);
+        }
+        UpdateProviderVisibility();
+        return;
+    }
+
+    MessageBoxW(hwnd_, Utf16(result.error.empty()
+                             ? "Could not apply a trial API Key."
+                             : result.error).c_str(),
+                L"Could Not Apply Trial API Key", MB_ICONERROR | MB_OK);
+    UpdateProviderVisibility();
 }
 
 void SettingsDialog::ChooseDebugDirectory() {

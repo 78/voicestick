@@ -3,6 +3,7 @@ import AppKit
 final class SettingsWindowController: NSWindowController {
     private let providerPopup = NSPopUpButton()
     private let apiKeyField = NSTextField()
+    private let applyTrialAPIKeyButton = NSButton(title: "Apply Trial", target: nil, action: nil)
     private let resourcePopup = NSPopUpButton()
     private let hotwordsTextView = NSTextView()
     private let hotwordsScrollView = NSScrollView()
@@ -31,10 +32,20 @@ final class SettingsWindowController: NSWindowController {
         super.init(window: window)
         buildContent()
         loadConfigIntoFields()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(apiKeyFieldDidChange),
+            name: NSControl.textDidChangeNotification,
+            object: apiKeyField
+        )
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     func show() {
@@ -59,7 +70,8 @@ final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(sectionTitle("ASR"))
         configureProviderPopup()
         stack.addArrangedSubview(row(label: "Provider", control: providerPopup))
-        stack.addArrangedSubview(row(label: "API Key", control: apiKeyField))
+        configureApplyTrialAPIKeyButton()
+        stack.addArrangedSubview(row(label: "API Key", control: apiKeyControl()))
         configureResourcePopup()
         let resourceRow = row(label: "Resource ID", control: resourcePopup)
         self.resourceRow = resourceRow
@@ -126,15 +138,49 @@ final class SettingsWindowController: NSWindowController {
         providerPopup.action = #selector(providerSelectionChanged)
     }
 
+    private func configureApplyTrialAPIKeyButton() {
+        applyTrialAPIKeyButton.target = self
+        applyTrialAPIKeyButton.action = #selector(applyTrialAPIKey)
+    }
+
+    private func apiKeyControl() -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        apiKeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
+        applyTrialAPIKeyButton.widthAnchor.constraint(equalToConstant: 102).isActive = true
+        stack.addArrangedSubview(apiKeyField)
+        stack.addArrangedSubview(applyTrialAPIKeyButton)
+        return stack
+    }
+
     private func configureHotwordsTextView() {
         hotwordsScrollView.hasVerticalScroller = true
         hotwordsScrollView.borderType = .bezelBorder
-        hotwordsScrollView.documentView = hotwordsTextView
         hotwordsScrollView.heightAnchor.constraint(equalToConstant: 78).isActive = true
+        hotwordsScrollView.translatesAutoresizingMaskIntoConstraints = false
 
         hotwordsTextView.isRichText = false
+        hotwordsTextView.isEditable = true
+        hotwordsTextView.isSelectable = true
         hotwordsTextView.font = .systemFont(ofSize: 13)
+        hotwordsTextView.textColor = .textColor
+        hotwordsTextView.backgroundColor = .textBackgroundColor
+        hotwordsTextView.drawsBackground = true
         hotwordsTextView.textContainerInset = NSSize(width: 4, height: 4)
+        hotwordsTextView.minSize = NSSize(width: 0, height: hotwordsScrollView.contentSize.height)
+        hotwordsTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        hotwordsTextView.isVerticallyResizable = true
+        hotwordsTextView.isHorizontallyResizable = false
+        hotwordsTextView.autoresizingMask = [.width]
+        hotwordsTextView.frame = NSRect(origin: .zero, size: NSSize(width: 300, height: 78))
+        hotwordsTextView.textContainer?.containerSize = NSSize(
+            width: hotwordsTextView.frame.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        hotwordsTextView.textContainer?.widthTracksTextView = true
+        hotwordsScrollView.documentView = hotwordsTextView
     }
 
     private func loadConfigIntoFields() {
@@ -152,6 +198,7 @@ final class SettingsWindowController: NSWindowController {
             resourcePopup.selectItem(withTitle: config.resourceID)
         }
         updateProviderRows()
+        updateApplyTrialButton()
         statusLabel.stringValue = ""
     }
 
@@ -161,6 +208,50 @@ final class SettingsWindowController: NSWindowController {
         config.asrProvider = currentDisplayedProvider
         apiKeyField.stringValue = apiKey(for: currentDisplayedProvider)
         updateProviderRows()
+        updateApplyTrialButton()
+    }
+
+    @objc private func apiKeyFieldDidChange() {
+        updateApplyTrialButton()
+    }
+
+    @objc private func applyTrialAPIKey() {
+        saveDisplayedAPIKey()
+        guard currentDisplayedProvider == .voiceStickCloud else { return }
+
+        applyTrialAPIKeyButton.isEnabled = false
+        statusLabel.stringValue = "Applying trial API key..."
+        VoiceStickCloudAPI.applyTrialAPIKey(
+            cloudURL: config.voiceStickCloudURL,
+            deviceID: config.pairedDeviceIDs.first
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.applyTrialAPIKeyButton.isEnabled = true
+                switch result {
+                case .success(.apiKey(let apiKey)):
+                    self.config.voiceStickAPIKey = apiKey
+                    self.apiKeyField.stringValue = apiKey
+                    self.statusLabel.stringValue = "Trial API key applied."
+                    self.updateApplyTrialButton()
+                case .success(.url(let url)):
+                    self.statusLabel.stringValue = "Opened trial application page."
+                    if !NSWorkspace.shared.open(url) {
+                        self.showErrorAlert(
+                            title: "Could Not Open Trial Page",
+                            message: url.absoluteString
+                        )
+                    }
+                case .failure(let error):
+                    self.statusLabel.stringValue = ""
+                    self.showErrorAlert(
+                        title: "Could Not Apply Trial API Key",
+                        message: error.localizedDescription
+                    )
+                    self.updateApplyTrialButton()
+                }
+            }
+        }
     }
 
     @objc private func chooseDebugDirectory() {
@@ -206,7 +297,8 @@ final class SettingsWindowController: NSWindowController {
             statusLabel.stringValue = "Saved."
             window?.close()
         } catch {
-            statusLabel.stringValue = "Save failed: \(error.localizedDescription)"
+            statusLabel.stringValue = ""
+            showErrorAlert(title: "Could Not Save Settings", message: error.localizedDescription)
         }
     }
 
@@ -246,6 +338,26 @@ final class SettingsWindowController: NSWindowController {
 
     private func updateProviderRows() {
         resourceRow?.isHidden = currentDisplayedProvider != .volcengine
+        updateApplyTrialButton()
+    }
+
+    private func updateApplyTrialButton() {
+        let isCloud = currentDisplayedProvider == .voiceStickCloud
+        let isEmpty = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        applyTrialAPIKeyButton.isHidden = !(isCloud && isEmpty)
+    }
+
+    private func showErrorAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
     }
 
     private func sectionTitle(_ title: String) -> NSTextField {

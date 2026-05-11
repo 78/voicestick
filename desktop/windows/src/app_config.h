@@ -73,7 +73,7 @@ struct OutputProfile {
 struct AppConfig {
     static constexpr std::string_view minimum_compatible_firmware_version = "0.3.0";
 
-    AsrProvider asr_provider = AsrProvider::kVolcengine;
+    AsrProvider asr_provider = AsrProvider::kVoiceStickCloud;
     std::string voicestick_api_key;
     std::string voicestick_cloud_url = "wss://api.xiaozhi.me/voicestick/asr/";
     std::string volcengine_api_key;

@@ -81,7 +81,7 @@ public:
     std::function<void(AsrSegment)> on_segment;
     std::function<void(std::string)> on_final;
     std::function<void(std::string)> on_error;
-    std::function<void(std::string)> on_upgrade_url;
+    std::function<void(std::string, std::string)> on_upgrade_url;
 };
 
 class VoiceStickUi {
@@ -107,6 +107,9 @@ public:
     virtual void ShowError(const std::string& text,
                            const std::optional<std::string>& device_id,
                            std::function<void()> on_complete) = 0;
+    virtual void ShowCloudUpgrade(const std::string& message,
+                                  const std::string& url,
+                                  const std::optional<std::string>& device_id) = 0;
     virtual void HideOverlay(std::function<void()> on_hidden = {}) = 0;
     virtual void ShowSubtitle(const std::string& text,
                               const std::string& device_id,

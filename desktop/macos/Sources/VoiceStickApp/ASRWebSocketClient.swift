@@ -24,7 +24,7 @@ protocol ASRClient: AnyObject {
     var onSegment: ((ASRSegment) -> Void)? { get set }
     var onFinal: ((String) -> Void)? { get set }
     var onError: ((String) -> Void)? { get set }
-    var onUpgradeURL: ((URL) -> Void)? { get set }
+    var onUpgradeURL: ((URL, String) -> Void)? { get set }
 
     func start(options: ASRSessionOptions) -> Bool
     func sendOggOpusChunk(_ data: Data, isLast: Bool)
@@ -32,7 +32,7 @@ protocol ASRClient: AnyObject {
     func cancel()
 }
 
-final class VolcengineASRClient: ASRClient {
+final class ASRWebSocketClient: ASRClient {
     private enum ConnectionState {
         case disconnected
         case connecting
@@ -81,7 +81,7 @@ final class VolcengineASRClient: ASRClient {
     private let config: AppConfig
     private let resultType: ASRResultType
     private let showUtterances: Bool
-    private let queue = DispatchQueue(label: "VoiceStick.VolcengineASRClient")
+    private let queue = DispatchQueue(label: "VoiceStick.ASRWebSocketClient")
     private var webSocket: URLSessionWebSocketTask?
     private var connectionState: ConnectionState = .disconnected
     private var sessionState: SessionState = .idle
@@ -90,14 +90,12 @@ final class VolcengineASRClient: ASRClient {
     private var latestSessionTranscript = ""
     private var emittedDefiniteSegmentKeys: Set<String> = []
     private var sessionOptions = ASRSessionOptions()
-    private var sequence: Int32 = 0
-    private var finished = false
 
     var onPartial: ((String) -> Void)?
     var onSegment: ((ASRSegment) -> Void)?
     var onFinal: ((String) -> Void)?
     var onError: ((String) -> Void)?
-    var onUpgradeURL: ((URL) -> Void)?
+    var onUpgradeURL: ((URL, String) -> Void)?
 
     init(config: AppConfig, resultType: ASRResultType = .full, showUtterances: Bool = false) {
         self.config = config
@@ -111,14 +109,11 @@ final class VolcengineASRClient: ASRClient {
 
     @discardableResult
     func start(options: ASRSessionOptions) -> Bool {
-        if config.asrProvider == .volcengine {
-            return startReusableSession(options: options)
-        }
-        return startLegacySession(options: options)
+        startSession(options: options)
     }
 
-    private func startLegacySession(options: ASRSessionOptions) -> Bool {
-        let apiKey = activeAPIKey
+    private func startSession(options: ASRSessionOptions) -> Bool {
+        let apiKey = providerAPIKey
         guard !apiKey.isEmpty else {
             let message = "Missing ASR API key"
             NSLog("ASR config error: \(message)")
@@ -126,54 +121,18 @@ final class VolcengineASRClient: ASRClient {
             return false
         }
 
-        guard let url = URL(string: activeWebSocketURL) else {
-            onError?("Invalid ASR URL")
-            return false
-        }
-
-        var request = URLRequest(url: url)
-        let connectID = UUID().uuidString
-        request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
-        if config.asrProvider == .volcengine {
-            request.setValue(config.resourceID, forHTTPHeaderField: "X-Api-Resource-Id")
-        }
-        request.setValue(connectID, forHTTPHeaderField: "X-Api-Request-Id")
-        request.setValue("-1", forHTTPHeaderField: "X-Api-Sequence")
-
-        sequence = 0
-        sessionOptions = options
-        emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
-        finished = false
-        NSLog("ASR start provider=\(config.asrProvider.rawValue) connect_id=\(connectID)")
-        let task = URLSession.shared.webSocketTask(with: request)
-        webSocket = task
-        task.resume()
-        receiveLoop()
-        sendFullClientRequest()
-        return true
-    }
-
-    private func startReusableSession(options: ASRSessionOptions) -> Bool {
-        let apiKey = activeAPIKey
-        guard !apiKey.isEmpty else {
-            let message = "Missing ASR API key"
-            NSLog("ASR config error: \(message)")
-            onError?(message)
-            return false
-        }
-
-        guard URL(string: activeWebSocketURL) != nil else {
+        guard URL(string: providerWebSocketURL) != nil else {
             onError?("Invalid ASR URL")
             return false
         }
 
         queue.async { [weak self] in
-            self?.beginReusableSession(options: options)
+            self?.beginSession(options: options)
         }
         return true
     }
 
-    private var activeAPIKey: String {
+    private var providerAPIKey: String {
         switch config.asrProvider {
         case .voiceStickCloud:
             return config.voiceStickAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -182,7 +141,7 @@ final class VolcengineASRClient: ASRClient {
         }
     }
 
-    private var activeWebSocketURL: String {
+    private var providerWebSocketURL: String {
         switch config.asrProvider {
         case .voiceStickCloud:
             return config.voiceStickCloudURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -192,46 +151,24 @@ final class VolcengineASRClient: ASRClient {
     }
 
     func sendOggOpusChunk(_ data: Data, isLast: Bool) {
-        if config.asrProvider == .volcengine {
-            queue.async { [weak self] in
-                self?.sendReusableAudio(data, isLast: isLast)
-            }
-            return
+        queue.async { [weak self] in
+            self?.sendAudioChunk(data, isLast: isLast)
         }
-
-        if isLast {
-            finished = true
-        }
-        sendAudio(data, isLast: isLast)
     }
 
     func finish() {
-        if config.asrProvider == .volcengine {
-            queue.async { [weak self] in
-                self?.finishReusableSessionIfNeeded()
-            }
-            return
+        queue.async { [weak self] in
+            self?.finishSessionIfNeeded()
         }
-
-        guard !finished else { return }
-        finished = true
-        sendAudio(Data(), isLast: true)
     }
 
     func cancel() {
-        if config.asrProvider == .volcengine {
-            queue.async { [weak self] in
-                self?.cancelReusable()
-            }
-            return
+        queue.async { [weak self] in
+            self?.cancelSession()
         }
-
-        finished = true
-        webSocket?.cancel(with: .goingAway, reason: nil)
-        webSocket = nil
     }
 
-    private func beginReusableSession(options: ASRSessionOptions) {
+    private func beginSession(options: ASRSessionOptions) {
         guard sessionState == .idle else {
             notifyError("ASR session already active")
             return
@@ -248,31 +185,33 @@ final class VolcengineASRClient: ASRClient {
         case .ready:
             sendStartSession()
         case .disconnected:
-            connectReusableWebSocket()
+            connectWebSocket()
         case .connecting:
             break
         case .closing:
-            closeReusableWebSocket(sendFinishConnection: false)
-            connectReusableWebSocket()
+            closeWebSocket(sendFinishConnection: false)
+            connectWebSocket()
         }
     }
 
-    private func connectReusableWebSocket() {
-        guard let url = URL(string: activeWebSocketURL) else {
-            failReusableSession("Invalid ASR URL")
+    private func connectWebSocket() {
+        guard let url = URL(string: providerWebSocketURL) else {
+            failSession("Invalid ASR URL")
             return
         }
 
         var request = URLRequest(url: url)
         let connectID = UUID().uuidString
-        request.setValue(activeAPIKey, forHTTPHeaderField: "X-Api-Key")
+        request.setValue(providerAPIKey, forHTTPHeaderField: "X-Api-Key")
         request.setValue(config.resourceID, forHTTPHeaderField: "X-Api-Resource-Id")
+        if config.asrProvider == .voiceStickCloud, let deviceID = config.pairedDeviceIDs.first {
+            request.setValue(deviceID, forHTTPHeaderField: "X-Device-Id")
+        }
         request.setValue(connectID, forHTTPHeaderField: "X-Api-Request-Id")
         request.setValue("-1", forHTTPHeaderField: "X-Api-Sequence")
 
         connectionState = .connecting
-        finished = false
-        NSLog("ASR reusable connect provider=\(config.asrProvider.rawValue) request_id=\(connectID)")
+        NSLog("ASR websocket connect provider=\(config.asrProvider.rawValue) request_id=\(connectID)")
         let task = URLSession.shared.webSocketTask(with: request)
         webSocket = task
         task.resume()
@@ -282,22 +221,22 @@ final class VolcengineASRClient: ASRClient {
 
     private func sendStartSession() {
         guard let currentSessionID else {
-            failReusableSession("Missing ASR session ID")
+            failSession("Missing ASR session ID")
             return
         }
 
-        NSLog("ASR reusable start_session session_id=\(currentSessionID)")
+        NSLog("ASR websocket start_session session_id=\(currentSessionID)")
         sendEvent(.startSession, sessionID: currentSessionID, payload: sessionPayload())
     }
 
-    private func sendReusableAudio(_ data: Data, isLast: Bool) {
+    private func sendAudioChunk(_ data: Data, isLast: Bool) {
         switch sessionState {
         case .starting:
             queuedAudioChunks.append(QueuedAudioChunk(data: data, isLast: isLast))
         case .streaming:
             sendTaskRequest(data)
             if isLast {
-                finishReusableSessionIfNeeded()
+                finishSessionIfNeeded()
             }
         case .finishing:
             break
@@ -312,12 +251,12 @@ final class VolcengineASRClient: ASRClient {
         for chunk in chunks {
             sendTaskRequest(chunk.data)
             if chunk.isLast {
-                finishReusableSessionIfNeeded()
+                finishSessionIfNeeded()
             }
         }
     }
 
-    private func finishReusableSessionIfNeeded() {
+    private func finishSessionIfNeeded() {
         if sessionState == .starting {
             if !queuedAudioChunks.contains(where: \.isLast) {
                 queuedAudioChunks.append(QueuedAudioChunk(data: Data(), isLast: true))
@@ -327,11 +266,11 @@ final class VolcengineASRClient: ASRClient {
         guard sessionState == .streaming else { return }
         guard let currentSessionID else { return }
         sessionState = .finishing
-        NSLog("ASR reusable finish_session session_id=\(currentSessionID)")
+        NSLog("ASR websocket finish_session session_id=\(currentSessionID)")
         sendEvent(.finishSession, sessionID: currentSessionID, payload: connectionPayload())
     }
 
-    private func cancelReusable() {
+    private func cancelSession() {
         if sessionState == .starting || sessionState == .streaming || sessionState == .finishing {
             if let currentSessionID {
                 sendEvent(.cancelSession, sessionID: currentSessionID, payload: connectionPayload())
@@ -345,14 +284,13 @@ final class VolcengineASRClient: ASRClient {
         sessionState = .idle
     }
 
-    private func closeReusableWebSocket(sendFinishConnection: Bool) {
+    private func closeWebSocket(sendFinishConnection: Bool) {
         guard let task = webSocket else {
             connectionState = .disconnected
             return
         }
 
         let shouldSendFinishConnection = sendFinishConnection && connectionState == .ready
-        finished = true
         connectionState = .closing
         if shouldSendFinishConnection {
             sendEvent(.finishConnection, sessionID: nil, payload: connectionPayload(), closeAfterSend: true)
@@ -364,13 +302,13 @@ final class VolcengineASRClient: ASRClient {
         connectionState = .disconnected
     }
 
-    private func failReusableSession(_ message: String) {
+    private func failSession(_ message: String) {
         queuedAudioChunks.removeAll(keepingCapacity: true)
         latestSessionTranscript = ""
         emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
         currentSessionID = nil
         sessionState = .idle
-        closeReusableWebSocket(sendFinishConnection: false)
+        closeWebSocket(sendFinishConnection: false)
         notifyError(message)
     }
 
@@ -378,45 +316,6 @@ final class VolcengineASRClient: ASRClient {
         DispatchQueue.main.async { [weak self] in
             self?.onError?(message)
         }
-    }
-
-    private func sendFullClientRequest() {
-        var request: [String: Any] = [
-            "model_name": "bigmodel",
-            "enable_nonstream": true,
-            "show_utterances": sessionOptions.showUtterances,
-            "result_type": sessionOptions.resultType.rawValue,
-            "enable_ddc": true
-        ]
-        addHotwordsIfNeeded(to: &request)
-
-        let payload: [String: Any] = [
-            "user": ["uid": "voice-stick-local"],
-            "audio": ["format": "ogg", "codec": "opus", "rate": 16_000, "bits": 16, "channel": 1],
-            "request": request
-        ]
-
-        guard let payloadData = try? JSONSerialization.data(withJSONObject: payload) else {
-            onError?("Invalid ASR request JSON")
-            return
-        }
-        sendBinaryFrame(
-            messageType: 0x01,
-            flags: 0x00,
-            serialization: 0x01,
-            compression: 0x01,
-            payload: payloadData
-        )
-    }
-
-    private func sendAudio(_ data: Data, isLast: Bool) {
-        sendBinaryFrame(
-            messageType: 0x02,
-            flags: isLast ? 0x02 : 0x00,
-            serialization: 0x00,
-            compression: 0x01,
-            payload: data
-        )
     }
 
     private func sendEvent(
@@ -427,7 +326,7 @@ final class VolcengineASRClient: ASRClient {
     ) {
         let requestPayload = event == .startSession ? sessionPayload() : payload
         guard let payloadData = try? JSONSerialization.data(withJSONObject: requestPayload) else {
-            failReusableSession("Invalid ASR request JSON")
+            failSession("Invalid ASR request JSON")
             return
         }
 
@@ -461,7 +360,7 @@ final class VolcengineASRClient: ASRClient {
         closeAfterSend: Bool = false
     ) {
         guard let sendingTask = webSocket else {
-            failReusableSession("ASR WebSocket is not connected")
+            failSession("ASR WebSocket is not connected")
             return
         }
 
@@ -484,7 +383,7 @@ final class VolcengineASRClient: ASRClient {
                 if let error {
                     NSLog("ASR send event error: \(error.localizedDescription)")
                     self?.queue.async {
-                        self?.failReusableSession(error.localizedDescription)
+                        self?.failSession(error.localizedDescription)
                     }
                     return
                 }
@@ -499,37 +398,7 @@ final class VolcengineASRClient: ASRClient {
             }
         } catch {
             NSLog("ASR gzip error: \(error.localizedDescription)")
-            failReusableSession(error.localizedDescription)
-        }
-    }
-
-    private func sendBinaryFrame(
-        messageType: UInt8,
-        flags: UInt8,
-        serialization: UInt8,
-        compression: UInt8,
-        payload: Data
-    ) {
-        do {
-            let compressed = try payload.gzipCompressed()
-            var frame = Data()
-            frame.append(0x11)
-            frame.append((messageType << 4) | flags)
-            frame.append((serialization << 4) | compression)
-            frame.append(0x00)
-            frame.append(contentsOf: UInt32(compressed.count).bigEndianBytes)
-            frame.append(compressed)
-            webSocket?.send(.data(frame)) { [weak self] error in
-                if let error {
-                    NSLog("ASR send error: \(error.localizedDescription)")
-                    if self?.finished != true {
-                        self?.onError?(error.localizedDescription)
-                    }
-                }
-            }
-        } catch {
-            NSLog("ASR gzip error: \(error.localizedDescription)")
-            onError?(error.localizedDescription)
+            failSession(error.localizedDescription)
         }
     }
 
@@ -547,18 +416,12 @@ final class VolcengineASRClient: ASRClient {
             case .failure(let error):
                 self.queue.async {
                     guard self.webSocket === receivingTask else { return }
-                    if !self.finished {
-                        NSLog("ASR receive error: \(error.localizedDescription)")
-                        if self.config.asrProvider == .volcengine {
-                            if self.sessionState == .idle {
-                                self.webSocket = nil
-                                self.connectionState = .disconnected
-                            } else {
-                                self.failReusableSession(error.localizedDescription)
-                            }
-                        } else {
-                            self.onError?(error.localizedDescription)
-                        }
+                    NSLog("ASR receive error: \(error.localizedDescription)")
+                    if self.sessionState == .idle || self.connectionState == .closing {
+                        self.webSocket = nil
+                        self.connectionState = .disconnected
+                    } else {
+                        self.failSession(error.localizedDescription)
                     }
                 }
             }
@@ -568,13 +431,9 @@ final class VolcengineASRClient: ASRClient {
     private func handle(_ message: URLSessionWebSocketTask.Message) {
         switch message {
         case .string(let text):
-            handleASRText(text, isFinalResponse: false)
+            NSLog("ASR ignored text response bytes=\(text.utf8.count)")
         case .data(let data):
-            if config.asrProvider == .volcengine {
-                handleReusableBinaryResponse(data)
-            } else {
-                handleBinaryResponse(data)
-            }
+            handleBinaryResponse(data)
         @unknown default:
             break
         }
@@ -582,67 +441,7 @@ final class VolcengineASRClient: ASRClient {
 
     private func handleBinaryResponse(_ data: Data) {
         guard data.count >= 4 else {
-            onError?("Short ASR response")
-            return
-        }
-
-        let messageType = data[1] >> 4
-        let flags = data[1] & 0x0f
-        let compression = data[2] & 0x0f
-        var offset = Int(data[0] & 0x0f) * 4
-
-        switch messageType {
-        case 0x09:
-            if flags == 0x01 || flags == 0x03 {
-                guard data.count >= offset + 4 else { return }
-                sequence = Int32(bigEndianBytes: data[offset..<(offset + 4)])
-                offset += 4
-            }
-            guard data.count >= offset + 4 else { return }
-            let payloadSize = Int(UInt32(bigEndianBytes: data[offset..<(offset + 4)]))
-            offset += 4
-            guard data.count >= offset + payloadSize else { return }
-            let payload = data.subdata(in: offset..<(offset + payloadSize))
-            do {
-                let body = compression == 0x01 ? try payload.gzipDecompressed() : payload
-                if let text = String(data: body, encoding: .utf8) {
-                    logASRResponse(text, isFinalResponse: flags == 0x03)
-                    handleASRText(text, isFinalResponse: flags == 0x03)
-                }
-            } catch {
-                NSLog("ASR decompress error: \(error.localizedDescription)")
-                onError?(error.localizedDescription)
-            }
-
-        case 0x0f:
-            guard data.count >= offset + 8 else {
-                onError?("Malformed ASR error response")
-                return
-            }
-            let code = UInt32(bigEndianBytes: data[offset..<(offset + 4)])
-            offset += 4
-            let messageSize = Int(UInt32(bigEndianBytes: data[offset..<(offset + 4)]))
-            offset += 4
-            guard data.count >= offset + messageSize else {
-                onError?("Malformed ASR error response")
-                return
-            }
-            let message = String(data: data.subdata(in: offset..<(offset + messageSize)), encoding: .utf8) ?? "Unknown ASR error"
-            NSLog("ASR server error code=\(code): \(message)")
-            let parsedError = parsedErrorMessage(code: code, message: message)
-            onError?(parsedError.message)
-            if let upgradeURL = parsedError.upgradeURL {
-                onUpgradeURL?(upgradeURL)
-            }
-
-        default:
-            NSLog("ASR unhandled response type=\(messageType) bytes=\(data.count)")
-        }
-    }
-
-    private func handleReusableBinaryResponse(_ data: Data) {
-        guard data.count >= 4 else {
-            failReusableSession("Short ASR response")
+            failSession("Short ASR response")
             return
         }
 
@@ -652,16 +451,16 @@ final class VolcengineASRClient: ASRClient {
         var offset = Int(data[0] & 0x0f) * 4
 
         if messageType == 0x0f {
-            handleReusableErrorResponse(data, offset: offset, compression: compression)
+            handleErrorResponse(data, offset: offset, compression: compression)
             return
         }
 
         guard messageType == 0x09 || messageType == 0x0b else {
-            NSLog("ASR reusable unhandled response type=\(messageType) bytes=\(data.count)")
+            NSLog("ASR websocket unhandled response type=\(messageType) bytes=\(data.count)")
             return
         }
         guard flags == 0x04 else {
-            handleBinaryResponse(data)
+            NSLog("ASR websocket ignored non-event response type=\(messageType) flags=\(flags) bytes=\(data.count)")
             return
         }
         guard let response = parseEventResponse(data, offset: &offset, compression: compression) else {
@@ -671,7 +470,7 @@ final class VolcengineASRClient: ASRClient {
         switch response.event {
         case .connectionStarted:
             connectionState = .ready
-            NSLog("ASR reusable connection_started connect_id=\(response.sessionID ?? "")")
+            NSLog("ASR websocket connection_started connect_id=\(response.sessionID ?? "")")
             if sessionState == .starting {
                 sendStartSession()
             }
@@ -679,20 +478,19 @@ final class VolcengineASRClient: ASRClient {
         case .connectionFinished:
             connectionState = .disconnected
             webSocket = nil
-            NSLog("ASR reusable connection_finished")
+            NSLog("ASR websocket connection_finished")
 
         case .connectionFailed:
-            failReusableSession(response.payloadText ?? "ASR connection failed")
+            failSession(response.payloadText ?? "ASR connection failed")
 
         case .sessionStarted:
             guard response.sessionID == currentSessionID else { return }
             sessionState = .streaming
-            NSLog("ASR reusable session_started session_id=\(response.sessionID ?? "")")
+            NSLog("ASR websocket session_started session_id=\(response.sessionID ?? "")")
             flushQueuedAudioChunks()
 
         case .asrResponse, .asrInfo:
             guard response.sessionID == currentSessionID, let text = response.payloadText else { return }
-            logASRResponse(text, isFinalResponse: false)
             let transcript = extractTranscript(from: text)
             let definiteSegments = extractNewDefiniteSegments(from: text)
             if !transcript.isEmpty {
@@ -721,7 +519,7 @@ final class VolcengineASRClient: ASRClient {
             let definiteSegments = response.payloadText.map {
                 extractNewDefiniteSegments(from: $0)
             } ?? []
-            NSLog("ASR reusable session_finished session_id=\(response.sessionID ?? "") text_len=\(finalText.count)")
+            NSLog("ASR websocket session_finished session_id=\(response.sessionID ?? "") text_len=\(finalText.count)")
             currentSessionID = nil
             latestSessionTranscript = ""
             emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
@@ -747,10 +545,10 @@ final class VolcengineASRClient: ASRClient {
             break
 
         case nil:
-            NSLog("ASR reusable unknown event=\(response.eventID) bytes=\(data.count)")
+            NSLog("ASR websocket unknown event=\(response.eventID) bytes=\(data.count)")
 
         default:
-            NSLog("ASR reusable ignored event=\(response.eventID)")
+            NSLog("ASR websocket ignored event=\(response.eventID)")
         }
     }
 
@@ -779,17 +577,17 @@ final class VolcengineASRClient: ASRClient {
         do {
             body = compression == 0x01 ? try payload.gzipDecompressed() : payload
         } catch {
-            failReusableSession(error.localizedDescription)
+            failSession(error.localizedDescription)
             return nil
         }
         let payloadText = String(data: body, encoding: .utf8)
         return EventResponse(event: ASREvent(rawValue: eventID), eventID: eventID, sessionID: sessionID, payloadText: payloadText)
     }
 
-    private func handleReusableErrorResponse(_ data: Data, offset: Int, compression: UInt8) {
+    private func handleErrorResponse(_ data: Data, offset: Int, compression: UInt8) {
         var offset = offset
         guard data.count >= offset + 8 else {
-            failReusableSession("Malformed ASR error response")
+            failSession("Malformed ASR error response")
             return
         }
         let code = UInt32(bigEndianBytes: data[offset..<(offset + 4)])
@@ -797,7 +595,7 @@ final class VolcengineASRClient: ASRClient {
         let messageSize = Int(UInt32(bigEndianBytes: data[offset..<(offset + 4)]))
         offset += 4
         guard data.count >= offset + messageSize else {
-            failReusableSession("Malformed ASR error response")
+            failSession("Malformed ASR error response")
             return
         }
         let payload = data.subdata(in: offset..<(offset + messageSize))
@@ -805,16 +603,16 @@ final class VolcengineASRClient: ASRClient {
         do {
             body = compression == 0x01 ? try payload.gzipDecompressed() : payload
         } catch {
-            failReusableSession(error.localizedDescription)
+            failSession(error.localizedDescription)
             return
         }
         let message = String(data: body, encoding: .utf8) ?? "Unknown ASR error"
         NSLog("ASR server error code=\(code): \(message)")
         let parsedError = parsedErrorMessage(code: code, message: message)
-        failReusableSession(parsedError.message)
+        failSession(parsedError.message)
         if let upgradeURL = parsedError.upgradeURL {
             DispatchQueue.main.async { [weak self] in
-                self?.onUpgradeURL?(upgradeURL)
+                self?.onUpgradeURL?(upgradeURL, parsedError.message)
             }
         }
     }
@@ -875,23 +673,6 @@ final class VolcengineASRClient: ASRClient {
             return ("ASR \(code): \(detail)", URL(string: upgradeURL))
         }
         return ("ASR \(code): \(detail)", nil)
-    }
-
-    private func handleASRText(_ text: String, isFinalResponse: Bool) {
-        let transcript = extractTranscript(from: text)
-        let definiteSegments = extractNewDefiniteSegments(from: text)
-
-        if isFinalResponse {
-            onFinal?(transcript)
-        } else if !transcript.isEmpty {
-            onPartial?(transcript)
-        }
-        for segment in definiteSegments {
-            onSegment?(segment)
-        }
-    }
-
-    private func logASRResponse(_: String, isFinalResponse _: Bool) {
     }
 
     private func extractTranscript(from text: String) -> String {
@@ -974,19 +755,6 @@ final class VolcengineASRClient: ASRClient {
         guard let data = text.data(using: .utf8) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
-
-    private func responseKind(_ isFinalResponse: Bool) -> String {
-        isFinalResponse ? "final" : "partial"
-    }
-}
-
-private extension String {
-    var asrLogPreview: String {
-        let normalized = split(whereSeparator: \.isNewline).joined(separator: " ")
-        let limit = 48
-        guard normalized.count > limit else { return normalized }
-        return String(normalized.suffix(limit))
-    }
 }
 
 private extension FixedWidthInteger {
@@ -998,12 +766,6 @@ private extension FixedWidthInteger {
 private extension UInt32 {
     init(bigEndianBytes bytes: Data.SubSequence) {
         self = bytes.reduce(0) { ($0 << 8) | UInt32($1) }
-    }
-}
-
-private extension Int32 {
-    init(bigEndianBytes bytes: Data.SubSequence) {
-        self = Int32(bitPattern: UInt32(bigEndianBytes: bytes))
     }
 }
 

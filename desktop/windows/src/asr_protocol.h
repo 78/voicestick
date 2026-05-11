@@ -63,9 +63,6 @@ struct AsrSegment {
 
 class AsrProtocol {
 public:
-    static ByteVector MakeClientRequestFrame(const AppConfig& config,
-                                             const AsrSessionOptions& options = {});
-    static ByteVector MakeAudioFrame(std::span<const std::uint8_t> ogg_data, bool is_last);
     static ByteVector MakeStartConnectionFrame(const AppConfig& config,
                                                const AsrSessionOptions& options = {});
     static ByteVector MakeFinishConnectionFrame(const AppConfig& config,
@@ -93,11 +90,6 @@ public:
 private:
     static std::string SessionPayload(const AppConfig& config, const AsrSessionOptions& options);
     static std::string ConnectionPayload(const AppConfig& config, const AsrSessionOptions& options);
-    static ByteVector MakeBinaryFrame(std::uint8_t message_type,
-                                        std::uint8_t flags,
-                                        std::uint8_t serialization,
-                                        std::uint8_t compression,
-                                        std::span<const std::uint8_t> payload);
     static ByteVector MakeEventFrame(std::uint8_t message_type,
                                       AsrEvent event,
                                       std::string_view session_id,

@@ -52,6 +52,7 @@ add_executable(VoiceStickApp WIN32
     src/asr_client_win.cc
     src/input_injector_win.cc
     src/ble_central_win.cc
+    src/voice_stick_cloud_api_win.cc
     src/firmware_update_dialog.cc
     src/overlay_window.cc
     src/subtitle_window.cc

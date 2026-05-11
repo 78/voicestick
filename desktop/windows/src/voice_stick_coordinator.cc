@@ -268,6 +268,9 @@ void VoiceStickCoordinator::ConfigureAsrCallbacks() {
     asr_->on_error = [this](std::string message) {
         FinishWithAsrError(message);
     };
+    asr_->on_upgrade_url = [this](std::string url, std::string message) {
+        ui_->ShowCloudUpgrade(message, url, active_device_id_);
+    };
 }
 
 void VoiceStickCoordinator::ConfigureSubtitleAsrCallbacks(SubtitleCycle* cycle) {
@@ -291,6 +294,9 @@ void VoiceStickCoordinator::ConfigureSubtitleAsrCallbacks(SubtitleCycle* cycle) 
     };
     cycle->asr->on_error = [this, device_id, session_id](std::string message) {
         FinishSubtitleCycleWithError(device_id, session_id, message);
+    };
+    cycle->asr->on_upgrade_url = [this, device_id](std::string url, std::string message) {
+        ui_->ShowCloudUpgrade(message, url, device_id);
     };
 }
 

@@ -100,7 +100,7 @@ final class VoiceStickCoordinator {
             self.deviceID = deviceID
             self.sessionID = sessionID
             self.startedAt = Date()
-            self.asr = VolcengineASRClient(config: config)
+            self.asr = ASRWebSocketClient(config: config)
             self.debugAudioRecorder = DebugAudioRecorder(
                 enabled: config.debugAudioCache,
                 directory: config.debugAudioDirectory
@@ -164,7 +164,7 @@ final class VoiceStickCoordinator {
         self.statusController = statusController
         self.pairedDeviceIDs = config.pairedDeviceIDs
         self.ble = BleCentral(pairedDeviceIDs: config.pairedDeviceIDs)
-        self.asr = VolcengineASRClient(config: config)
+        self.asr = ASRWebSocketClient(config: config)
         self.translator = LLMTranslationClient(config: config)
         self.debugAudioRecorder = DebugAudioRecorder(
             enabled: config.debugAudioCache,
@@ -235,7 +235,7 @@ final class VoiceStickCoordinator {
             enabled: config.debugAudioCache,
             directory: config.debugAudioDirectory
         )
-        asr = VolcengineASRClient(config: config)
+        asr = ASRWebSocketClient(config: config)
         translator = LLMTranslationClient(config: config)
         configureASRCallbacks()
 
@@ -277,16 +277,9 @@ final class VoiceStickCoordinator {
             }
         }
 
-        asr.onUpgradeURL = { url in
+        asr.onUpgradeURL = { [weak self] url, message in
             DispatchQueue.main.async {
-                let alert = NSAlert()
-                alert.messageText = "ASR quota reached"
-                alert.informativeText = "Your VoiceStick Cloud quota has been used. Upgrade your account to continue."
-                alert.addButton(withTitle: "Upgrade")
-                alert.addButton(withTitle: "Cancel")
-                if alert.runModal() == .alertFirstButtonReturn {
-                    NSWorkspace.shared.open(url)
-                }
+                self?.presentASRUpgradeAlert(url: url, message: message)
             }
         }
     }
@@ -333,7 +326,7 @@ final class VoiceStickCoordinator {
                 )
             }
         }
-        cycle.asr.onUpgradeURL = { url in
+        cycle.asr.onUpgradeURL = { url, _ in
             DispatchQueue.main.async {
                 NSWorkspace.shared.open(url)
             }
@@ -1167,6 +1160,24 @@ final class VoiceStickCoordinator {
         statusController.showError(message, deviceID: activeDeviceID) { [weak self] in
             guard let self, self.errorRecoveryToken == token else { return }
             self.recoverFromASRError(hideOverlay: false)
+        }
+    }
+
+    private func presentASRUpgradeAlert(url: URL, message: String) {
+        statusController.hideOverlay { [weak self] in
+            guard let self else { return }
+            self.recoverFromASRError(hideOverlay: false)
+            NSApp.activate(ignoringOtherApps: true)
+
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "VoiceStick Cloud needs attention"
+            alert.informativeText = message
+            alert.addButton(withTitle: "Open")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() == .alertFirstButtonReturn {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 

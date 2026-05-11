@@ -318,6 +318,29 @@ void Win32App::ShowError(const std::string& text,
     });
 }
 
+void Win32App::ShowCloudUpgrade(const std::string& message,
+                                const std::string& url,
+                                const std::optional<std::string>& device_id) {
+    DispatchToUi([this, message, url, device_id] {
+        ApplyOverlayStyle(device_id);
+        auto show_dialog = [this, message, url] {
+            const auto text = Utf16(message + "\n\nOpen the VoiceStick Cloud page?");
+            const int result = MessageBoxW(hwnd_, text.c_str(),
+                                           L"VoiceStick Cloud needs attention",
+                                           MB_ICONINFORMATION | MB_YESNO | MB_DEFBUTTON1);
+            if (result == IDYES) {
+                const auto wide_url = Utf16(url);
+                ShellExecuteW(hwnd_, L"open", wide_url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        };
+        if (overlay_) {
+            overlay_->Hide(std::move(show_dialog));
+        } else {
+            show_dialog();
+        }
+    });
+}
+
 void Win32App::HideOverlay(std::function<void()> on_hidden) {
     DispatchToUi([this, on_hidden = std::move(on_hidden)]() mutable {
         if (overlay_) overlay_->Hide(std::move(on_hidden));

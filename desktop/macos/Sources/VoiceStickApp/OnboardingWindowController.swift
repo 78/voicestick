@@ -42,9 +42,10 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     private let scanStatusLabel = NSTextField(labelWithString: "Scanning")
     private let providerPopup = NSPopUpButton()
     private let apiKeyField = NSTextField()
+    private let applyTrialAPIKeyButton = NSButton(title: "Apply Trial", target: nil, action: nil)
     private let resourcePopup = NSPopUpButton()
-    private let cloudURLField = NSTextField()
     private let accessibilityStatusLabel = NSTextField(labelWithString: "")
+    private let accessibilitySettingsButton = NSButton(title: "Open Accessibility Settings", target: nil, action: nil)
 
     private var central: CBCentralManager?
     private var devices: [OnboardingDevice] = []
@@ -52,6 +53,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     private var currentDisplayedProvider: ASRProvider
     private var config: AppConfig
     private var didComplete = false
+    private var didConfigureAPIKeyControlConstraints = false
     private let onComplete: (AppConfig) -> Void
 
     init(config: AppConfig, onComplete: @escaping (AppConfig) -> Void) {
@@ -69,13 +71,33 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
+        accessibilitySettingsButton.target = self
+        accessibilitySettingsButton.action = #selector(requestAccessibilityPermission)
+        applyTrialAPIKeyButton.target = self
+        applyTrialAPIKeyButton.action = #selector(applyTrialAPIKey)
         buildContent()
         loadConfigIntoFields()
         renderStep()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(apiKeyFieldDidChange),
+            name: NSControl.textDidChangeNotification,
+            object: apiKeyField
+        )
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     func show() {
@@ -170,7 +192,6 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
 
         resourcePopup.addItems(withTitles: AppConfig.supportedResourceIDs)
         resourcePopup.selectItem(withTitle: config.resourceID)
-        cloudURLField.stringValue = config.voiceStickCloudURL
         apiKeyField.stringValue = apiKey(for: config.asrProvider)
     }
 
@@ -254,12 +275,26 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         stack.alignment = .leading
         stack.spacing = 12
         stack.addArrangedSubview(row(label: "Provider", control: providerPopup))
-        stack.addArrangedSubview(row(label: "API Key", control: apiKeyField))
+        stack.addArrangedSubview(row(label: "API Key", control: apiKeyControl()))
         if selectedProvider() == .volcengine {
             stack.addArrangedSubview(row(label: "Resource ID", control: resourcePopup))
-        } else {
-            stack.addArrangedSubview(row(label: "Cloud URL", control: cloudURLField))
         }
+        updateApplyTrialButton()
+        return stack
+    }
+
+    private func apiKeyControl() -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        if !didConfigureAPIKeyControlConstraints {
+            apiKeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
+            applyTrialAPIKeyButton.widthAnchor.constraint(equalToConstant: 102).isActive = true
+            didConfigureAPIKeyControlConstraints = true
+        }
+        stack.addArrangedSubview(apiKeyField)
+        stack.addArrangedSubview(applyTrialAPIKeyButton)
         return stack
     }
 
@@ -268,16 +303,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
-        let button = NSButton(title: "Open Accessibility Settings", target: self, action: #selector(requestAccessibilityPermission))
-        let refreshButton = NSButton(title: "Check Again", target: self, action: #selector(updateAccessibilityStatus))
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        row.addArrangedSubview(button)
-        row.addArrangedSubview(refreshButton)
         stack.addArrangedSubview(accessibilityStatusLabel)
-        stack.addArrangedSubview(row)
+        stack.addArrangedSubview(accessibilitySettingsButton)
         return stack
     }
 
@@ -407,10 +434,48 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         renderStep()
     }
 
+    @objc private func apiKeyFieldDidChange() {
+        updateApplyTrialButton()
+    }
+
+    @objc private func applyTrialAPIKey() {
+        saveDisplayedProviderFields()
+        guard currentDisplayedProvider == .voiceStickCloud else { return }
+
+        applyTrialAPIKeyButton.isEnabled = false
+        statusLabel.stringValue = "Applying trial API key..."
+        VoiceStickCloudAPI.applyTrialAPIKey(
+            cloudURL: config.voiceStickCloudURL,
+            deviceID: config.pairedDeviceIDs.first
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.applyTrialAPIKeyButton.isEnabled = true
+                switch result {
+                case .success(.apiKey(let apiKey)):
+                    self.config.voiceStickAPIKey = apiKey
+                    self.apiKeyField.stringValue = apiKey
+                    self.statusLabel.stringValue = "Trial API key applied."
+                    self.updateApplyTrialButton()
+                    self.updateNextButton()
+                case .success(.url(let url)):
+                    self.statusLabel.stringValue = "Opened trial application page."
+                    NSWorkspace.shared.open(url)
+                case .failure(let error):
+                    self.statusLabel.stringValue = "Apply failed: \(error.localizedDescription)"
+                    self.updateApplyTrialButton()
+                }
+            }
+        }
+    }
+
     @objc private func requestAccessibilityPermission() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
         openAccessibilitySettings()
+        updateAccessibilityStatus()
+    }
+
+    @objc private func applicationDidBecomeActive() {
+        guard currentStep == .accessibility else { return }
         updateAccessibilityStatus()
     }
 
@@ -458,9 +523,14 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     }
 
     @objc private func updateAccessibilityStatus() {
-        accessibilityStatusLabel.stringValue = AXIsProcessTrusted()
+        let isTrusted = AXIsProcessTrusted()
+        accessibilityStatusLabel.stringValue = isTrusted
             ? "Accessibility permission is allowed."
             : "Accessibility permission is not allowed yet."
+        accessibilitySettingsButton.isHidden = isTrusted
+        if isTrusted {
+            statusLabel.stringValue = ""
+        }
         updateNextButton()
     }
 
@@ -507,7 +577,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
                 return false
             }
             if selectedProvider() == .voiceStickCloud,
-               URL(string: cloudURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+               URL(string: config.voiceStickCloudURL.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
                 statusLabel.stringValue = "Enter a valid Cloud URL."
                 return false
             }
@@ -587,6 +657,11 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         }
         config.asrProvider = selectedProvider()
         config.resourceID = resourcePopup.titleOfSelectedItem ?? config.resourceID
-        config.voiceStickCloudURL = cloudURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func updateApplyTrialButton() {
+        let isCloud = selectedProvider() == .voiceStickCloud
+        let isEmpty = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        applyTrialAPIKeyButton.isHidden = !(isCloud && isEmpty)
     }
 }

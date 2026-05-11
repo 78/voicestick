@@ -28,6 +28,7 @@ private:
     void LoadConfigIntoControls();
     void SaveSettings();
     void UpdateProviderVisibility();
+    void ApplyTrialApiKey();
     void ChooseDebugDirectory();
     bool IsLabelControl(HWND control) const;
     int Dp(int px) const;
@@ -40,6 +41,7 @@ private:
 
     HWND provider_combo_ = nullptr;
     HWND api_key_edit_ = nullptr;
+    HWND apply_trial_button_ = nullptr;
     HWND resource_combo_ = nullptr;
     HWND hotwords_edit_ = nullptr;
     HWND llm_base_url_edit_ = nullptr;
@@ -67,6 +69,7 @@ private:
     static constexpr UINT kIdChooseDir = 2010;
     static constexpr UINT kIdSave = 2011;
     static constexpr UINT kIdCancel = 2012;
+    static constexpr UINT kIdApplyTrialApiKey = 2013;
 };
 
 } // namespace voicestick
