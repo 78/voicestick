@@ -2,6 +2,13 @@
 
 Native Win32/C++20 implementation workspace for the Windows desktop client.
 
+## Windows support
+
+VoiceStick supports 64-bit Windows 10 version 1903 / 1909 and newer across
+normal Windows 10 editions, including Education. Newer builds expose the BLE
+advertisement address type directly; 2019 Windows 10 builds fall back to the
+address-only BLE connection path.
+
 Current scope:
 
 - Win32 tray app shell with overlay window.

@@ -5,6 +5,7 @@
 #include "log.h"
 
 #include <winrt/Windows.Devices.Enumeration.h>
+#include <winrt/Windows.Foundation.Metadata.h>
 #include <winrt/Windows.Devices.Radios.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/base.h>
@@ -122,6 +123,14 @@ std::string FormatHresult(std::int32_t code) {
     char buffer[16]{};
     snprintf(buffer, sizeof(buffer), "0x%08X", static_cast<unsigned int>(code));
     return buffer;
+}
+
+bool CanReadAdvertisementAddressType() {
+    static const bool available =
+        winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
+            L"Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementReceivedEventArgs",
+            L"BluetoothAddressType");
+    return available;
 }
 
 std::string ScanStartFailureMessage(const winrt::hresult_error& error) {
@@ -455,19 +464,23 @@ void BleCentralWin::HandleAdvertisement(const BluetoothLEAdvertisementWatcher&,
 
     const auto bluetooth_address = args.BluetoothAddress();
     BluetoothAddressKind address_kind = BluetoothAddressKind::kUnspecified;
-    try {
-        switch (args.BluetoothAddressType()) {
-        case BluetoothAddressType::Public:
-            address_kind = BluetoothAddressKind::kPublic;
-            break;
-        case BluetoothAddressType::Random:
-            address_kind = BluetoothAddressKind::kRandom;
-            break;
-        default:
-            break;
+    if (CanReadAdvertisementAddressType()) {
+        try {
+            switch (args.BluetoothAddressType()) {
+            case BluetoothAddressType::Public:
+                address_kind = BluetoothAddressKind::kPublic;
+                break;
+            case BluetoothAddressType::Random:
+                address_kind = BluetoothAddressKind::kRandom;
+                break;
+            default:
+                break;
+            }
+        } catch (...) {
+            // Windows 10 2019 builds do not expose this property. Treating
+            // the address type as unspecified keeps the old BLE stack on the
+            // one-argument FromBluetoothAddressAsync path.
         }
-    } catch (...) {
-        // BluetoothAddressType is unavailable on Windows builds < 19041.
     }
     {
         std::lock_guard lock(mutex_);

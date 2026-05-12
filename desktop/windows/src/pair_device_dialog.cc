@@ -4,6 +4,7 @@
 #include "dpi_util.h"
 
 #include <CommCtrl.h>
+#include <winrt/Windows.Foundation.Metadata.h>
 #include <winrt/base.h>
 
 #include <algorithm>
@@ -59,23 +60,33 @@ std::wstring ScanStartFailureText(const winrt::hresult_error& error) {
     return std::wstring(text.c_str());
 }
 
+bool CanReadAdvertisementAddressType() {
+    static const bool available =
+        winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
+            L"Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementReceivedEventArgs",
+            L"BluetoothAddressType");
+    return available;
+}
+
 BluetoothAddressKind AddressKindFromArgs(
     const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementReceivedEventArgs& args) {
     using winrt::Windows::Devices::Bluetooth::BluetoothAddressType;
-    // BluetoothAddressType property requires Windows 10 v2004 (build 19041);
-    // older builds raise an exception so default to "unspecified".
-    try {
-        switch (args.BluetoothAddressType()) {
-        case BluetoothAddressType::Public:
-            return BluetoothAddressKind::kPublic;
-        case BluetoothAddressType::Random:
-            return BluetoothAddressKind::kRandom;
-        default:
-            return BluetoothAddressKind::kUnspecified;
+    // BluetoothAddressType requires Windows 10 v2004 (build 19041). Windows
+    // 10 2019 builds can still pair through the address-only BLE path.
+    if (CanReadAdvertisementAddressType()) {
+        try {
+            switch (args.BluetoothAddressType()) {
+            case BluetoothAddressType::Public:
+                return BluetoothAddressKind::kPublic;
+            case BluetoothAddressType::Random:
+                return BluetoothAddressKind::kRandom;
+            default:
+                return BluetoothAddressKind::kUnspecified;
+            }
+        } catch (...) {
         }
-    } catch (...) {
-        return BluetoothAddressKind::kUnspecified;
     }
+    return BluetoothAddressKind::kUnspecified;
 }
 
 void AlignDialogData(std::vector<BYTE>* buffer, std::size_t alignment) {
