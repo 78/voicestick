@@ -5,6 +5,7 @@ final class LLMTranslationClient {
         case missingAPIKey
         case invalidURL
         case invalidResponse
+        case serverError(Int, String)
 
         var errorDescription: String? {
             switch self {
@@ -14,6 +15,8 @@ final class LLMTranslationClient {
                 return "Invalid LLM base URL"
             case .invalidResponse:
                 return "Invalid LLM translation response"
+            case .serverError(let statusCode, let message):
+                return "LLM translation failed (\(statusCode)): \(message)"
             }
         }
     }
@@ -66,9 +69,17 @@ final class LLMTranslationClient {
             return
         }
 
-        session.dataTask(with: request) { data, _, error in
+        session.dataTask(with: request) { data, response, error in
             if let error {
                 completion(.failure(error))
+                return
+            }
+            if let httpResponse = response as? HTTPURLResponse,
+               !(200...299).contains(httpResponse.statusCode) {
+                completion(.failure(TranslationError.serverError(
+                    httpResponse.statusCode,
+                    Self.extractErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+                )))
                 return
             }
             guard
@@ -111,5 +122,18 @@ final class LLMTranslationClient {
             prompt += terms.map { "- \($0)" }.joined(separator: "\n")
         }
         return prompt
+    }
+
+    private static func extractErrorMessage(from data: Data?) -> String? {
+        guard let data, !data.isEmpty else { return nil }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let error = object["error"] as? [String: Any] {
+                return (error["message"] as? String) ?? (error["type"] as? String)
+            }
+            if let message = object["message"] as? String {
+                return message
+            }
+        }
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

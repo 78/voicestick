@@ -99,6 +99,7 @@ public:
                                           bool is_below_minimum) = 0;
     virtual void SetPairedDeviceIds(const std::vector<std::string>& ids) = 0;
     virtual void SetHasRecoverableInput(bool has_recoverable_input) = 0;
+    virtual void SetTranslationModeEnabled(bool enabled) = 0;
     virtual void ShowListening(const std::optional<std::string>& device_id) = 0;
     virtual void ShowPartial(const std::string& text, const std::optional<std::string>& device_id) = 0;
     virtual void ShowFinalCountdown(const std::string& text,
@@ -131,7 +132,8 @@ public:
                           std::unique_ptr<AsrClient> asr,
                           VoiceStickUi* ui,
                           InputInjector* input_injector,
-                          std::function<std::unique_ptr<AsrClient>(const AppConfig&)> asr_factory = {});
+                          std::function<std::unique_ptr<AsrClient>(const AppConfig&)> asr_factory = {},
+                          std::function<void(std::function<void()>)> post_task = nullptr);
     ~VoiceStickCoordinator();
 
     void Start();
@@ -200,6 +202,9 @@ private:
     void HandleButtonUp(const StateEvent& event, const std::string& device_id);
     void HandleButtonClick(const StateEvent& event, const std::string& device_id);
     void HandleSecondaryButtonClick(const std::string& device_id);
+    bool CanToggleTranslationMode(const std::string& device_id) const;
+    void PerformSecondarySingleClickAction(const std::string& device_id);
+    void ToggleTranslationModeForDevice(const std::string& device_id);
     void HandlePrimaryButtonDown(std::optional<std::uint32_t> session_id, const std::string& device_id);
     void HandlePrimaryButtonUp(const std::string& device_id);
     void HandleAudioFrame(const AudioFrame& frame, const std::string& device_id);
@@ -282,6 +287,7 @@ private:
     LLMTranslationClient translator_;
     VoiceStickUi* ui_;
     InputInjector* input_injector_;
+    std::function<void(std::function<void()>)> post_task_;
     std::mutex audio_mutex_;
     OggOpusMuxer ogg_muxer_{16000, 1};
     DebugAudioRecorder debug_audio_recorder_;
@@ -297,6 +303,8 @@ private:
     bool pasted_final_text_ = false;
     std::atomic_bool waiting_for_audio_end_{false};
     std::atomic_uint64_t audio_end_wait_generation_{0};
+    std::atomic_uint64_t secondary_click_generation_{0};
+    std::optional<std::string> pending_secondary_click_device_id_;
     PendingPasteState pending_paste_state_;
     std::optional<std::string> last_recoverable_text_;
     std::optional<std::string> last_recoverable_device_id_;
@@ -317,6 +325,7 @@ private:
     std::map<std::string, std::uint32_t> active_subtitle_sessions_;
     static constexpr double kMinimumRecordingDurationSeconds = 0.5;
     static constexpr std::chrono::milliseconds kAudioEndTimeout{1000};
+    static constexpr std::chrono::milliseconds kSecondaryDoubleClickInterval{350};
     static constexpr std::chrono::hours kFirmwareManifestCacheDuration{24};
 };
 

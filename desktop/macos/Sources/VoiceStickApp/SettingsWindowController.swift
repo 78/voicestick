@@ -14,6 +14,7 @@ final class SettingsWindowController: NSWindowController {
     private let debugAudioDirectoryField = NSTextField()
     private let statusLabel = NSTextField(labelWithString: "")
     private var currentDisplayedProvider: ASRProvider = .volcengine
+    private var isSyncingOpenAIAPIKeyFields = false
     private var resourceRow: NSStackView?
     var onConfigChanged: ((AppConfig) -> Void)?
 
@@ -37,6 +38,12 @@ final class SettingsWindowController: NSWindowController {
             selector: #selector(apiKeyFieldDidChange),
             name: NSControl.textDidChangeNotification,
             object: apiKeyField
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(llmAPIKeyFieldDidChange),
+            name: NSControl.textDidChangeNotification,
+            object: llmAPIKeyField
         )
     }
 
@@ -132,7 +139,8 @@ final class SettingsWindowController: NSWindowController {
     private func configureProviderPopup() {
         providerPopup.addItems(withTitles: [
             ASRProvider.voiceStickCloud.displayName,
-            ASRProvider.volcengine.displayName
+            ASRProvider.volcengine.displayName,
+            ASRProvider.openai.displayName
         ])
         providerPopup.target = self
         providerPopup.action = #selector(providerSelectionChanged)
@@ -207,12 +215,20 @@ final class SettingsWindowController: NSWindowController {
         currentDisplayedProvider = selectedProvider()
         config.asrProvider = currentDisplayedProvider
         apiKeyField.stringValue = apiKey(for: currentDisplayedProvider)
+        if currentDisplayedProvider == .openai {
+            llmAPIKeyField.stringValue = apiKeyField.stringValue
+        }
         updateProviderRows()
         updateApplyTrialButton()
     }
 
     @objc private func apiKeyFieldDidChange() {
+        syncOpenAIApiKeys(from: apiKeyField)
         updateApplyTrialButton()
+    }
+
+    @objc private func llmAPIKeyFieldDidChange() {
+        syncOpenAIApiKeys(from: llmAPIKeyField)
     }
 
     @objc private func applyTrialAPIKey() {
@@ -312,6 +328,8 @@ final class SettingsWindowController: NSWindowController {
             return .voiceStickCloud
         case ASRProvider.volcengine.displayName:
             return .volcengine
+        case ASRProvider.openai.displayName:
+            return .openai
         default:
             return config.asrProvider
         }
@@ -323,6 +341,8 @@ final class SettingsWindowController: NSWindowController {
             return config.voiceStickAPIKey
         case .volcengine:
             return config.volcengineAPIKey
+        case .openai:
+            return config.llmAPIKey
         }
     }
 
@@ -333,6 +353,8 @@ final class SettingsWindowController: NSWindowController {
             config.voiceStickAPIKey = value
         case .volcengine:
             config.volcengineAPIKey = value
+        case .openai:
+            config.llmAPIKey = value
         }
     }
 
@@ -345,6 +367,21 @@ final class SettingsWindowController: NSWindowController {
         let isCloud = currentDisplayedProvider == .voiceStickCloud
         let isEmpty = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         applyTrialAPIKeyButton.isHidden = !(isCloud && isEmpty)
+    }
+
+    private func syncOpenAIApiKeys(from sourceField: NSTextField) {
+        guard currentDisplayedProvider == .openai else { return }
+        guard !isSyncingOpenAIAPIKeyFields else { return }
+        isSyncingOpenAIAPIKeyFields = true
+        let value = sourceField.stringValue
+        if sourceField === apiKeyField {
+            llmAPIKeyField.stringValue = value
+            config.llmAPIKey = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            apiKeyField.stringValue = value
+            config.llmAPIKey = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        isSyncingOpenAIAPIKeyFields = false
     }
 
     private func showErrorAlert(title: String, message: String) {

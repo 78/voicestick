@@ -13,6 +13,7 @@ namespace voicestick {
 enum class AsrProvider {
     kVoiceStickCloud,
     kVolcengine,
+    kOpenAI,
 };
 
 enum class InteractionMode {

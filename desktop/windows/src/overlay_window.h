@@ -27,6 +27,7 @@ public:
     void Hide(std::function<void()> on_hidden = {});
     void SetThemeColor(OverlayThemeColor color);
     void SetPosition(OverlayPosition position);
+    void SetTranslationEnabled(bool enabled);
 
     HWND hwnd() const { return hwnd_; }
     void OnTimer(UINT_PTR timer_id);
@@ -80,6 +81,7 @@ private:
     int target_window_y_ = 0;
     OverlayThemeColor theme_color_ = OverlayThemeColor::kWhite;
     OverlayPosition position_ = OverlayPosition::kCenter;
+    bool translation_enabled_ = false;
     ULONGLONG countdown_started_at_ms_ = 0;
     int countdown_duration_ms_ = 1200;
     UINT dpi_ = 96;

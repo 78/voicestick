@@ -190,8 +190,11 @@ INT_PTR SettingsDialog::HandleMessage(UINT message, WPARAM w_param, LPARAM l_par
         case kIdProviderCombo:
             if (HIWORD(w_param) == CBN_SELCHANGE) {
                 int idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-                const auto& key = idx == 0 ? config_.voicestick_api_key : config_.volcengine_api_key;
-                SetWindowTextW(api_key_edit_, Utf16(key).c_str());
+                switch (idx) {
+                case 0: SetWindowTextW(api_key_edit_, Utf16(config_.voicestick_api_key).c_str()); break;
+                case 1: SetWindowTextW(api_key_edit_, Utf16(config_.volcengine_api_key).c_str()); break;
+                default: SetWindowTextW(api_key_edit_, Utf16(config_.llm_api_key).c_str()); break;
+                }
                 UpdateProviderVisibility();
             }
             return TRUE;
@@ -330,6 +333,7 @@ void SettingsDialog::BuildControls() {
                                            kIdProviderCombo, instance_));
     SendMessageW(provider_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"VoiceStick Cloud"));
     SendMessageW(provider_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Volcengine"));
+    SendMessageW(provider_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"OpenAI"));
     y += row_h + Dp(10);
 
     remember_label(CreateLabel(hwnd_, L"API Key:", Dp(10), y + Dp(3), label_w,
@@ -408,13 +412,20 @@ void SettingsDialog::BuildControls() {
 }
 
 void SettingsDialog::LoadConfigIntoControls() {
-    SendMessageW(provider_combo_, CB_SETCURSEL,
-                 config_.asr_provider == AsrProvider::kVoiceStickCloud ? 0 : 1, 0);
-
-    const auto& key = config_.asr_provider == AsrProvider::kVoiceStickCloud
-                          ? config_.voicestick_api_key
-                          : config_.volcengine_api_key;
-    SetWindowTextW(api_key_edit_, Utf16(key).c_str());
+    switch (config_.asr_provider) {
+    case AsrProvider::kVoiceStickCloud:
+        SendMessageW(provider_combo_, CB_SETCURSEL, 0, 0);
+        SetWindowTextW(api_key_edit_, Utf16(config_.voicestick_api_key).c_str());
+        break;
+    case AsrProvider::kVolcengine:
+        SendMessageW(provider_combo_, CB_SETCURSEL, 1, 0);
+        SetWindowTextW(api_key_edit_, Utf16(config_.volcengine_api_key).c_str());
+        break;
+    case AsrProvider::kOpenAI:
+        SendMessageW(provider_combo_, CB_SETCURSEL, 2, 0);
+        SetWindowTextW(api_key_edit_, Utf16(config_.llm_api_key).c_str());
+        break;
+    }
 
     auto resource_wide = Utf16(config_.resource_id);
     int idx = static_cast<int>(SendMessageW(resource_combo_, CB_FINDSTRINGEXACT, -1,
@@ -434,14 +445,24 @@ void SettingsDialog::LoadConfigIntoControls() {
 
 void SettingsDialog::SaveSettings() {
     int provider_idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-    AsrProvider new_provider = (provider_idx == 0) ? AsrProvider::kVoiceStickCloud
-                                                   : AsrProvider::kVolcengine;
+    AsrProvider new_provider;
+    switch (provider_idx) {
+    case 0: new_provider = AsrProvider::kVoiceStickCloud; break;
+    case 1: new_provider = AsrProvider::kVolcengine; break;
+    default: new_provider = AsrProvider::kOpenAI; break;
+    }
 
     auto api_key = Utf8(GetWindowText(api_key_edit_));
-    if (new_provider == AsrProvider::kVoiceStickCloud) {
+    switch (new_provider) {
+    case AsrProvider::kVoiceStickCloud:
         config_.voicestick_api_key = api_key;
-    } else {
+        break;
+    case AsrProvider::kVolcengine:
         config_.volcengine_api_key = api_key;
+        break;
+    case AsrProvider::kOpenAI:
+        config_.llm_api_key = api_key;
+        break;
     }
     config_.asr_provider = new_provider;
     config_.llm_base_url = Utf8(GetWindowText(llm_base_url_edit_));
@@ -469,10 +490,10 @@ void SettingsDialog::SaveSettings() {
 
 void SettingsDialog::UpdateProviderVisibility() {
     int idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-    bool is_volcengine = (idx == 1);
+    const bool is_volcengine = (idx == 1);
+    const bool is_cloud = (idx == 0);
     ShowWindow(resource_combo_, is_volcengine ? SW_SHOW : SW_HIDE);
     ShowWindow(resource_label_, is_volcengine ? SW_SHOW : SW_HIDE);
-    const bool is_cloud = (idx == 0);
     const bool api_key_empty = GetWindowText(api_key_edit_).empty();
     const bool show_trial_button = is_cloud && api_key_empty;
     ShowWindow(apply_trial_button_, show_trial_button ? SW_SHOW : SW_HIDE);

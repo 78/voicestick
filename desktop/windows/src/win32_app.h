@@ -36,6 +36,7 @@ public:
                                   bool is_below_minimum) override;
     void SetPairedDeviceIds(const std::vector<std::string>& ids) override;
     void SetHasRecoverableInput(bool has_recoverable_input) override;
+    void SetTranslationModeEnabled(bool enabled) override;
     void ShowListening(const std::optional<std::string>& device_id) override;
     void ShowPartial(const std::string& text, const std::optional<std::string>& device_id) override;
     void ShowFinalCountdown(const std::string& text,
@@ -101,6 +102,7 @@ private:
     std::map<std::string, DeviceFirmwareInfo> firmware_info_map_;
     std::optional<PairedDeviceEntry> pending_pairing_entry_;
     bool has_recoverable_input_ = false;
+    bool translation_mode_enabled_ = false;
     bool is_shutting_down_ = false;
 };
 

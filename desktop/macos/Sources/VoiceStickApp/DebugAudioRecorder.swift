@@ -36,9 +36,9 @@ final class DebugAudioRecorder {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let fileURL = directory.appendingPathComponent(fileName(), isDirectory: false)
             try currentAudio.write(to: fileURL, options: .atomic)
-            NSLog("Debug audio saved: \(fileURL.path)")
+            AppLog.debug("Debug audio saved: \(fileURL.path)")
         } catch {
-            NSLog("Debug audio save failed: \(error.localizedDescription)")
+            AppLog.error("Debug audio save failed: \(error.localizedDescription)")
         }
 
         reset()

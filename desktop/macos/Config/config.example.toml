@@ -1,4 +1,5 @@
 asr_provider = "volcengine"
+# or: asr_provider = "openai"  # uses llm_api_key for speech-to-text
 voicestick_api_key = ""
 voicestick_cloud_url = "wss://api.xiaozhi.me/voicestick/asr/"
 volcengine_api_key = "your_volcengine_asr_api_key"

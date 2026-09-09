@@ -109,14 +109,15 @@ final class ASRWebSocketClient: ASRClient {
 
     @discardableResult
     func start(options: ASRSessionOptions) -> Bool {
-        startSession(options: options)
+        AppLog.debug("ASRWebSocketClient start provider=\(config.asrProvider.rawValue) url=\(providerWebSocketURL)")
+        return startSession(options: options)
     }
 
     private func startSession(options: ASRSessionOptions) -> Bool {
         let apiKey = providerAPIKey
         guard !apiKey.isEmpty else {
             let message = "Missing ASR API key"
-            NSLog("ASR config error: \(message)")
+            AppLog.error("ASR config error: \(message)")
             onError?(message)
             return false
         }
@@ -138,6 +139,8 @@ final class ASRWebSocketClient: ASRClient {
             return config.voiceStickAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         case .volcengine:
             return config.volcengineAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .openai:
+            return config.llmAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
@@ -147,6 +150,8 @@ final class ASRWebSocketClient: ASRClient {
             return config.voiceStickCloudURL.trimmingCharacters(in: .whitespacesAndNewlines)
         case .volcengine:
             return AppConfig.volcengineWebSocketURL
+        case .openai:
+            return config.llmBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
@@ -211,7 +216,7 @@ final class ASRWebSocketClient: ASRClient {
         request.setValue("-1", forHTTPHeaderField: "X-Api-Sequence")
 
         connectionState = .connecting
-        NSLog("ASR websocket connect provider=\(config.asrProvider.rawValue) request_id=\(connectID)")
+        AppLog.debug("ASR websocket connect provider=\(config.asrProvider.rawValue) request_id=\(connectID)")
         let task = URLSession.shared.webSocketTask(with: request)
         webSocket = task
         task.resume()
@@ -225,7 +230,7 @@ final class ASRWebSocketClient: ASRClient {
             return
         }
 
-        NSLog("ASR websocket start_session session_id=\(currentSessionID)")
+        AppLog.debug("ASR websocket start_session session_id=\(currentSessionID)")
         sendEvent(.startSession, sessionID: currentSessionID, payload: sessionPayload())
     }
 
@@ -266,7 +271,7 @@ final class ASRWebSocketClient: ASRClient {
         guard sessionState == .streaming else { return }
         guard let currentSessionID else { return }
         sessionState = .finishing
-        NSLog("ASR websocket finish_session session_id=\(currentSessionID)")
+        AppLog.debug("ASR websocket finish_session session_id=\(currentSessionID)")
         sendEvent(.finishSession, sessionID: currentSessionID, payload: connectionPayload())
     }
 
@@ -381,7 +386,7 @@ final class ASRWebSocketClient: ASRClient {
             frame.append(compressed)
             sendingTask.send(.data(frame)) { [weak self] error in
                 if let error {
-                    NSLog("ASR send event error: \(error.localizedDescription)")
+                    AppLog.error("ASR send event error: \(error.localizedDescription)")
                     self?.queue.async {
                         self?.failSession(error.localizedDescription)
                     }
@@ -397,7 +402,7 @@ final class ASRWebSocketClient: ASRClient {
                 }
             }
         } catch {
-            NSLog("ASR gzip error: \(error.localizedDescription)")
+            AppLog.error("ASR gzip error: \(error.localizedDescription)")
             failSession(error.localizedDescription)
         }
     }
@@ -416,7 +421,7 @@ final class ASRWebSocketClient: ASRClient {
             case .failure(let error):
                 self.queue.async {
                     guard self.webSocket === receivingTask else { return }
-                    NSLog("ASR receive error: \(error.localizedDescription)")
+                    AppLog.error("ASR receive error: \(error.localizedDescription)")
                     if self.sessionState == .idle || self.connectionState == .closing {
                         self.webSocket = nil
                         self.connectionState = .disconnected
@@ -431,7 +436,7 @@ final class ASRWebSocketClient: ASRClient {
     private func handle(_ message: URLSessionWebSocketTask.Message) {
         switch message {
         case .string(let text):
-            NSLog("ASR ignored text response bytes=\(text.utf8.count)")
+            AppLog.debug("ASR ignored text response bytes=\(text.utf8.count)")
         case .data(let data):
             handleBinaryResponse(data)
         @unknown default:
@@ -456,11 +461,11 @@ final class ASRWebSocketClient: ASRClient {
         }
 
         guard messageType == 0x09 || messageType == 0x0b else {
-            NSLog("ASR websocket unhandled response type=\(messageType) bytes=\(data.count)")
+            AppLog.debug("ASR websocket unhandled response type=\(messageType) bytes=\(data.count)")
             return
         }
         guard flags == 0x04 else {
-            NSLog("ASR websocket ignored non-event response type=\(messageType) flags=\(flags) bytes=\(data.count)")
+            AppLog.debug("ASR websocket ignored non-event response type=\(messageType) flags=\(flags) bytes=\(data.count)")
             return
         }
         guard let response = parseEventResponse(data, offset: &offset, compression: compression) else {
@@ -470,7 +475,7 @@ final class ASRWebSocketClient: ASRClient {
         switch response.event {
         case .connectionStarted:
             connectionState = .ready
-            NSLog("ASR websocket connection_started connect_id=\(response.sessionID ?? "")")
+            AppLog.debug("ASR websocket connection_started connect_id=\(response.sessionID ?? "")")
             if sessionState == .starting {
                 sendStartSession()
             }
@@ -478,7 +483,7 @@ final class ASRWebSocketClient: ASRClient {
         case .connectionFinished:
             connectionState = .disconnected
             webSocket = nil
-            NSLog("ASR websocket connection_finished")
+            AppLog.debug("ASR websocket connection_finished")
 
         case .connectionFailed:
             failSession(response.payloadText ?? "ASR connection failed")
@@ -486,7 +491,7 @@ final class ASRWebSocketClient: ASRClient {
         case .sessionStarted:
             guard response.sessionID == currentSessionID else { return }
             sessionState = .streaming
-            NSLog("ASR websocket session_started session_id=\(response.sessionID ?? "")")
+            AppLog.debug("ASR websocket session_started session_id=\(response.sessionID ?? "")")
             flushQueuedAudioChunks()
 
         case .asrResponse, .asrInfo:
@@ -519,7 +524,7 @@ final class ASRWebSocketClient: ASRClient {
             let definiteSegments = response.payloadText.map {
                 extractNewDefiniteSegments(from: $0)
             } ?? []
-            NSLog("ASR websocket session_finished session_id=\(response.sessionID ?? "") text_len=\(finalText.count)")
+            AppLog.debug("ASR websocket session_finished session_id=\(response.sessionID ?? "") text_len=\(finalText.count)")
             currentSessionID = nil
             latestSessionTranscript = ""
             emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
@@ -545,10 +550,10 @@ final class ASRWebSocketClient: ASRClient {
             break
 
         case nil:
-            NSLog("ASR websocket unknown event=\(response.eventID) bytes=\(data.count)")
+            AppLog.debug("ASR websocket unknown event=\(response.eventID) bytes=\(data.count)")
 
         default:
-            NSLog("ASR websocket ignored event=\(response.eventID)")
+            AppLog.debug("ASR websocket ignored event=\(response.eventID)")
         }
     }
 
@@ -607,7 +612,7 @@ final class ASRWebSocketClient: ASRClient {
             return
         }
         let message = String(data: body, encoding: .utf8) ?? "Unknown ASR error"
-        NSLog("ASR server error code=\(code): \(message)")
+        AppLog.error("ASR server error code=\(code): \(message)")
         let parsedError = parsedErrorMessage(code: code, message: message)
         failSession(parsedError.message)
         if let upgradeURL = parsedError.upgradeURL {
@@ -653,7 +658,7 @@ final class ASRWebSocketClient: ASRClient {
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: context),
               let contextString = String(data: data, encoding: .utf8) else {
-            NSLog("ASR hotwords context JSON serialization failed")
+            AppLog.error("ASR hotwords context JSON serialization failed")
             return
         }
 

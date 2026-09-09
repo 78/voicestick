@@ -264,6 +264,13 @@ void OverlayWindow::ShowError(const std::string& text, std::function<void()> on_
     SetTimer(hwnd_, kAutoHideTimerId, 2000, nullptr);
 }
 
+void OverlayWindow::SetTranslationEnabled(bool enabled) {
+    if (translation_enabled_ == enabled) return;
+    translation_enabled_ = enabled;
+    InvalidateStaticLayer();
+    if (mode_ != Mode::kHidden) UpdateLayeredBitmap();
+}
+
 void OverlayWindow::SetThemeColor(OverlayThemeColor color) {
     if (theme_color_ == color) return;
     theme_color_ = color;
@@ -779,6 +786,16 @@ void OverlayWindow::PaintIndicator(Gdiplus::Graphics& graphics, int x, int y, in
             int bx = start_x + i * (bar_width + spacing);
             int by = cy - bar_h / 2;
             graphics.FillRectangle(&bar_brush, bx, by, bar_width, bar_h);
+        }
+        if (translation_enabled_) {
+            const int t_size = Dp(14);
+            const int bx = start_x + total_w + Dp(5);
+            const int by = cy - t_size / 2;
+            Gdiplus::Pen t_pen(Gdiplus::Color(200, kInkRgb, kInkRgb, kInkRgb), DpF(3));
+            t_pen.SetStartCap(Gdiplus::LineCapRound);
+            t_pen.SetEndCap(Gdiplus::LineCapRound);
+            graphics.DrawLine(&t_pen, bx, by, bx + t_size, by);
+            graphics.DrawLine(&t_pen, bx + t_size / 2, by, bx + t_size / 2, by + t_size);
         }
     } else if (mode_ == Mode::kCountdown) {
         Gdiplus::Pen track_pen(Gdiplus::Color(kIndicatorTrackAlpha, kInkRgb,

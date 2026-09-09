@@ -184,7 +184,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     private func loadConfigIntoFields() {
         providerPopup.addItems(withTitles: [
             ASRProvider.voiceStickCloud.displayName,
-            ASRProvider.volcengine.displayName
+            ASRProvider.volcengine.displayName,
+            ASRProvider.openai.displayName
         ])
         providerPopup.target = self
         providerPopup.action = #selector(providerSelectionChanged)
@@ -435,7 +436,9 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     }
 
     @objc private func apiKeyFieldDidChange() {
+        syncOpenAIAPIKeyIfNeeded()
         updateApplyTrialButton()
+        updateNextButton()
     }
 
     @objc private func applyTrialAPIKey() {
@@ -547,6 +550,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
 
         if currentStep == .finish {
             do {
+                normalizeOpenAIKeyForTranslation()
                 try config.save()
                 didComplete = true
                 central?.stopScan()
@@ -572,6 +576,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
                 return false
             }
         case .provider:
+            normalizeOpenAIKeyForTranslation()
             if activeAPIKey().isEmpty {
                 statusLabel.stringValue = "Enter the API key for \(selectedProvider().displayName)."
                 return false
@@ -624,6 +629,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             return .voiceStickCloud
         case ASRProvider.volcengine.displayName:
             return .volcengine
+        case ASRProvider.openai.displayName:
+            return .openai
         default:
             return config.asrProvider
         }
@@ -635,6 +642,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             return config.voiceStickAPIKey
         case .volcengine:
             return config.volcengineAPIKey
+        case .openai:
+            return config.llmAPIKey
         }
     }
 
@@ -644,6 +653,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             return config.voiceStickAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         case .volcengine:
             return config.volcengineAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .openai:
+            return config.llmAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
@@ -654,9 +665,25 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             config.voiceStickAPIKey = key
         case .volcengine:
             config.volcengineAPIKey = key
+        case .openai:
+            config.llmAPIKey = key
         }
         config.asrProvider = selectedProvider()
         config.resourceID = resourcePopup.titleOfSelectedItem ?? config.resourceID
+        normalizeOpenAIKeyForTranslation()
+    }
+
+    private func syncOpenAIAPIKeyIfNeeded() {
+        guard currentDisplayedProvider == .openai else { return }
+        config.llmAPIKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizeOpenAIKeyForTranslation() {
+        guard selectedProvider() == .openai else { return }
+        let key = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !key.isEmpty {
+            config.llmAPIKey = key
+        }
     }
 
     private func updateApplyTrialButton() {
