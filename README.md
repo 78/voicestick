@@ -1,6 +1,6 @@
 # Voice Stick
 
-Voice Stick turns an M5Stack StickS3 into a Bluetooth push-to-talk input device for macOS.
+Voice Stick turns an M5Stack StickS3 into a Bluetooth push-to-talk input device for macOS, Windows, and Linux.
 
 Hold the front button on the StickS3 to record. When you release it, the macOS menu bar app sends the audio to ASR, shows the recognized text, and pastes the final result into the currently focused input field after a short confirmation countdown. By default it pastes text and presses Return; `auto_enter` can be disabled in settings.
 
@@ -9,7 +9,7 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - `firmware/`: ESP-IDF firmware for M5Stack StickS3 / ESP32-S3.
 - `desktop/macos/`: Swift Package for the native macOS menu bar app.
 - `desktop/windows/`: Windows desktop app workspace.
-- `desktop/linux/`: Linux desktop app workspace.
+- `desktop/linux/`: GTK4 / libadwaita Linux desktop app.
 - `docs/protocol.md`: BLE protocol between StickS3 and macOS.
 - `docs/volcengine-asr.md`: trimmed Volcengine ASR notes used by the desktop client.
 - `scripts/`: sprite slicing, palette tuning, and LVGL ARGB binary conversion helpers.
@@ -155,6 +155,22 @@ scripts\build-msi.bat
 
 The script signs `VoiceStick.exe`, `WinSparkle.dll`, and `VoiceStick_<version>.msi` locally. Upload that MSI to the matching GitHub Release, then manually run the `Deploy Website to GitHub Pages` workflow so the shared appcast points Windows clients at the Release asset URL.
 
+## Linux Desktop Build
+
+The Linux app is GTK4 + libadwaita. On GNOME, install `gnome-shell-extension-appindicator` (Debian UUID `ubuntu-appindicators@ubuntu.com`) and log in again so the top-bar icon can appear.
+
+```sh
+sudo apt install cmake ninja-build g++ pkg-config \
+  libgtk-4-dev libadwaita-1-dev libsoup-3.0-dev \
+  libglib2.0-dev libatspi2.0-dev libssl-dev \
+  gnome-shell-extension-appindicator
+cmake -S desktop/linux -B desktop/linux/build -G Ninja
+cmake --build desktop/linux/build
+desktop/linux/build/VoiceStick
+```
+
+Config is `~/.config/voicestick/config.toml`. Text is copied with GTK, then VoiceStick tries AT-SPI insert. If that fails, it uses the GNOME Remote Desktop portal to inject Ctrl+V. See `desktop/linux/README.md`.
+
 GitHub Actions can do the macOS and firmware release path automatically when a `v<version>` tag is pushed. The tag must match `VERSION`, for example `VERSION=0.2.1` pairs with `v0.2.1`. The release workflow publishes the macOS DMG/ZIP/signature and firmware assets to GitHub Releases, then deploys the website/appcast to GitHub Pages. The Windows MSI is uploaded afterward from the local signing machine. See `docs/release.md` for the full release process, including the Windows-first and Windows-afterward flows.
 
 The same release workflow also builds the StickS3 firmware with ESP-IDF v5.5.1 and uploads firmware artifacts to Aliyun OSS:
@@ -190,7 +206,8 @@ Set the repository variable `ALIYUN_OSS_PUBLIC_BASE_URL` to the public OSS base 
 Config path:
 
 ```text
-~/Library/Application Support/VoiceStick/config.toml
+macOS:  ~/Library/Application Support/VoiceStick/config.toml
+Linux:  ~/.config/voicestick/config.toml
 ```
 
 Create it from the example:
