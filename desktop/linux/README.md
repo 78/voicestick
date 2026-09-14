@@ -47,13 +47,15 @@ desktop/linux/build/VoiceStick
 ## Config
 
 ```text
-~/.config/VoiceStick/config.toml
-~/.local/share/VoiceStick/DebugAudio/
-~/.local/share/VoiceStick/VoiceStickApp.log
+~/.config/voicestick/config.toml
+~/.local/share/voicestick/DebugAudio/
+~/.local/share/voicestick/VoiceStickApp.log
 ```
 
 Copy [Config/config.example.toml](Config/config.example.toml) if you want a
-starting file. First launch also opens an onboarding wizard.
+starting file. First launch also opens an onboarding wizard. An existing
+`~/.config/VoiceStick` or `~/.local/share/VoiceStick` directory is renamed
+to the lowercase path on startup.
 
 ## Paste on GNOME / Wayland
 

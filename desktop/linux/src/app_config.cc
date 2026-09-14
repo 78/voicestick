@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 namespace voicestick {
 
@@ -28,11 +29,29 @@ std::filesystem::path HomeDirectory() {
     return std::filesystem::current_path();
 }
 
-std::filesystem::path XdgDirectory(const char* env_name, const char* fallback_subdir) {
+constexpr const char* kXdgAppDir = "voicestick";
+constexpr const char* kLegacyXdgAppDir = "VoiceStick";
+
+std::filesystem::path XdgRoot(const char* env_name, const char* fallback_subdir) {
     if (const char* value = std::getenv(env_name); value && *value) {
-        return std::filesystem::path(value) / "VoiceStick";
+        return std::filesystem::path(value);
     }
-    return HomeDirectory() / fallback_subdir / "VoiceStick";
+    return HomeDirectory() / fallback_subdir;
+}
+
+void MaybeMigrateXdgDir(const std::filesystem::path& current, const std::filesystem::path& legacy) {
+    std::error_code error;
+    if (std::filesystem::exists(current, error) || !std::filesystem::exists(legacy, error)) {
+        return;
+    }
+    std::filesystem::rename(legacy, current, error);
+}
+
+std::filesystem::path XdgDirectory(const char* env_name, const char* fallback_subdir) {
+    const auto root = XdgRoot(env_name, fallback_subdir);
+    const auto current = root / kXdgAppDir;
+    MaybeMigrateXdgDir(current, root / kLegacyXdgAppDir);
+    return current;
 }
 
 std::string Trim(std::string value) {

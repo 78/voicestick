@@ -169,7 +169,7 @@ cmake --build desktop/linux/build
 desktop/linux/build/VoiceStick
 ```
 
-Config is `~/.config/VoiceStick/config.toml`. Text is copied with GTK, then VoiceStick tries AT-SPI insert. If that fails, it uses the GNOME Remote Desktop portal to inject Ctrl+V. See `desktop/linux/README.md`.
+Config is `~/.config/voicestick/config.toml`. Text is copied with GTK, then VoiceStick tries AT-SPI insert. If that fails, it uses the GNOME Remote Desktop portal to inject Ctrl+V. See `desktop/linux/README.md`.
 
 GitHub Actions can do the macOS and firmware release path automatically when a `v<version>` tag is pushed. The tag must match `VERSION`, for example `VERSION=0.2.1` pairs with `v0.2.1`. The release workflow publishes the macOS DMG/ZIP/signature and firmware assets to GitHub Releases, then deploys the website/appcast to GitHub Pages. The Windows MSI is uploaded afterward from the local signing machine. See `docs/release.md` for the full release process, including the Windows-first and Windows-afterward flows.
 
@@ -207,7 +207,7 @@ Config path:
 
 ```text
 macOS:  ~/Library/Application Support/VoiceStick/config.toml
-Linux:  ~/.config/VoiceStick/config.toml
+Linux:  ~/.config/voicestick/config.toml
 ```
 
 Create it from the example:

@@ -15,7 +15,7 @@ auto_enter = true
 # Milliseconds to wait after recognition before auto-paste. 0 pastes immediately.
 confirmation_countdown_ms = 1000
 debug_audio_cache = false
-# debug_audio_dir = "~/.local/share/VoiceStick/DebugAudio"
+# debug_audio_dir = "~/.local/share/voicestick/DebugAudio"
 
 [output]
 target = "focused_app"
