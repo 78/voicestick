@@ -1,0 +1,23 @@
+asr_provider = "voicestick_cloud"
+voicestick_api_key = ""
+voicestick_cloud_url = "wss://api.xiaozhi.me/voicestick/asr/"
+volcengine_api_key = ""
+llm_base_url = "https://api.openai.com/v1"
+llm_api_key = ""
+llm_model = "gpt-5.5"
+interaction_mode = "hold_to_talk"
+resource_id = "volc.seedasr.sauc.duration"
+asr_hotwords = "小智,VoiceStick"
+paired_device_ids = ""
+device_theme_colors = ""
+device_overlay_positions = ""
+auto_enter = true
+# Milliseconds to wait after recognition before auto-paste. 0 pastes immediately.
+confirmation_countdown_ms = 1000
+debug_audio_cache = false
+# debug_audio_dir = "~/.local/share/VoiceStick/DebugAudio"
+
+[output]
+target = "focused_app"
+transform = "original"
+translation_target = "en"

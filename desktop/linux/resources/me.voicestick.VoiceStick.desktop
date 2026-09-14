@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=VoiceStick
+Comment=Push-to-talk VoiceStick companion
+Exec=VoiceStick
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;Audio;
+StartupNotify=false
+X-GNOME-UsesNotifications=true
