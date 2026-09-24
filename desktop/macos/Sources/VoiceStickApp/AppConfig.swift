@@ -5,6 +5,7 @@ import TOMLKit
 enum ASRProvider: String {
     case voiceStickCloud = "voicestick_cloud"
     case volcengine
+    case openai
 
     var displayName: String {
         switch self {
@@ -12,6 +13,8 @@ enum ASRProvider: String {
             return "VoiceStick Cloud"
         case .volcengine:
             return "Volcengine"
+        case .openai:
+            return "OpenAI"
         }
     }
 }
@@ -210,7 +213,7 @@ struct AppConfig {
             return loadLegacy(text: text, defaults: defaults)
         }
 
-        return AppConfig(
+        let config = AppConfig(
             asrProvider: asrProviderValue(file.asr_provider, default: defaults.asrProvider),
             voiceStickAPIKey: file.voicestick_api_key ?? defaults.voiceStickAPIKey,
             voiceStickCloudURL: file.voicestick_cloud_url ?? defaults.voiceStickCloudURL,
@@ -243,6 +246,7 @@ struct AppConfig {
             debugAudioCache: file.debug_audio_cache ?? defaults.debugAudioCache,
             debugAudioDirectory: directoryValue(file.debug_audio_dir, default: defaults.debugAudioDirectory)
         )
+        return config
     }
 
     func save() throws {
@@ -271,7 +275,9 @@ struct AppConfig {
         translation_target = "\(defaultOutputProfile.translationTarget.tomlEscaped)"
         """
         let deviceText = deviceOutputProfileText
-        try (text + deviceText).write(to: Self.configURL, atomically: true, encoding: .utf8)
+        let finalText = text + deviceText
+        try finalText.write(to: Self.configURL, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.configURL.path)
     }
 
     private static func loadLegacy(text: String, defaults: AppConfig) -> AppConfig {
@@ -508,6 +514,7 @@ struct AppConfig {
             }
             .joined(separator: "\n")
     }
+
 }
 
 private struct ConfigFile: Decodable {

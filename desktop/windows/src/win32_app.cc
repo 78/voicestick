@@ -2,6 +2,7 @@
 
 #include "asr_client_win.h"
 #include "ble_central_win.h"
+#include "openai_transcription_client.h"
 #include "log.h"
 #include "resource.h"
 
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <exception>
 #include <iterator>
+#include <memory>
 #include <optional>
 
 namespace voicestick {
@@ -164,12 +166,18 @@ int Win32App::Run() {
         coordinator_ = std::make_unique<VoiceStickCoordinator>(
             config_,
             std::move(ble),
-            std::make_unique<AsrClientWin>(config_),
+            config_.asr_provider == AsrProvider::kOpenAI
+                ? std::unique_ptr<AsrClient>(std::make_unique<OpenAITranscriptionClient>(config_))
+                : std::make_unique<AsrClientWin>(config_),
             this,
             &input_injector_,
-            [](const AppConfig& config) {
+            [](const AppConfig& config) -> std::unique_ptr<AsrClient> {
+                if (config.asr_provider == AsrProvider::kOpenAI) {
+                    return std::make_unique<OpenAITranscriptionClient>(config);
+                }
                 return std::make_unique<AsrClientWin>(config);
-            });
+            },
+            [this](std::function<void()> action) { DispatchToUi(std::move(action)); });
         LogLine("Starting coordinator");
         coordinator_->Start();
         LogLine("Coordinator started");
@@ -309,6 +317,14 @@ void Win32App::SetPairedDeviceIds(const std::vector<std::string>& ids) {
 void Win32App::SetHasRecoverableInput(bool has_recoverable_input) {
     DispatchToUi([this, has_recoverable_input] {
         has_recoverable_input_ = has_recoverable_input;
+    });
+}
+
+void Win32App::SetTranslationModeEnabled(bool enabled) {
+    DispatchToUi([this, enabled] {
+        translation_mode_enabled_ = enabled;
+        if (overlay_) overlay_->SetTranslationEnabled(enabled);
+        RebuildTooltip();
     });
 }
 
@@ -610,6 +626,9 @@ void Win32App::RemoveTrayIcon() {
 
 void Win32App::ShowTrayMenu() {
     HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | MF_DISABLED, 0,
+                translation_mode_enabled_ ? L"Translation: On" : L"Translation: Off");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     if (has_recoverable_input_) AppendMenuW(menu, MF_STRING, kMenuRestore, L"Restore Last Input");
     AppendMenuW(menu, MF_STRING, kMenuPairScan, L"Pair Device...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -837,6 +856,13 @@ void Win32App::SaveDeviceOutputProfile(const std::string& device_id, OutputProfi
         }
         config_.Save();
         if (coordinator_) coordinator_->UpdateConfig(config_);
+        SetTranslationModeEnabled(
+            config_.default_output_profile.transform == TextTransform::kTranslate ||
+            std::any_of(config_.device_output_profiles.begin(),
+                        config_.device_output_profiles.end(),
+                        [](const auto& entry) {
+                            return entry.second.transform == TextTransform::kTranslate;
+                        }));
         LogLine("Output profile saved VS-" + device_id + "=" +
                 TextTransformName(profile.transform) + ":" + profile.translation_target);
     } catch (const std::exception& error) {
@@ -869,9 +895,17 @@ void Win32App::RebuildTooltip() {
     data.hWnd = hwnd_;
     data.uID = kTrayIconId;
     data.uFlags = NIF_TIP | NIF_SHOWTIP;
-    auto tip = Utf16(std::string("VoiceStick - ") +
-                     (connected_devices_.empty() ? "Not connected" : "Connected"));
-    wcsncpy_s(data.szTip, tip.c_str(), _TRUNCATE);
+    std::string tip = "VoiceStick - ";
+    tip.append(connected_devices_.empty() ? "Not connected" : "Connected");
+    if (translation_mode_enabled_) {
+        tip += " [T]";
+    }
+    if (!status_.empty()) {
+        tip.append(" - ");
+        tip.append(status_);
+    }
+    auto tip_w = Utf16(tip);
+    wcsncpy_s(data.szTip, tip_w.c_str(), _TRUNCATE);
     Shell_NotifyIconW(NIM_MODIFY, &data);
 }
 

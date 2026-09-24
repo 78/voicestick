@@ -417,7 +417,15 @@ void AppConfig::Save() const {
 }
 
 std::string AppConfig::ActiveApiKey() const {
-    return asr_provider == AsrProvider::kVoiceStickCloud ? voicestick_api_key : volcengine_api_key;
+    switch (asr_provider) {
+    case AsrProvider::kVoiceStickCloud:
+        return voicestick_api_key;
+    case AsrProvider::kVolcengine:
+        return volcengine_api_key;
+    case AsrProvider::kOpenAI:
+        return llm_api_key;
+    }
+    return {};
 }
 
 std::string AppConfig::ActiveWebsocketUrl() const {
@@ -494,11 +502,21 @@ OutputProfile AppConfig::OutputProfileForDevice(const std::optional<std::string>
 }
 
 std::string AsrProviderName(AsrProvider provider) {
-    return provider == AsrProvider::kVoiceStickCloud ? "voicestick_cloud" : "volcengine";
+    switch (provider) {
+    case AsrProvider::kVoiceStickCloud:
+        return "voicestick_cloud";
+    case AsrProvider::kVolcengine:
+        return "volcengine";
+    case AsrProvider::kOpenAI:
+        return "openai";
+    }
+    return "voicestick_cloud";
 }
 
 AsrProvider AsrProviderFromName(std::string_view name) {
-    return name == "voicestick_cloud" ? AsrProvider::kVoiceStickCloud : AsrProvider::kVolcengine;
+    if (name == "openai") return AsrProvider::kOpenAI;
+    if (name == "volcengine") return AsrProvider::kVolcengine;
+    return AsrProvider::kVoiceStickCloud;
 }
 
 std::string InteractionModeName(InteractionMode mode) {

@@ -81,6 +81,8 @@ final class StatusController {
     private let menu = NSMenu()
     private var overlays: [String: OverlayController] = [:]
     private var visibleOverlayKeys: Set<String> = []
+    private var currentStatus: AppStatus = .ready
+    private var translationModeEnabled = false
 
     var onQuit: (() -> Void)?
     var onOpenSettings: (() -> Void)?
@@ -124,7 +126,7 @@ final class StatusController {
         self.defaultOutputProfile = defaultOutputProfile
         self.deviceOutputProfiles = deviceOutputProfiles
         self.needsPairing = pairedDeviceIDs.isEmpty
-        updateStatusButton(.ready)
+        updateStatusButton(currentStatus)
         rebuildMenu()
     }
 
@@ -184,6 +186,13 @@ final class StatusController {
         rebuildMenu()
     }
 
+    func setTranslationModeEnabled(_ enabled: Bool) {
+        guard translationModeEnabled != enabled else { return }
+        translationModeEnabled = enabled
+        rebuildMenu()
+        updateStatusButton(currentStatus)
+    }
+
     private func rebuildMenu() {
         menu.removeAllItems()
         if hasRecoverableInput {
@@ -194,6 +203,18 @@ final class StatusController {
             ))
             menu.addItem(NSMenuItem.separator())
         }
+
+        let translationStateItem = NSMenuItem(
+            title: translationModeEnabled ? "Translation: On" : "Translation: Off",
+            action: nil,
+            keyEquivalent: ""
+        )
+        translationStateItem.isEnabled = false
+        translationStateItem.image = Self.symbolImage(
+            named: translationModeEnabled ? "text.bubble.fill" : "text.bubble",
+            accessibilityDescription: translationStateItem.title
+        )
+        menu.addItem(translationStateItem)
 
         addDeviceItems()
 
@@ -471,7 +492,9 @@ final class StatusController {
 
     func setStatus(_ text: String) {
         DispatchQueue.main.async {
-            self.updateStatusButton(AppStatus(text: text))
+            let status = AppStatus(text: text)
+            self.currentStatus = status
+            self.updateStatusButton(status)
         }
     }
 
@@ -555,10 +578,14 @@ final class StatusController {
             named: status.symbolName(hasConnectedDevices: !connectedDevices.isEmpty),
             accessibilityDescription: status.accessibilityDescription
         )
-        button.title = status.visibleTitle ?? ""
-        button.imagePosition = status.visibleTitle == nil ? .imageOnly : .imageLeading
-        button.toolTip = "VoiceStick: \(status.accessibilityDescription)"
-        button.setAccessibilityLabel("VoiceStick: \(status.accessibilityDescription)")
+        let statusTitle = status.visibleTitle ?? ""
+        let translationBadge = translationModeEnabled ? "T" : ""
+        let buttonTitle = [statusTitle, translationBadge].filter { !$0.isEmpty }.joined(separator: " ")
+        button.title = buttonTitle
+        button.imagePosition = buttonTitle.isEmpty ? .imageOnly : .imageLeading
+        let translationTooltip = translationModeEnabled ? ", Translation On" : ", Translation Off"
+        button.toolTip = "VoiceStick: \(status.accessibilityDescription)\(translationTooltip)"
+        button.setAccessibilityLabel("VoiceStick: \(status.accessibilityDescription)\(translationTooltip)")
     }
 
     private func makeMenuItem(

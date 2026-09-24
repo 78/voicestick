@@ -15,10 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureMainMenu()
         configureApplicationIcon()
+        let loadedConfig = AppConfig.load()
         if AppConfig.configExists {
-            startApp(config: AppConfig.load())
+            startApp(config: loadedConfig)
         } else {
-            showOnboarding()
+            showOnboarding(config: loadedConfig)
         }
     }
 
@@ -62,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         self.statusController = statusController
         self.coordinator = coordinator
+        statusController.setTranslationModeEnabled(Self.isTranslationEnabled(config))
 
         statusController.onQuit = { NSApp.terminate(nil) }
         statusController.onOpenSettings = { [weak self] in
@@ -78,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
                 self?.statusController?.setDefaultOutputProfile(config.defaultOutputProfile)
                 self?.statusController?.setDeviceOutputProfiles(config.deviceOutputProfiles)
+                self?.statusController?.setTranslationModeEnabled(Self.isTranslationEnabled(config))
                 self?.coordinator?.updateConfig(config)
             }
             self?.showDockIconWhileWindowVisible(controller)
@@ -99,6 +102,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 latestVersion: latestVersion,
                 isBelowMinimum: isBelowMinimum
             )
+        }
+        coordinator.onToggleTranslationMode = { [weak self] deviceID in
+            self?.toggleTranslationMode(deviceID: deviceID)
         }
         statusController.onRestoreLastInput = { [weak self] in
             self?.coordinator?.restoreLastInputConfirmation() ?? false
@@ -151,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 interactionMode: config.interactionMode,
                 autoEnter: config.autoEnter
             )
+            statusController?.setTranslationModeEnabled(Self.isTranslationEnabled(config))
             coordinator?.updateConfig(config)
         } catch {
             statusController?.setStatus("Input save failed")
@@ -168,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try config.save()
             self.config = config
             statusController?.setDeviceThemeColors(config.deviceThemeColors)
+            statusController?.setTranslationModeEnabled(Self.isTranslationEnabled(config))
         } catch {
             statusController?.setStatus("Theme save failed")
         }
@@ -180,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try config.save()
             self.config = config
             statusController?.setDefaultOutputProfile(profile)
+            statusController?.setTranslationModeEnabled(Self.isTranslationEnabled(config))
             coordinator?.updateConfig(config)
         } catch {
             statusController?.setStatus("Output save failed")
@@ -203,10 +212,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try config.save()
             self.config = config
             statusController?.setDeviceOutputProfiles(config.deviceOutputProfiles)
+            statusController?.setTranslationModeEnabled(Self.isTranslationEnabled(config))
             coordinator?.updateConfig(config)
         } catch {
             statusController?.setStatus("Output save failed")
         }
+    }
+
+    private func toggleTranslationMode(deviceID: String?) {
+        if let deviceID {
+            let currentProfile = config.outputProfile(for: deviceID)
+            let toggledProfile = OutputProfile(
+                target: currentProfile.target,
+                transform: currentProfile.transform == .translate ? .original : .translate,
+                translationTarget: currentProfile.transform == .translate ? currentProfile.translationTarget : "en"
+            )
+            updateDeviceOutputProfile(deviceID: deviceID, profile: toggledProfile)
+            return
+        }
+
+        let currentProfile = config.defaultOutputProfile
+        let toggledProfile = OutputProfile(
+            target: currentProfile.target,
+            transform: currentProfile.transform == .translate ? .original : .translate,
+            translationTarget: currentProfile.transform == .translate ? currentProfile.translationTarget : "en"
+        )
+        updateDefaultOutputProfile(toggledProfile)
     }
 
     private func updateDeviceOverlayPosition(deviceID: String, position: OverlayPosition) {
@@ -225,8 +256,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showOnboarding() {
-        let controller = OnboardingWindowController(config: AppConfig.defaults) { [weak self] config in
+    private static func isTranslationEnabled(_ config: AppConfig) -> Bool {
+        if config.defaultOutputProfile.transform == .translate {
+            return true
+        }
+        return config.deviceOutputProfiles.values.contains { $0.transform == .translate }
+    }
+
+    private func showOnboarding(config: AppConfig) {
+        let controller = OnboardingWindowController(config: config) { [weak self] config in
             self?.onboardingWindowController = nil
             self?.startApp(config: config)
         }
@@ -377,6 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.deviceOverlayPositions.removeValue(forKey: deviceID)
         do {
             try config.save()
+            self.config = config
             statusController?.setPairedDeviceIDs(config.pairedDeviceIDs)
             statusController?.setDeviceThemeColors(config.deviceThemeColors)
             statusController?.setDeviceOverlayPositions(config.deviceOverlayPositions)

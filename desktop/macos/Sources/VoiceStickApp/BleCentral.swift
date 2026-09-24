@@ -122,25 +122,25 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             if let characteristic = controlCharacteristics[peripheralID] {
                 if let peripheral = peripherals[peripheralID] {
                     let deviceID = connectedDevices[peripheralID]?.deviceID ?? "unknown"
-                    NSLog("BLE send ui_state state=\(state) dev=VS-\(deviceID) text_len=\(text.count)")
+                    AppLog.debug("BLE send ui_state state=\(state) dev=VS-\(deviceID) text_len=\(text.count)")
                     peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
                 } else {
-                    NSLog("BLE send ui_state skipped missing peripheral state=\(state) id=\(peripheralID) text_len=\(text.count)")
+                    AppLog.debug("BLE send ui_state skipped missing peripheral state=\(state) id=\(peripheralID) text_len=\(text.count)")
                 }
             } else {
-                NSLog("BLE send ui_state skipped missing characteristic state=\(state) id=\(peripheralID) text_len=\(text.count)")
+                AppLog.debug("BLE send ui_state skipped missing characteristic state=\(state) id=\(peripheralID) text_len=\(text.count)")
             }
             return
         }
 
-        NSLog("BLE send ui_state broadcast state=\(state) targets=\(controlCharacteristics.count) text_len=\(text.count)")
+        AppLog.debug("BLE send ui_state broadcast state=\(state) targets=\(controlCharacteristics.count) text_len=\(text.count)")
         for (id, characteristic) in controlCharacteristics {
             if let peripheral = peripherals[id] {
                 let deviceID = connectedDevices[id]?.deviceID ?? "unknown"
-                NSLog("BLE send ui_state state=\(state) dev=VS-\(deviceID) text_len=\(text.count)")
+                AppLog.debug("BLE send ui_state state=\(state) dev=VS-\(deviceID) text_len=\(text.count)")
                 peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
             } else {
-                NSLog("BLE send ui_state skipped missing peripheral state=\(state) id=\(id) text_len=\(text.count)")
+                AppLog.debug("BLE send ui_state skipped missing peripheral state=\(state) id=\(id) text_len=\(text.count)")
             }
         }
     }

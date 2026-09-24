@@ -18,8 +18,8 @@ Current scope:
 - Core VoiceStick protocol parsing, Ogg Opus muxing, ASR binary framing, and coordinator state machine.
 - Text insertion through clipboard plus `SendInput`.
 - App self-update checks through WinSparkle, using the same appcast feed as the macOS Sparkle updater.
-
-Full BLE GATT characteristic I/O is intentionally left for follow-up hardware validation work.
+- **OpenAI Whisper ASR provider** — `OpenAITranscriptionClient` sends buffered OggOpus via HTTP multipart POST to `/audio/transcriptions` with model `whisper-1`; uses existing `llm_api_key` and `llm_base_url` config fields. Selectable as `"OpenAI"` in settings and onboarding.
+- **Double-click side button translation toggle** — 350 ms double-click window on the secondary button toggles `OutputProfile.transform` between `original` and `translate` per device. Shows `[T]` badge in the listening overlay, `"Translation: On/Off"` tray menu item, and `[T]` indicator in the tray tooltip.
 
 ## Build
 

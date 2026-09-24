@@ -31,7 +31,8 @@ VoiceStickCoordinator::VoiceStickCoordinator(AppConfig config,
                                              std::unique_ptr<AsrClient> asr,
                                              VoiceStickUi* ui,
                                              InputInjector* input_injector,
-                                             std::function<std::unique_ptr<AsrClient>(const AppConfig&)> asr_factory)
+                                             std::function<std::unique_ptr<AsrClient>(const AppConfig&)> asr_factory,
+                                             std::function<void(std::function<void()>)> post_task)
     : config_(std::move(config)),
       ble_(std::move(ble)),
       asr_(std::move(asr)),
@@ -39,6 +40,7 @@ VoiceStickCoordinator::VoiceStickCoordinator(AppConfig config,
       translator_(config_),
       ui_(ui),
       input_injector_(input_injector),
+      post_task_(std::move(post_task)),
       debug_audio_recorder_(config_.debug_audio_cache, config_.debug_audio_directory),
       paired_device_ids_(config_.paired_device_ids) {
     for (const auto& entry : config_.paired_devices) {
@@ -112,6 +114,8 @@ void VoiceStickCoordinator::Shutdown() {
     active_subtitle_sessions_.clear();
     ui_->HideSubtitles();
     CancelAudioEndTimeout();
+    secondary_click_generation_.fetch_add(1);
+    pending_secondary_click_device_id_.reset();
     active_session_id_.reset();
     active_device_id_.reset();
     active_session_started_at_ = {};
@@ -139,10 +143,17 @@ void VoiceStickCoordinator::UpdateConfig(AppConfig config) {
         EnterReady("config_update_cancel");
     }
 
+    const bool is_translation_enabled = config.default_output_profile.transform == TextTransform::kTranslate ||
+                                        std::any_of(config.device_output_profiles.begin(),
+                                                     config.device_output_profiles.end(),
+                                                     [](const auto& entry) {
+                                                         return entry.second.transform == TextTransform::kTranslate;
+                                                     });
     config_ = std::move(config);
     translator_ = LLMTranslationClient(config_);
     ble_->SendInteractionMode(config_.interaction_mode, std::nullopt);
     debug_audio_recorder_ = DebugAudioRecorder(config_.debug_audio_cache, config_.debug_audio_directory);
+    ui_->SetTranslationModeEnabled(is_translation_enabled);
     if (asr_factory_) {
         asr_ = asr_factory_(config_);
         ConfigureAsrCallbacks();
@@ -366,7 +377,19 @@ void VoiceStickCoordinator::HandleButtonClick(const StateEvent& event, const std
     }
 }
 
-void VoiceStickCoordinator::HandleSecondaryButtonClick(const std::string& device_id) {
+bool VoiceStickCoordinator::CanToggleTranslationMode(const std::string& device_id) const {
+    if (!pending_paste_state_.IsIdle()) return false;
+    if (session_state_ != SessionState::kReady) return false;
+    if (IsWaitingForFinalText()) return false;
+    if (HasActiveSubtitleSession(device_id)) return false;
+    if (std::any_of(subtitle_cycles_.begin(), subtitle_cycles_.end(),
+                    [&](const auto& entry) { return entry.first.first == device_id; })) {
+        return false;
+    }
+    return true;
+}
+
+void VoiceStickCoordinator::PerformSecondarySingleClickAction(const std::string& device_id) {
     if (HasActiveSubtitleSession(device_id)) {
         CancelSubtitleCycle(device_id, "secondary_cancel");
         return;
@@ -377,6 +400,67 @@ void VoiceStickCoordinator::HandleSecondaryButtonClick(const std::string& device
         return;
     }
     CancelPendingPaste(device_id);
+}
+
+void VoiceStickCoordinator::HandleSecondaryButtonClick(const std::string& device_id) {
+    if (CanToggleTranslationMode(device_id)) {
+        if (pending_secondary_click_device_id_.has_value() &&
+            *pending_secondary_click_device_id_ == device_id) {
+            secondary_click_generation_.fetch_add(1);
+            pending_secondary_click_device_id_.reset();
+            ToggleTranslationModeForDevice(device_id);
+            return;
+        }
+        auto generation = secondary_click_generation_.fetch_add(1) + 1;
+        pending_secondary_click_device_id_ = device_id;
+        if (post_task_) {
+            std::thread([this, alive = alive_, generation, device_id] {
+                std::this_thread::sleep_for(kSecondaryDoubleClickInterval);
+                if (!alive->load()) return;
+                if (secondary_click_generation_.load() != generation) return;
+                post_task_([this, device_id, generation] {
+                    if (secondary_click_generation_.load() != generation) return;
+                    if (pending_secondary_click_device_id_.has_value() &&
+                        *pending_secondary_click_device_id_ == device_id) {
+                        pending_secondary_click_device_id_.reset();
+                    }
+                    PerformSecondarySingleClickAction(device_id);
+                });
+            }).detach();
+        } else {
+            PerformSecondarySingleClickAction(device_id);
+        }
+        return;
+    }
+    PerformSecondarySingleClickAction(device_id);
+}
+
+void VoiceStickCoordinator::ToggleTranslationModeForDevice(const std::string& device_id) {
+    auto profile = OutputProfileForDevice(device_id);
+    profile.transform = (profile.transform == TextTransform::kTranslate)
+                            ? TextTransform::kOriginal
+                            : TextTransform::kTranslate;
+    profile.translation_target = "en";
+    OutputProfile default_profile = config_.default_output_profile;
+    default_profile.target = profile.target;
+    if (profile.transform == default_profile.transform &&
+        profile.translation_target == default_profile.translation_target) {
+        config_.device_output_profiles.erase(device_id);
+    } else {
+        config_.device_output_profiles[device_id] = profile;
+    }
+    config_.Save();
+    const bool is_translation_enabled =
+        config_.default_output_profile.transform == TextTransform::kTranslate ||
+        std::any_of(config_.device_output_profiles.begin(), config_.device_output_profiles.end(),
+                    [](const auto& entry) {
+                        return entry.second.transform == TextTransform::kTranslate;
+                    });
+    ui_->SetStatus(is_translation_enabled ? "Translation: On" : "Ready");
+    ui_->SetTranslationModeEnabled(is_translation_enabled);
+    ui_->SetHasRecoverableInput(false);
+    last_recoverable_text_.reset();
+    last_recoverable_device_id_.reset();
 }
 
 void VoiceStickCoordinator::HandlePrimaryButtonDown(std::optional<std::uint32_t> session_id,

@@ -120,6 +120,9 @@ public:
     void SetHasRecoverableInput(bool has_recoverable_input) override {
         has_recoverable_input_set = has_recoverable_input;
     }
+    void SetTranslationModeEnabled(bool enabled) override {
+        translation_mode_enabled_set = enabled;
+    }
     void ShowListening(const std::optional<std::string>&) override {
         ++show_listening_count;
     }
@@ -175,6 +178,7 @@ public:
     std::function<void()> final_countdown_completion;
     std::function<void()> error_completion;
     bool has_recoverable_input_set = false;
+    bool translation_mode_enabled_set = false;
     int show_listening_count = 0;
     int hide_overlay_count = 0;
     int hide_subtitles_count = 0;

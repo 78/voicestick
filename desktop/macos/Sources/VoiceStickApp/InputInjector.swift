@@ -1,9 +1,20 @@
 import AppKit
+import ApplicationServices
 import Foundation
 
 final class InputInjector {
-    func paste(text: String, pressEnter: Bool) {
-        guard !text.isEmpty else { return }
+    func paste(text: String, pressEnter: Bool) -> Bool {
+        guard !text.isEmpty else { return true }
+        guard isAccessibilityTrusted(promptIfNeeded: true) else { return false }
+
+        if insertWithAccessibility(text) {
+            if pressEnter {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                    self.sendReturn()
+                }
+            }
+            return true
+        }
 
         let pasteboard = NSPasteboard.general
         let previousItems = pasteboard.pasteboardItems?.map(PasteboardItemSnapshot.init)
@@ -14,7 +25,6 @@ final class InputInjector {
         sendCommandV()
 
         if pressEnter {
-            NSLog("InputInjector auto_enter")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
                 self.releaseCommandKey()
                 self.sendReturn()
@@ -30,6 +40,75 @@ final class InputInjector {
                 pasteboard.writeObjects(restoredItems)
             }
         }
+
+        return true
+    }
+
+    private func isAccessibilityTrusted(promptIfNeeded: Bool) -> Bool {
+        let options = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: promptIfNeeded
+        ] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
+    }
+
+    private func insertWithAccessibility(_ text: String) -> Bool {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        var focusedValue: CFTypeRef?
+        let focusedResult = AXUIElementCopyAttributeValue(
+            systemWideElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        )
+        guard focusedResult == .success, let focusedElement = focusedValue else {
+            return false
+        }
+
+        let element = unsafeBitCast(focusedElement, to: AXUIElement.self)
+        if AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success {
+            return true
+        }
+
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+              let currentText = valueRef as? String
+        else {
+            return false
+        }
+
+        var selectedRangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            &selectedRangeRef
+        ) == .success,
+           let selectedRangeValue = selectedRangeRef,
+           CFGetTypeID(selectedRangeValue) == AXValueGetTypeID()
+        else {
+            return false
+        }
+
+        var selectedRange = CFRange(location: 0, length: 0)
+        let axValue = unsafeBitCast(selectedRangeValue, to: AXValue.self)
+        AXValueGetValue(axValue, .cfRange, &selectedRange)
+
+        let currentNSString = currentText as NSString
+        guard selectedRange.location >= 0,
+              selectedRange.length >= 0,
+              selectedRange.location + selectedRange.length <= currentNSString.length
+        else {
+            return false
+        }
+
+        let updatedText = currentNSString.replacingCharacters(in: NSRange(location: selectedRange.location, length: selectedRange.length), with: text)
+        guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, updatedText as CFTypeRef) == .success else {
+            return false
+        }
+
+        var caretRange = CFRange(location: selectedRange.location + (text as NSString).length, length: 0)
+        if let caretValue = AXValueCreate(.cfRange, &caretRange) {
+            _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caretValue)
+        }
+        return true
     }
 
     private func sendCommandV() {
