@@ -388,7 +388,8 @@ Element 4 is the group heading (`today` only: "Angepinnt", "Überfällig",
 changes from the row before. Element 5 is a flag string: `c` means the row
 needs the OK step (a switch with `confirm` set in the app) — tap selects, the
 green "OK – schalten" chip toggles. Since 0.4.5 `s` marks an `input_select`: a tap
-opens the option picker (see the 0.4.5 section). A missing element reads as `""`. An `aux`
+opens the option picker (see the 0.4.5 section). Since 0.5.0 `l`/`w`/`f`/`k`
+name the device for the row's symbol (see the 0.5.0 section). A missing element reads as `""`. An `aux`
 that is a date (`31.10.`) marks an overdue task and is drawn red. Rows no
 longer sit on pages: the list scrolls, and up/down move it by one view.
 
@@ -597,8 +598,39 @@ same coordinates as `item`, then a fresh glance. On the watch the row shows
 same `kind`/`rev`/`index`), and the history keeps "Büro Modus: Gaming" with
 those coordinates — `undo` from there restores the previous option through the
 server's record. Tapping the active option sends nothing and only closes;
-swipe down (at the top of the list), back from the left edge and 10 s without
-input close without sending.
+a swipe right, the back arrow "‹" at the top left (since 0.5.0; until 0.4.6
+swipe down at the top of the list and back from the left edge) and 10 s
+without input close without sending.
+
+### Fork addition: 0.5.0
+
+Package J (clarity). Optional in both directions: older firmware ignores the
+new flag letters, a bridge that never sends them leaves the watch showing
+"An"/"Aus" as before. `device_info` is unchanged.
+
+**Device flags in `list`** (bridge → watch, element 5, `switches` only): one
+letter for the kind of device behind the row, next to `c` and `s` (order does
+not matter, one device letter per row):
+
+| Flag | Device (Home Assistant domain) | Symbol on the watch |
+| --- | --- | --- |
+| `l` | `light` | bulb |
+| `w` | `switch`, `input_boolean` | toggle |
+| `f` | `fan` | fan |
+| `k` | `lock` | lock; **always asks for the OK**, as if `c` were set |
+| `s` | `input_select` (0.4.5) | list, the option stays as a word |
+
+```json
+{"event":"list","kind":"switches","rev":5,"part":0,"items":[["Licht Küche","1","","","l"],["Haustür","Zu","","","ck"],["Büro Modus","Feierabend","","","s"]]}
+```
+
+With a device letter the symbol carries the state — filled/bright for on or
+open, outline/grey for off or closed — and the word on the right is dropped
+(a lock shows "..." after the tap until the new card arrives). A lock is open
+when its `aux` is `"Offen"` (or `"1"`). Without a device letter the row keeps
+"An"/"Aus" or the word. Rows that need the OK (Today, `c`, `k`) carry a grey
+"OK" pill before their `aux`, so the second step is visible before the tap;
+the `item` sent after the OK is unchanged.
 
 ### Fork addition: `question` on `ui_state`
 
