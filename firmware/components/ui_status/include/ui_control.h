@@ -3,7 +3,7 @@
 /*
  * Kontrollzentrum der Uhr: mit einem Wischen vom oberen Rand nach unten.
  * Bis zu sechs Kacheln, Reihenfolge und Auswahl aus der App
- * (`watch_settings.tiles`); ohne Einstellung Lautlos, Helligkeit, Kino,
+ * (`watch_settings.tiles`); ohne Einstellung Lautlos, Helligkeit, Dunkel & still,
  * Sparen, Lampe, Akku. Was die Kacheln bewirken, entscheidet main.c; hier
  * wird nur gezeichnet und getroffen. Dazu die Taschenlampe: der ganze Schirm weiss, bis zum
  * naechsten Antippen. Auf dem StickS3 tun die Funktionen nichts.

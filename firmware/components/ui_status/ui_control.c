@@ -15,7 +15,7 @@ static const char *const TILE_NAMES[UI_CONTROL_COUNT] = {
 /*
  * Welche Kacheln in welcher Reihenfolge stehen -- eingestellt in der App.
  * Ohne Einstellung: Lautlos und Helligkeit oben (die zwei, die man am
- * haeufigsten braucht), dann Kino, Sparen, Lampe, Akku.
+ * haeufigsten braucht), dann "Dunkel & still" (`cinema`), Sparen, Lampe, Akku.
  */
 static uint8_t s_order[UI_CONTROL_COUNT] = {
     UI_CONTROL_SILENT, UI_CONTROL_BRIGHTNESS, UI_CONTROL_CINEMA,
@@ -46,8 +46,13 @@ static lv_obj_t *s_torch;
 static bool s_visible;
 static bool s_torch_on;
 
+/*
+ * "Dunkel & still" hiess bis 0.4.6 "Kino" -- ein Bild, das erst erklaert
+ * werden musste. Der neue Name sagt, was die Kachel tut; die Kennung in
+ * `watch_settings.tiles` bleibt `cinema` (Paket J, 0.5.0).
+ */
 static const char *const TITLES[UI_CONTROL_COUNT] = {
-    "Helligkeit", "Lautlos", "Kino", "Sparen", "Lampe", "Akku",
+    "Helligkeit", "Lautlos", "Dunkel & still", "Sparen", "Lampe", "Akku",
 };
 
 static void create_locked(void)

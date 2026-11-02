@@ -229,14 +229,21 @@ static char s_battery_remaining[24];
 static bool s_night_mode;
 /*
  * Nachtmodus-Fenster (0.4.4, `watch_settings.night`): das Zifferblatt in
- * gedaempftem Rot -- alle drei Layouts, auch im Nachtlade-Modus. Andere
- * Szenen bleiben farbig. `s_face_red_shown` sagt, ob das zuletzt gezeichnete
- * Zifferblatt rot war; Akkuzahl und Zeilen faerben sich danach.
+ * gedaempftem Bernstein -- alle drei Layouts, auch im Nachtlade-Modus.
+ * Andere Szenen bleiben farbig. `s_face_tint_shown` sagt, ob das zuletzt
+ * gezeichnete Zifferblatt getoent war; Akkuzahl und Zeilen faerben sich
+ * danach.
+ *
+ * Bis 0.4.6 war der Ton ein gedaempftes Rot (#b0301c / #6a1d10). Rot heisst
+ * auf der Uhr aber "Achtung" -- ueberfaellig, Akku knapp, Warnung --, und
+ * nachts war eine rote Warnzeile vom roten Zifferblatt nicht mehr zu
+ * unterscheiden. Bernstein schont das Auge fast genauso und laesst Rot den
+ * Warnungen (Paket J, 0.5.0).
  */
-static bool s_night_red;
-static bool s_face_red_shown;
-#define NIGHT_RED_TEXT 0xb0301c
-#define NIGHT_RED_MUTED 0x6a1d10
+static bool s_night_tint;
+static bool s_face_tint_shown;
+#define NIGHT_TINT_TEXT 0xb87a1c
+#define NIGHT_TINT_MUTED 0x6b4710
 /* Layout des Zifferblatts (`watch_settings.face`, 0.4.4) -- nur die Uhr wertet es aus. */
 static ui_face_layout_t s_face_layout = UI_FACE_INFO;
 /* Stand beim letzten Zeichnen das Zifferblatt? Fuer den langen Druck (main.c). */
@@ -1213,10 +1220,10 @@ static void apply_battery_colour_locked(void)
     if (!s_battery_label) {
         return;
     }
-    /* Nachts auf dem Zifferblatt rot gedaempft -- nur das Akku-Rot bleibt Rot. */
+    /* Nachts auf dem Zifferblatt bernsteinfarben gedaempft -- nur das Akku-Rot bleibt Rot. */
     lv_obj_set_style_text_color(s_battery_label,
                                 s_battery_low ? lv_color_hex(0xf97373) :
-                                s_face_red_shown ? lv_color_hex(NIGHT_RED_MUTED) :
+                                s_face_tint_shown ? lv_color_hex(NIGHT_TINT_MUTED) :
                                 s_battery_charging ? lv_color_hex(0x5ec4ff) :
                                 s_muted_colour,
                                 0);
@@ -1224,7 +1231,7 @@ static void apply_battery_colour_locked(void)
     /* Der Akku-Punkt des Layouts "Minimal": gruen, ab 20 % gelb, ab 10 % rot, am Kabel blau. */
     if (s_battery_dot) {
         const uint32_t dot = s_battery_low ? 0xe74c3c :
-                             s_face_red_shown ? NIGHT_RED_MUTED :
+                             s_face_tint_shown ? NIGHT_TINT_MUTED :
                              s_battery_charging ? 0x5ec4ff :
                              s_battery_percent >= 0 && s_battery_percent <= 20 ? 0xf2b23c :
                              0x2ecc71;
@@ -1518,7 +1525,7 @@ static void render_face_lines_locked(bool visible, const char *event_line)
     if (event_line[0]) {
         lv_label_set_text(s_face_label[row], event_line);
         lv_obj_set_style_text_color(s_face_label[row],
-                                    lv_color_hex(s_face_red_shown ? NIGHT_RED_TEXT : 0x5ec4ff), 0);
+                                    lv_color_hex(s_face_tint_shown ? NIGHT_TINT_TEXT : 0x5ec4ff), 0);
         lv_obj_align(s_face_label[row], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP);
         lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
         row++;
@@ -1526,7 +1533,7 @@ static void render_face_lines_locked(bool visible, const char *event_line)
     for (int i = 0; i < s_face_count && row < FACE_LABELS - 1; i++, row++) {
         lv_label_set_text(s_face_label[row], s_face[i]);
         lv_obj_set_style_text_color(s_face_label[row],
-                                    lv_color_hex(s_face_red_shown ? NIGHT_RED_MUTED : 0xc9d1d9), 0);
+                                    lv_color_hex(s_face_tint_shown ? NIGHT_TINT_MUTED : 0xc9d1d9), 0);
         lv_obj_align(s_face_label[row], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP + row * FACE_LINE_H);
         lv_obj_remove_flag(s_face_label[row], LV_OBJ_FLAG_HIDDEN);
     }
@@ -1632,8 +1639,8 @@ static void render_alt_face_locked(ui_face_layout_t layout, const char *clock_te
         lv_label_set_text(s_face_label[0], line);
         lv_obj_set_style_text_color(
             s_face_label[0],
-            lv_color_hex(is_event ? (s_face_red_shown ? NIGHT_RED_TEXT : 0x5ec4ff)
-                                  : (s_face_red_shown ? NIGHT_RED_MUTED : 0xc9d1d9)),
+            lv_color_hex(is_event ? (s_face_tint_shown ? NIGHT_TINT_TEXT : 0x5ec4ff)
+                                  : (s_face_tint_shown ? NIGHT_TINT_MUTED : 0xc9d1d9)),
             0);
         lv_obj_align(s_face_label[0], LV_ALIGN_TOP_MID, 0, LARGE_LINE_Y);
         lv_obj_remove_flag(s_face_label[0], LV_OBJ_FLAG_HIDDEN);
@@ -1712,13 +1719,13 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     status = thinking_status_locked(scene, status ? status : "");
     /* Nachtlade-Modus: nur auf dem Ziffernblatt, nur die Uhrzeit, dunkelgrau. */
     const bool night = UI_WATCH && s_night_mode && clock_only;
-    /* Nachtmodus-Fenster (0.4.4): das Zifferblatt rot; der Nachtlade-Modus bleibt, nur rot. */
-    const bool red = UI_WATCH && s_night_red && clock_only;
+    /* Nachtmodus-Fenster (0.4.4): das Zifferblatt in Bernstein; der Nachtlade-Modus auch. */
+    const bool tint = UI_WATCH && s_night_tint && clock_only;
     /* Das Layout gilt nur fuer das Zifferblatt; der Nachtlade-Modus hat Vorrang. */
     const ui_face_layout_t layout = UI_WATCH && clock_only && !night ? s_face_layout : UI_FACE_INFO;
     s_main_clock_shown = with_clock;
     s_face_shown = clock_only;
-    s_face_red_shown = red;
+    s_face_tint_shown = tint;
 
     const char *body_text = hint ? hint : "";
     /*
@@ -1774,8 +1781,8 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
                             clock_only ? CLOCK_FACE_TECKI_X : TECKI_X,
                             clock_only ? CLOCK_FACE_TECKI_Y : TECKI_TOP_Y);
     ui_status_icons_apply(&s_icons, icon_scene_for(scene, clock_only));
-    if (red) {
-        ui_status_icons_tint(&s_icons, NIGHT_RED_TEXT, NIGHT_RED_MUTED);
+    if (tint) {
+        ui_status_icons_tint(&s_icons, NIGHT_TINT_TEXT, NIGHT_TINT_MUTED);
     }
 
     const char *question_text = (question && question[0] && !clock_only) ? question : "";
@@ -2049,7 +2056,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
      * anders als zwei aehnlich helle Farbtoene.
      */
     lv_color_t ble = error ? lv_color_hex(0xf97373) :
-                     red ? lv_color_hex(NIGHT_RED_MUTED) :
+                     tint ? lv_color_hex(NIGHT_TINT_MUTED) :
                      s_link_connected ? lv_color_hex(0x55c98a) :
                      lv_color_hex(0x8fb8ff);
 
@@ -2060,8 +2067,8 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_obj_set_style_border_width(s_ble_dot, s_link_connected ? 0 : 2, 0);
     lv_obj_set_style_border_color(s_ble_dot, ble, 0);
     lv_obj_set_style_text_color(s_status_label, question_text[0] ? muted : text, 0);
-    const lv_color_t clock_colour = night ? lv_color_hex(red ? NIGHT_RED_MUTED : 0x3a4656) :
-                                    red ? lv_color_hex(NIGHT_RED_TEXT) : text;
+    const lv_color_t clock_colour = night ? lv_color_hex(tint ? NIGHT_TINT_MUTED : 0x3a4656) :
+                                    tint ? lv_color_hex(NIGHT_TINT_TEXT) : text;
     lv_obj_set_style_text_color(s_clock_label, clock_colour, 0);
 #if UI_WATCH
     for (int i = 0; i < CLOCK_CELLS; i++) {
@@ -2070,7 +2077,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     for (int i = 0; i < 2; i++) {
         lv_obj_set_style_text_color(s_large_label[i], clock_colour, 0);
     }
-    lv_obj_set_style_text_color(s_face_date, red ? lv_color_hex(NIGHT_RED_MUTED) : muted, 0);
+    lv_obj_set_style_text_color(s_face_date, tint ? lv_color_hex(NIGHT_TINT_MUTED) : muted, 0);
     lv_obj_set_style_text_color(s_meta_label, muted, 0);
 #endif
     /*
@@ -3829,11 +3836,11 @@ bool ui_status_night_mode(void)
     return s_night_mode;
 }
 
-void ui_status_set_night_red(bool on)
+void ui_status_set_night_tint(bool on)
 {
     _lock_acquire(&s_lvgl_lock);
-    if (s_night_red != on) {
-        s_night_red = on;
+    if (s_night_tint != on) {
+        s_night_tint = on;
         render_current_locked();
     }
     _lock_release(&s_lvgl_lock);

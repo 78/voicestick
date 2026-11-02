@@ -163,10 +163,11 @@ void ui_status_set_battery_remaining(const char *line);
 void ui_status_set_night_mode(bool on);
 /*
  * Nachtmodus (0.4.4, nur die Uhr wertet es aus): im Fenster `watch_settings.night`
- * zeigt das Zifferblatt -- alle drei Layouts -- alles in gedaempftem Rot.
- * Andere Szenen bleiben farbig; die Helligkeit deckelt main.c.
+ * zeigt das Zifferblatt -- alle drei Layouts -- alles in gedaempftem
+ * Bernstein (bis 0.4.6 Rot; Rot bleibt seit 0.5.0 den Warnungen). Andere
+ * Szenen bleiben farbig; die Helligkeit deckelt main.c.
  */
-void ui_status_set_night_red(bool on);
+void ui_status_set_night_tint(bool on);
 
 /*
  * Zifferblatt-Layouts (0.4.4): `watch_settings.face` und die Auswahl am

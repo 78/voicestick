@@ -253,12 +253,12 @@ static esp_timer_handle_t s_night_peek_timer;
 /*
  * Nachtmodus (Paket I, 0.4.4): im Fenster `watch_settings.night` (Ortszeit,
  * darf ueber Mitternacht gehen; Voreinstellung 21:00-06:30) zeigt das
- * Zifferblatt alles in gedaempftem Rot, und die Helligkeit ist hoechstens
+ * Zifferblatt alles in gedaempftem Bernstein (bis 0.4.6 Rot), und die Helligkeit ist hoechstens
  * "Dunkel" -- in jeder Szene. Stellt der Nutzer im Kontrollzentrum hoeher,
  * gilt das bis zum naechsten Schirm-aus (s_night_bright_override). Geprueft
  * im Akku-Takt (zehn Sekunden) und wenn die Uhr gestellt wird. Nicht zu
  * verwechseln mit dem Nachtlade-Modus oben: der gilt nur am Kabel und hat
- * Vorrang; im Fenster ist er ebenfalls rot.
+ * Vorrang; im Fenster ist er ebenfalls bernsteinfarben.
  *
  * Im RTC-Speicher wie die anderen `watch_settings`. `s_night_from_min ==
  * s_night_to_min` heisst aus (`night: ""`).
@@ -532,17 +532,18 @@ static bool is_external_powered(void)
 }
 
 /*
- * Jede Vibration der Uhr geht hier durch: im Nachtlade-Modus bleibt der
- * Motor still (auf dem StickS3 gibt es ohnehin keinen).
+ * Jede Vibration der Uhr geht hier durch: eines der vier Muster aus
+ * voice_board.h (Paket J) oder der Aufnahme-Tick. Im Nachtlade-Modus bleibt
+ * der Motor still (auf dem StickS3 gibt es ohnehin keinen).
  */
-static void haptic_pattern(uint8_t count, uint32_t on_ms, uint32_t off_ms)
+static void haptic(voice_haptic_t kind)
 {
 #if CONFIG_VOICE_BOARD_WATCH206
     if (s_night_mode) {
         return;
     }
 #endif
-    voice_board_haptic_pattern(count, on_ms, off_ms);
+    voice_board_haptic_kind(kind);
 }
 
 /*
@@ -989,25 +990,27 @@ static void enter_deep_sleep(void)
  * keinen Motor. Es laeuft auch dann, wenn der Ton ausfaellt (Aufnahmepfad
  * belegt): Gerade dann ist es die einzige Rueckmeldung.
  *
- *   Start      ein kurzer Stoss       "jetzt sprechen"
- *   Antwort    zwei kurze             "da ist was"
- *   Fehler     ein langer             "hat nicht geklappt"
- *   Verworfen  ein ganz kurzer        "nichts passiert"
+ *   Start      der Aufnahme-Tick (60 ms)   "jetzt sprechen"
+ *   Antwort    Erfolg (2 x kurz)           "da ist was"
+ *   Fehler     Fehler (1 x lang)           "hat nicht geklappt"
+ *   Verworfen  Fehler (1 x lang)           "nichts passiert" -- bis 0.4.6 ein
+ *              eigener ganz kurzer Stoss; das Vokabular (Paket J) kennt nur
+ *              vier Muster, und "nichts gesendet" ist ein Fehler.
  */
 static void haptic_for_tone(audio_tone_t tone)
 {
     switch (tone) {
     case AUDIO_TONE_START:
-        haptic_pattern(1, 60, 0);
+        haptic(VOICE_HAPTIC_RECORD_TICK);
         break;
     case AUDIO_TONE_DONE:
-        haptic_pattern(2, 50, 90);
+        haptic(VOICE_HAPTIC_SUCCESS);
         break;
     case AUDIO_TONE_ERROR:
-        haptic_pattern(1, 300, 0);
+        haptic(VOICE_HAPTIC_ERROR);
         break;
     case AUDIO_TONE_CANCEL:
-        haptic_pattern(1, 30, 0);
+        haptic(VOICE_HAPTIC_ERROR);
         break;
     default:
         break;
@@ -1735,7 +1738,7 @@ static void check_event_reminder(void)
     if (now >= start - EVENT_REMINDER_LEAD_S && now < start) {
         s_event_reminded = true;
         ESP_LOGI(TAG, "Termin in %lld s -> Erinnerung", (long long)(start - now));
-        haptic_pattern(3, 120, 150);
+        haptic(VOICE_HAPTIC_REMINDER);
         note_activity();
         ui_status_show_home();
     }
@@ -2210,7 +2213,7 @@ static void update_night_window(void)
     s_night_window = in;
     s_night_bright_override = false;
     ESP_LOGI(TAG, "Nachtmodus %s", in ? "an" : "aus");
-    ui_status_set_night_red(in);
+    ui_status_set_night_tint(in);
     /* Der Nachtlade-Modus haelt seine eigene Helligkeit; sonst gilt die neue Obergrenze sofort. */
     if (!s_night_mode && !ui_torch_on()) {
         apply_brightness_now();
@@ -2418,7 +2421,7 @@ static void handle_control_tile(int tile)
     default:
         return;
     }
-    haptic_pattern(1, 25, 0);
+    haptic(VOICE_HAPTIC_SUCCESS);
     const ui_control_state_t st = control_state();
     ui_control_update(&st);
 }
@@ -2433,7 +2436,7 @@ static void cancel_transcript(void)
     ESP_LOGI(TAG, "Transkript abgebrochen");
     if (voice_ble_send_cancel_transcript() == ESP_OK) {
         ui_status_set_transcript_cancelled();
-        haptic_pattern(1, 40, 0);
+        haptic(VOICE_HAPTIC_SUCCESS);
     } else {
         ui_status_set_not_connected();
         play_tone(AUDIO_TONE_CANCEL);
@@ -2623,7 +2626,7 @@ static bool handle_history_chip(int16_t x, int16_t y)
         return false;
     }
     if (err == ESP_OK) {
-        haptic_pattern(1, 30, 0);
+        haptic(VOICE_HAPTIC_SUCCESS);
     } else {
         ui_status_set_not_connected();
         play_tone(AUDIO_TONE_CANCEL);
@@ -2651,7 +2654,7 @@ static void choose_face_layout(ui_face_layout_t layout)
     if (voice_ble_send_face_layout(ui_face_layout_name(layout)) != ESP_OK) {
         ESP_LOGW(TAG, "face_layout nicht gesendet (keine Bruecke)");
     }
-    haptic_pattern(1, 30, 0);
+    haptic(VOICE_HAPTIC_SUCCESS);
 }
 
 /*
@@ -2670,7 +2673,7 @@ static void choose_option(const ui_options_choice_t *choice)
         play_tone(AUDIO_TONE_CANCEL);
         return;
     }
-    haptic_pattern(1, 40, 0);
+    haptic(VOICE_HAPTIC_SUCCESS);
     ui_cards_mark_sent(choice->kind, choice->rev, choice->index);
     char line[UI_CARD_TEXT_LEN + UI_OPTIONS_TEXT_LEN + 4];
     snprintf(line, sizeof(line), "%s: %s", choice->title, choice->option);
@@ -2727,8 +2730,6 @@ static void handle_touch(const app_event_t *event)
             ui_face_picker_touch(gesture, event->touch_x, event->touch_y, &chosen);
         if (action == UI_FACE_PICKER_CHOSEN) {
             choose_face_layout(chosen);
-        } else if (action == UI_FACE_PICKER_CANCELLED) {
-            haptic_pattern(1, 15, 0);
         }
         return;
     }
@@ -2739,15 +2740,13 @@ static void handle_touch(const app_event_t *event)
             ui_options_touch(gesture, event->touch_x, event->touch_y, &choice);
         if (action == UI_OPTIONS_CHOSEN) {
             choose_option(&choice);
-        } else if (action == UI_OPTIONS_CLOSED) {
-            haptic_pattern(1, 15, 0);
         }
         return;
     }
     if (gesture == VOICE_BOARD_LONG_PRESS) {
         /* Nur noch auf dem Zifferblatt (s. o.): die Auswahl der Layouts. */
         ui_face_picker_show((ui_face_layout_t)s_face_layout);
-        haptic_pattern(1, 40, 0);
+        haptic(VOICE_HAPTIC_ATTENTION);
         return;
     }
     /*
@@ -2793,7 +2792,7 @@ static void handle_touch(const app_event_t *event)
                                                         event->touch_y, &hit);
         if (action == UI_CARDS_ITEM) {
             if (voice_ble_send_item(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
-                haptic_pattern(1, 40, 0);
+                haptic(VOICE_HAPTIC_SUCCESS);
                 /*
                  * Karten-Aktion als Verlaufseintrag (V5): "Erledigt: Muell
                  * rausstellen" bzw. "Licht Kueche: An", mit den Koordinaten
@@ -2815,7 +2814,7 @@ static void handle_touch(const app_event_t *event)
             ESP_LOGI(TAG, "Rueckgaengig: %s #%u", ui_cards_kind_name(hit.kind),
                      (unsigned)hit.index);
             if (voice_ble_send_undo(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
-                haptic_pattern(1, 30, 0);
+                haptic(VOICE_HAPTIC_SUCCESS);
             } else {
                 play_tone(AUDIO_TONE_CANCEL);
             }
@@ -2832,17 +2831,19 @@ static void handle_touch(const app_event_t *event)
                                                hit.index) == ESP_OK) {
                 note_ble_transfer();
                 ui_options_open(hit.kind, hit.rev, hit.index, hit.text);
-                haptic_pattern(1, 20, 0);
+                haptic(VOICE_HAPTIC_ATTENTION);
             } else {
                 play_tone(AUDIO_TONE_CANCEL);
             }
         } else if (action == UI_CARDS_SELECT) {
-            /* Heute: Zeile markiert, OK-Chip steht -- ein kurzer Stoss sagt das. */
-            haptic_pattern(1, 20, 0);
-        } else if (action == UI_CARDS_END) {
-            /* Rechts von Wetter kommt nichts mehr: ein kurzer Stoss sagt das. */
-            haptic_pattern(1, 15, 0);
+            /* Zeile markiert, OK-Chip steht: "ein zweiter Schritt kommt". */
+            haptic(VOICE_HAPTIC_ATTENTION);
         }
+        /*
+         * UI_CARDS_END (rechts von Wetter kommt nichts mehr) vibrierte bis
+         * 0.4.6 ganz kurz. Das Vokabular (Paket J) kennt dafuer kein Muster
+         * -- nichts ist passiert, also meldet sich auch nichts.
+         */
         return;
     }
     switch ((voice_board_gesture_t)gesture) {
@@ -2866,7 +2867,7 @@ static void handle_touch(const app_event_t *event)
             play_tone(AUDIO_TONE_CANCEL);
             break;
         }
-        haptic_pattern(1, 30, 0);
+        haptic(VOICE_HAPTIC_SUCCESS);
         apply_app_ui_state("thinking", "", "");
         break;
     }
@@ -3169,7 +3170,7 @@ static void app_event_task(void *arg)
                 break;
             }
             if (voice_ble_send_action() == ESP_OK) {
-                haptic_pattern(2, 40, 60);
+                haptic(VOICE_HAPTIC_SUCCESS);
                 apply_app_ui_state("thinking", "", "");
             } else {
                 ui_status_set_not_connected();
