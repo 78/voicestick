@@ -149,8 +149,8 @@ static const ui_status_icon_scene_t EMPTY_POSES[UI_CARD_COUNT] = {
  * einem scrollenden Ausschnitt (LVGL-Scroll mit Schwung und Rastung an den
  * Zeilen) statt auf Seiten: Nach oben wischen zieht den naechsten Ausschnitt
  * herein, nach unten den vorigen -- am oberen Ende ist nach unten weiterhin
- * "zurueck". Die Seitenpunkte unten sind ein schmaler Balken geworden, der
- * die Lage im Ganzen zeigt. Der Finger steuert den Scroll nicht selbst: Die
+ * "zurueck". Die Seitenpunkte unten zeigen die Lage, ein Punkt je Ausschnitt
+ * -- dieselben wie bei der Wetterkarte (0.3.6 bis 0.4.5 war es ein Balken). Der Finger steuert den Scroll nicht selbst: Die
  * Touch-Schicht meldet Gesten erst beim Abheben, LVGL kennt kein
  * Eingabegeraet; der Schwung ist die Animation des Sprungs.
  *
@@ -166,9 +166,6 @@ static const ui_status_icon_scene_t EMPTY_POSES[UI_CARD_COUNT] = {
 #define STRIPE_W 6
 #define SEP_H 28
 #define SEPS_MAX CARD_GROUPS_MAX
-/* Der Balken unten, wo bis 0.3.6 die Seitenpunkte standen. */
-#define BAR_W 120
-#define BAR_H 4
 static const lv_font_t *const LEVEL_ROW_FONT[3] = {
     &todoteck_watch_font_20, &todoteck_watch_font_23, &todoteck_watch_font_26,
 };
@@ -198,8 +195,6 @@ static const lv_font_t *const LEVEL_ROW_FONT[3] = {
 static lv_obj_t *s_root;
 static lv_obj_t *s_title;
 static ui_dots_t s_card_dots;
-static lv_obj_t *s_bar_track;
-static lv_obj_t *s_bar_thumb;
 /* Seiten der Wetterkarte: Punkte unten (wie bis 0.3.6 bei allen Karten) und die gezeigte Seite. */
 static ui_dots_t s_page_dots;
 static uint8_t s_wpage;
@@ -313,21 +308,6 @@ static void create_locked(void)
     ui_dots_create(&s_card_dots, s_root);
     lv_obj_align(s_card_dots.box, LV_ALIGN_TOP_RIGHT, -UI_HEADER_INSET_X,
                  header_mid - UI_DOTS_SIZE / 2);
-    /* Lage in der Liste: schmaler Balken unten mittig, nur wenn die Liste scrollt. */
-    s_bar_track = lv_obj_create(s_root);
-    lv_obj_remove_style_all(s_bar_track);
-    lv_obj_set_size(s_bar_track, BAR_W, BAR_H);
-    lv_obj_set_style_radius(s_bar_track, BAR_H / 2, 0);
-    lv_obj_set_style_bg_opa(s_bar_track, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(s_bar_track, lv_color_hex(0x3a4656), 0);
-    lv_obj_align(s_bar_track, LV_ALIGN_TOP_MID, 0, CONTENT_H - 14);
-    lv_obj_add_flag(s_bar_track, LV_OBJ_FLAG_HIDDEN);
-    s_bar_thumb = lv_obj_create(s_bar_track);
-    lv_obj_remove_style_all(s_bar_thumb);
-    lv_obj_set_size(s_bar_thumb, BAR_W / 2, BAR_H);
-    lv_obj_set_style_radius(s_bar_thumb, BAR_H / 2, 0);
-    lv_obj_set_style_bg_opa(s_bar_thumb, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(s_bar_thumb, lv_color_hex(0x2ecc71), 0);
 
     ui_dots_create(&s_page_dots, s_root);
     lv_obj_align(s_page_dots.box, LV_ALIGN_TOP_MID, 0, CONTENT_H - 16);
@@ -346,7 +326,7 @@ static void create_locked(void)
 
     /*
      * Der scrollende Ausschnitt: nur senkrecht, Rastung an den Oberkanten
-     * der Kinder, kein eigener Balken (der steht unten), kein elastisches
+     * der Kinder, keine eigene Leiste (die Seitenpunkte stehen unten), kein elastisches
      * Ueberziehen -- das sieht auf einem Sprung per Geste nach Fehler aus.
      */
     s_list = lv_obj_create(s_root);
@@ -477,35 +457,40 @@ static void undo_expired_cb(lv_timer_t *timer)
     hide_undo_locked();
 }
 
-/* Der Balken unten: Lage und Laenge des sichtbaren Ausschnitts im Ganzen. */
+/*
+ * Lage in der Liste: dieselben Seitenpunkte unten wie bei der Wetterkarte
+ * (11/2026, vorher ein schmaler Balken -- zwei Zeichen fuer dasselbe "hier
+ * geht es weiter"). Eine Seite ist ein Ausschnitt; hoch/runter bewegt die
+ * Liste um genau einen (scroll_view_locked), also passt ein Punkt je Ausschnitt.
+ * Am Ende der Liste ist immer der letzte Punkt aktiv, auch wenn der letzte
+ * Ausschnitt nur teilweise voll ist.
+ */
 static void update_bar_locked(int32_t scroll_y)
 {
     const int32_t view = view_h();
-    if (s_content_h <= view) {
-        lv_obj_add_flag(s_bar_track, LV_OBJ_FLAG_HIDDEN);
+    if (view <= 0 || s_content_h <= view) {
+        ui_dots_set(&s_page_dots, 0, 0);
         return;
     }
-    int32_t thumb_w = BAR_W * view / s_content_h;
-    if (thumb_w < 16) {
-        thumb_w = 16;
+    const int32_t max_y = s_content_h - view;
+    int32_t pages = (max_y + view - 1) / view + 1;
+    if (pages > UI_DOTS_MAX) {
+        pages = UI_DOTS_MAX;
     }
     if (scroll_y < 0) {
         scroll_y = 0;
     }
-    if (scroll_y > s_content_h - view) {
-        scroll_y = s_content_h - view;
+    int32_t page = scroll_y >= max_y ? pages - 1 : (scroll_y + view / 2) / view;
+    if (page > pages - 1) {
+        page = pages - 1;
     }
-    const int32_t x = (BAR_W - thumb_w) * scroll_y / (s_content_h - view);
-    lv_obj_set_width(s_bar_thumb, thumb_w);
-    lv_obj_align(s_bar_thumb, LV_ALIGN_LEFT_MID, x, 0);
-    lv_obj_remove_flag(s_bar_track, LV_OBJ_FLAG_HIDDEN);
+    ui_dots_set(&s_page_dots, (uint8_t)pages, (uint8_t)page);
 }
 
 /* Die Wetterkarte: keine Liste, eigene Seiten, Tecki nur ohne Daten. */
 static void render_weather_locked(void)
 {
     lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_bar_track, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_ok, LV_OBJ_FLAG_HIDDEN);
     const uint8_t pages = ui_weather_page_count();
     if (s_wpage >= pages) {
@@ -765,7 +750,7 @@ static bool scroll_page_locked(int dir)
     }
     /* Mit Animation -- das ist der "Schwung" einer Geste, die LVGL selbst nie sieht. */
     lv_obj_scroll_to_y(s_list, target, LV_ANIM_ON);
-    /* Chip und Balken folgen sofort dem Ziel, nicht der Animation. */
+    /* Chip und Seitenpunkte folgen sofort dem Ziel, nicht der Animation. */
     update_bar_locked(target);
     if (s_sel.active) {
         clear_selection_locked();

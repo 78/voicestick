@@ -110,6 +110,17 @@ static const char *TAG = "voice_stick";
  * seit jeher auf dem Schirm; jetzt stimmt es auch.
  */
 #define PRIMARY_MIN_HOLD_MS 500
+#if CONFIG_VOICE_BOARD_WATCH206
+/*
+ * Uhr: Die Sprechtaste (BOOT) startet die Aufnahme erst nach so langem
+ * Halten (11/2026). Vorher startete schon das Druecken, und ein kurzer Druck
+ * endete jedes Mal in "Zu kurz" -- ein Fehler fuer etwas, das niemand als
+ * Aufnahme gemeint hatte. Ein kurzer Druck tut jetzt nichts (ausser in der
+ * Transkript-Frist, wo er abbricht, und bei laufender Aufnahme, wo er sie
+ * verwirft). Die Mindestdauer oben zaehlt ab Aufnahmebeginn.
+ */
+#define TALK_HOLD_MS 400
+#endif
 /* Wie lange der Abbruch-Ton auf den Abbau des Aufnahmepfads wartet. */
 #define CANCEL_TONE_WAIT_MS 600
 
@@ -354,6 +365,10 @@ typedef enum {
 } interaction_mode_t;
 
 static interaction_mode_t s_interaction_mode = INTERACTION_MODE_HOLD_TO_TALK;
+#if CONFIG_VOICE_BOARD_WATCH206
+/* Sprechtaste gedrueckt, Haltezeit laeuft noch: Loslassen davor tut nichts. */
+static bool s_talk_armed;
+#endif
 
 static const char *app_ui_state_name(app_ui_state_t state)
 {
@@ -404,6 +419,8 @@ typedef enum {
     APP_EVENT_TOUCH,
     /* Langer Druck auf die Blaettertaste der Uhr: die frei belegte Aktion. */
     APP_EVENT_ACTION,
+    /* Uhr: Sprechtaste lange genug gehalten -- jetzt beginnt die Aufnahme. */
+    APP_EVENT_TALK_LONG,
     /* Transkript zuerst (nur die Uhr): Text in `text`, Frist in ms in `size`. */
     APP_EVENT_TRANSCRIPT,
     /* Rueckkehr-Zeitgeber der Uhr abgelaufen. */
@@ -1343,6 +1360,15 @@ static void talk_button_up_cb(void *button_handle, void *usr_data)
     queue_app_event(APP_EVENT_TALK_UP);
 }
 
+#if CONFIG_VOICE_BOARD_WATCH206
+static void talk_button_long_cb(void *button_handle, void *usr_data)
+{
+    (void)button_handle;
+    (void)usr_data;
+    queue_app_event(APP_EVENT_TALK_LONG);
+}
+#endif
+
 static void browse_button_down_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
@@ -1912,6 +1938,39 @@ static uint32_t primary_hold_ms(void)
         return (uint32_t)((s_primary_release_us - s_primary_down_us) / 1000);
     }
     return elapsed_button_ms(s_primary_down_us);
+}
+
+/*
+ * Beginnt einen Turn auf der Sprechtaste: Aufnahme starten und der Bruecke
+ * melden. Gemeinsamer Weg fuer das Druecken (StickS3, Klick-Modus) und das
+ * Halten auf der Uhr (APP_EVENT_TALK_LONG).
+ */
+static void apply_app_ui_state(const char *state, const char *text, const char *question);
+
+static void begin_primary_recording(void)
+{
+    s_primary_session_id = start_recording();
+    if (s_primary_session_id == 0) {
+        s_primary_down_us = 0;
+        if (!voice_ble_is_ready() && !s_ota_updating) {
+            /*
+             * Keine Bruecke: Bisher geschah dann sichtbar nichts
+             * -- start_recording() schrieb nur ins Log. Auf der
+             * Waveshare-Uhr sah das aus wie eine tote Taste.
+             */
+            ui_status_set_not_connected();
+            play_tone(AUDIO_TONE_CANCEL);
+        }
+        return;
+    }
+    esp_err_t primary_down_err = s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK
+        ? voice_ble_send_button_click("primary", 0, s_primary_session_id)
+        : voice_ble_send_button_down("primary", s_primary_session_id);
+    if (s_primary_session_id != 0 && primary_down_err != ESP_OK) {
+        (void)stop_recording();
+        s_primary_session_id = 0;
+        apply_app_ui_state("ready", "", "");
+    }
 }
 
 static void apply_app_ui_state(const char *state, const char *text, const char *question)
@@ -2921,36 +2980,48 @@ static void app_event_task(void *arg)
                     (void)voice_ble_send_button_click("primary", 0, 0);
                     break;
                 }
-                s_primary_session_id = start_recording();
-                if (s_primary_session_id == 0) {
-                    s_primary_down_us = 0;
-                    if (!voice_ble_is_ready() && !s_ota_updating) {
-                        /*
-                         * Keine Bruecke: Bisher geschah dann sichtbar nichts
-                         * -- start_recording() schrieb nur ins Log. Auf der
-                         * Waveshare-Uhr sah das aus wie eine tote Taste.
-                         */
-                        ui_status_set_not_connected();
-                        play_tone(AUDIO_TONE_CANCEL);
-                    }
+#if CONFIG_VOICE_BOARD_WATCH206
+                if (s_interaction_mode == INTERACTION_MODE_HOLD_TO_TALK) {
+                    /* Erst nach TALK_HOLD_MS (APP_EVENT_TALK_LONG) beginnt die Aufnahme. */
+                    s_talk_armed = true;
                     break;
                 }
-                esp_err_t primary_down_err = s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK
-                    ? voice_ble_send_button_click("primary", 0, s_primary_session_id)
-                    : voice_ble_send_button_down("primary", s_primary_session_id);
-                if (s_primary_session_id != 0 && primary_down_err != ESP_OK) {
-                    (void)stop_recording();
-                    s_primary_session_id = 0;
-                    apply_app_ui_state("ready", "", "");
-                }
+#endif
+                begin_primary_recording();
             }
             break;
+#if CONFIG_VOICE_BOARD_WATCH206
+        case APP_EVENT_TALK_LONG:
+            if (!s_talk_armed || s_recording) {
+                break;
+            }
+            s_talk_armed = false;
+            if (!voice_board_talk_button_pressed()) {
+                /* Das Loslassen ist unterwegs: kein Halten, keine Aufnahme. */
+                s_primary_down_us = 0;
+                break;
+            }
+            ESP_LOGI(TAG, "button talk held -> Aufnahme");
+            /* Die Haltedauer zaehlt ab hier, nicht ab dem Druecken. */
+            s_primary_down_us = esp_timer_get_time();
+            begin_primary_recording();
+            break;
+#endif
         case APP_EVENT_TALK_UP:
             ESP_LOGI(TAG, "button talk up");
             note_activity();
             if (s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK) {
                 break;
             }
+#if CONFIG_VOICE_BOARD_WATCH206
+            if (s_talk_armed) {
+                /* Kurz gedrueckt: keine Aufnahme, also auch kein "Zu kurz". */
+                ESP_LOGI(TAG, "Sprechtaste nur kurz -> nichts");
+                s_talk_armed = false;
+                s_primary_down_us = 0;
+                break;
+            }
+#endif
             if (!s_recording && s_primary_session_id == 0 && s_primary_down_us == 0) {
                 break;
             }
@@ -3303,9 +3374,12 @@ static void app_event_task(void *arg)
 }
 
 static esp_err_t init_gpio_button(gpio_num_t gpio_num, uint8_t active_level,
-                                  button_handle_t *button)
+                                  uint16_t long_press_ms, button_handle_t *button)
 {
-    const button_config_t button_config = {0};
+    /* 0 = Voreinstellung der Komponente (1,5 s). */
+    const button_config_t button_config = {
+        .long_press_time = long_press_ms,
+    };
     const button_gpio_config_t gpio_config = {
         .gpio_num = gpio_num,
         .active_level = active_level,
@@ -3322,13 +3396,19 @@ static esp_err_t init_buttons(void)
         return ESP_ERR_NO_MEM;
     }
 
+#if CONFIG_VOICE_BOARD_WATCH206
+    const uint16_t talk_long_ms = TALK_HOLD_MS;
+#else
+    const uint16_t talk_long_ms = 0;
+#endif
     esp_err_t err = init_gpio_button(VOICE_BOARD_PIN_BUTTON_TALK,
-                                     VOICE_BOARD_BUTTON_TALK_ACTIVE_LEVEL, &s_talk_button);
+                                     VOICE_BOARD_BUTTON_TALK_ACTIVE_LEVEL, talk_long_ms,
+                                     &s_talk_button);
     if (err != ESP_OK) {
         return err;
     }
     err = init_gpio_button(VOICE_BOARD_PIN_BUTTON_BROWSE,
-                           VOICE_BOARD_BUTTON_BROWSE_ACTIVE_LEVEL, &s_browse_button);
+                           VOICE_BOARD_BUTTON_BROWSE_ACTIVE_LEVEL, 0, &s_browse_button);
     if (err != ESP_OK) {
         return err;
     }
@@ -3360,6 +3440,12 @@ static esp_err_t init_buttons(void)
      */
     err = iot_button_register_cb(s_browse_button, BUTTON_LONG_PRESS_START, NULL,
                                  browse_button_long_cb, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+    /* Sprechtaste: Aufnahme erst nach TALK_HOLD_MS Halten. */
+    err = iot_button_register_cb(s_talk_button, BUTTON_LONG_PRESS_START, NULL,
+                                 talk_button_long_cb, NULL);
     if (err != ESP_OK) {
         return err;
     }
