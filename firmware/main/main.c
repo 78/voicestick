@@ -3465,8 +3465,9 @@ static const char *build_diag_text(void)
         DIAG_LINE("Daten noch keine\n");
     }
     DIAG_LINE("Fehler: %s\n", s_last_error[0] ? s_last_error : "keiner");
-    DIAG_LINE("RAM %u kB, PSRAM %u kB frei\n",
+    DIAG_LINE("RAM %u kB (Block %u kB), PSRAM %u kB frei\n",
               (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+              (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
               (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     const int64_t up_s = esp_timer_get_time() / 1000000;
     DIAG_LINE("Laufzeit %u h %02u min\n", (unsigned)(up_s / 3600), (unsigned)((up_s / 60) % 60));

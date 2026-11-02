@@ -7,10 +7,12 @@
 
 #include "driver/i2s_std.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "hal/i2s_types.h"
@@ -58,7 +60,14 @@ static atomic_uint_least8_t s_level;
 static bool s_initialized;
 static uint32_t s_session_id;
 static uint32_t s_seq;
+#define AUDIO_TASK_STACK 32768
+
 static TaskHandle_t s_audio_task;
+/*
+ * Liegt der Stack des Aufnahme-Tasks im PSRAM? Dann muss der Task sich mit
+ * vTaskDeleteWithCaps beenden, sonst bleiben TCB und Stack liegen.
+ */
+static bool s_audio_task_caps;
 static TaskHandle_t s_tx_task;
 static QueueHandle_t s_tx_queue;
 
@@ -339,7 +348,11 @@ static void audio_task(void *arg)
     ESP_LOGI(TAG, "audio task exit: enqueued=%" PRIu32 " overflow_drops=%" PRIu32,
              enqueued, dropped);
     s_audio_task = NULL;
-    vTaskDelete(NULL);
+    if (s_audio_task_caps) {
+        vTaskDeleteWithCaps(NULL);
+    } else {
+        vTaskDelete(NULL);
+    }
 }
 
 static void tx_task(void *arg)
@@ -484,9 +497,31 @@ esp_err_t audio_pipeline_start(uint32_t session_id)
         return ESP_ERR_NO_MEM;
     }
 
-    ok = xTaskCreatePinnedToCore(audio_task, "audio_pipeline", 32768,
-                                 NULL, 5, &s_audio_task, 1);
+    /*
+     * 32 KB Stack fuer Opus — und zwar im PSRAM, nicht im internen RAM.
+     *
+     * Bis 0.5.1 kam der Stack aus dem internen Heap, als ein zusammenhaengender
+     * Block bei jedem Tastendruck. Mit jedem Paket wuchs der feste Verbrauch
+     * (Listen, Verlauf, groessere Stacks fuer Bluetooth und Ereignis-Task), bis
+     * 0.5.1 keinen 32-KB-Block mehr fand: "Aufnahme startet nicht:
+     * ESP_ERR_NO_MEM". Der Task liest nur I2S und rechnet Opus, schreibt nie
+     * ins Flash — damit darf sein Stack im PSRAM liegen. Gelingt das nicht,
+     * bleibt der alte Weg als Rueckfall.
+     */
+    s_audio_task_caps = true;
+    ok = xTaskCreatePinnedToCoreWithCaps(audio_task, "audio_pipeline", AUDIO_TASK_STACK,
+                                         NULL, 5, &s_audio_task, 1,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
+        ESP_LOGW(TAG, "audio stack in PSRAM failed, trying internal RAM");
+        s_audio_task_caps = false;
+        ok = xTaskCreatePinnedToCore(audio_task, "audio_pipeline", AUDIO_TASK_STACK,
+                                     NULL, 5, &s_audio_task, 1);
+    }
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "create audio task: internal free=%u largest=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         atomic_store(&s_running, false);
         s_audio_task = NULL;
         audio_packet_t sentinel = {

@@ -62,3 +62,10 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # 0.5.1: NimBLE-Host-Task groesser (Verdacht Stack-Ueberlauf beim Verbinden in 0.5.0,
 # ble_control_cb zeichnet im Host-Task, der Zeichenpfad ist mit Paket J tiefer geworden).
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=7168
+
+# 0.5.2: NimBLE-Host holt seine Puffer aus dem PSRAM. Allein der Nachrichten-
+# Pool (100 x 256 Byte) sind gut 25 KB, die bis 0.5.1 im internen RAM lagen --
+# demselben Topf, aus dem Zeichenpuffer, I2S und Aufnahme-Task schoepfen.
+# 0.5.1 fand dort keinen Platz mehr ("Aufnahme startet nicht: ESP_ERR_NO_MEM").
+# Der Funk-Controller selbst behaelt seinen internen Speicher.
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
