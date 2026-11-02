@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_log.h"
 #include "sdkconfig.h"
@@ -60,6 +61,8 @@ typedef struct {
      * "Heute ist alles erledigt.", obwohl Aufgaben offen waren (11/2026).
      */
     bool received;
+    /* Wann Teil 0 kam (UTC-Sekunden) -- das Alter in der Kopfzeile (0.5.0, Punkt 7). */
+    int64_t at;
     char groups[CARD_GROUPS_MAX][CARD_GROUP_LEN];
     card_item_t items[UI_CARD_ITEMS_MAX];
 } card_list_t;
@@ -213,6 +216,18 @@ static const ui_status_icon_scene_t EMPTY_POSES[UI_CARD_COUNT] = {
 /* Teckis Flaeche auf der leeren Karte. */
 #define EMPTY_TECKI_BOX 96
 #define EMPTY_TECKI_Y 110
+/*
+ * Alter der Daten (Paket J, Punkt 7): "08:12" klein rechts unter der
+ * Kopfzeile -- der Zeitpunkt, zu dem die Liste (bzw. das Wetter) kam. Ab
+ * 15 Minuten steht "Stand 08:12" heller, und unten erscheint "Neu laden"
+ * (Punkt 8), wie auf einer leeren Karte. Nachgezogen alle 30 Sekunden,
+ * solange eine Karte offen ist.
+ */
+#define AGE_STALE_S (15 * 60)
+#define AGE_TICK_MS 30000
+#define AGE_Y (HEADER_H - 4)
+#define RELOAD_W 200
+#define RELOAD_H 52
 
 static lv_obj_t *s_root;
 static lv_obj_t *s_title;
@@ -237,6 +252,10 @@ static lv_timer_t *s_undo_timer;
 static lv_obj_t *s_ok;
 static lv_obj_t *s_ok_label;
 static lv_timer_t *s_sel_timer;
+static lv_obj_t *s_age;
+static lv_obj_t *s_reload;
+static lv_obj_t *s_reload_label;
+static lv_timer_t *s_age_timer;
 static bool s_visible;
 static ui_card_kind_t s_kind;
 /* Oberkanten der Zeilen im Ausschnitt (fuer das zeilenweise Blaettern) und die Gesamthoehe. */
@@ -449,6 +468,95 @@ static void create_locked(void)
     lv_obj_set_style_text_color(s_ok_label, lv_color_hex(0x000000), 0);
     lv_obj_center(s_ok_label);
     lv_obj_add_flag(s_ok, LV_OBJ_FLAG_HIDDEN);
+
+    /* Alter der Daten rechts unter der Kopfzeile, in der kleinen Schrift der Kopfzeile. */
+    s_age = lv_label_create(s_root);
+    lv_obj_set_style_text_font(s_age, UI_FONT_SMALL, 0);
+    lv_label_set_text(s_age, "");
+    lv_obj_align(s_age, LV_ALIGN_TOP_RIGHT, -UI_HEADER_INSET_X, AGE_Y);
+    lv_obj_add_flag(s_age, LV_OBJ_FLAG_HIDDEN);
+
+    /* "Neu laden": dunkel mit hellem Rand -- ein Angebot, keine Aufforderung. */
+    s_reload = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_reload);
+    lv_obj_remove_flag(s_reload, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_reload, RELOAD_W, RELOAD_H);
+    lv_obj_set_style_radius(s_reload, RELOAD_H / 2, 0);
+    lv_obj_set_style_bg_opa(s_reload, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_reload, lv_color_hex(0x1b2430), 0);
+    lv_obj_set_style_border_width(s_reload, 2, 0);
+    lv_obj_set_style_border_color(s_reload, lv_color_hex(0x9aa3ad), 0);
+    lv_obj_align(s_reload, LV_ALIGN_TOP_MID, 0, ROWS_BOTTOM - RELOAD_H);
+    s_reload_label = lv_label_create(s_reload);
+    lv_label_set_text(s_reload_label, "Neu laden");
+    lv_obj_set_style_text_color(s_reload_label, lv_color_hex(0xf2f2f2), 0);
+    lv_obj_center(s_reload_label);
+    lv_obj_add_flag(s_reload, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Wann kamen die Daten der gezeigten Karte (UTC-Sekunden), 0 = nie. */
+static int64_t shown_at(void)
+{
+    if (s_kind == UI_CARD_WEATHER) {
+        return ui_weather_received_at();
+    }
+    return s_lists[s_kind].received ? s_lists[s_kind].at : 0;
+}
+
+static bool shown_empty(void)
+{
+    if (s_kind == UI_CARD_WEATHER) {
+        return !ui_weather_has_data();
+    }
+    return s_lists[s_kind].count == 0;
+}
+
+/*
+ * Alter und "Neu laden" nachziehen -- nach jedem Zeichnen, im 30-s-Takt und
+ * wenn ein Chip verschwindet. "Neu laden" steht bei leerer Karte (auch ohne
+ * je Daten) und bei veralteten Daten, aber nie zugleich mit "Rueckgaengig"
+ * oder dem OK-Chip: Die liegen an derselben Stelle bzw. sind wichtiger.
+ */
+static void update_age_locked(void)
+{
+    if (!s_age || !s_reload) {
+        return;
+    }
+    const int64_t at = shown_at();
+    const int64_t now = (int64_t)time(NULL);
+    const bool stale = at > 0 && now - at >= AGE_STALE_S;
+    char when[8];
+    ui_status_format_time_of_locked(at, when, sizeof(when));
+    if (when[0]) {
+        char text[24];
+        if (stale) {
+            snprintf(text, sizeof(text), "Stand %s", when);
+        } else {
+            strlcpy(text, when, sizeof(text));
+        }
+        lv_label_set_text(s_age, text);
+        lv_obj_set_style_text_color(s_age, lv_color_hex(stale ? 0x9aa3ad : 0x56606b), 0);
+        lv_obj_remove_flag(s_age, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_age, LV_OBJ_FLAG_HIDDEN);
+    }
+    const bool reload = (stale || shown_empty()) && !s_last.armed &&
+                        lv_obj_has_flag(s_ok, LV_OBJ_FLAG_HIDDEN);
+    if (reload) {
+        lv_obj_set_style_text_font(s_reload_label, UI_TYPO(UI_TYPO_META), 0);
+        lv_obj_remove_flag(s_reload, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_reload);
+    } else {
+        lv_obj_add_flag(s_reload, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void age_tick_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (s_visible) {
+        update_age_locked();
+    }
 }
 
 static void hide_undo_locked(void)
@@ -497,6 +605,9 @@ static void undo_expired_cb(lv_timer_t *timer)
     /* Einmaliger Zeitgeber: LVGL loescht ihn nach diesem Aufruf selbst. */
     s_undo_timer = NULL;
     hide_undo_locked();
+    if (s_visible) {
+        update_age_locked();
+    }
 }
 
 /*
@@ -548,11 +659,13 @@ static void render_weather_locked(void)
         ui_status_icons_apply(&s_tecki, EMPTY_POSES[UI_CARD_WEATHER]);
         ui_status_icons_show(&s_tecki, true);
         ui_weather_render_locked(0, false);
+        update_age_locked();
         return;
     }
     lv_obj_add_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
     ui_status_icons_show(&s_tecki, false);
     ui_weather_render_locked(s_wpage, true);
+    update_age_locked();
     /* Eine Warnung, die so noch nicht zu sehen war: einmal vibrieren. */
     if (ui_weather_take_new_warning_locked() && !ui_status_night_mode()) {
         voice_board_haptic_kind(VOICE_HAPTIC_REMINDER);
@@ -840,6 +953,7 @@ static void render_locked(void)
         lv_obj_move_foreground(s_ok);
     }
     update_bar_locked(lv_obj_get_scroll_y(s_list));
+    update_age_locked();
 }
 
 /* An den Anfang der Liste, ohne Animation -- beim Kartenwechsel und Oeffnen. */
@@ -947,6 +1061,7 @@ static ui_cards_action_t check_off_locked(card_list_t *list, int index, ui_cards
         /* Schalter: `aux` ist der Stand vor dem Tippen, `done` kehrt ihn um. */
         hit->binary = aux_is_binary(item->aux);
         hit->on = (strcmp(item->aux, "1") == 0) != item->done;
+        hit->lock = s_kind == UI_CARD_SWITCHES && item->domain == CARD_DOMAIN_LOCK;
     }
     hide_undo_locked();
     s_last.armed = true;
@@ -994,6 +1109,9 @@ void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part)
 #endif
     s_lists[kind].rev = rev;
     s_lists[kind].received = true;
+    if (part == 0) {
+        s_lists[kind].at = (int64_t)time(NULL);
+    }
     ui_status_unlock();
 }
 
@@ -1076,6 +1194,9 @@ void ui_cards_show(ui_card_kind_t kind)
     s_kind = kind;
     s_wpage = 0;
     s_visible = true;
+    if (!s_age_timer) {
+        s_age_timer = lv_timer_create(age_tick_cb, AGE_TICK_MS, NULL);
+    }
     scroll_top_locked();
     render_locked();
     lv_obj_remove_flag(s_root, LV_OBJ_FLAG_HIDDEN);
@@ -1094,6 +1215,10 @@ void ui_cards_hide(void)
     s_visible = false;
     hide_undo_locked();
     clear_selection_locked();
+    if (s_age_timer) {
+        lv_timer_delete(s_age_timer);
+        s_age_timer = NULL;
+    }
     if (s_root) {
         lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     }
@@ -1147,6 +1272,48 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
     if (!s_visible) {
         ui_status_unlock();
         return UI_CARDS_NONE;
+    }
+    /*
+     * Langer Druck (0.5.0, Punkte 14/15/20): auf eine offene Aufgabe in Heute
+     * das Aktionsblatt -- nicht auf Termine, nicht auf Abgehaktes. Ueberall
+     * sonst bleibt er ein Tippen, wie bis 0.4.6.
+     */
+    if ((voice_board_gesture_t)gesture == VOICE_BOARD_LONG_PRESS) {
+        if (s_kind == UI_CARD_TODAY) {
+            card_list_t *today = &s_lists[UI_CARD_TODAY];
+            int best = -1;
+            int32_t best_distance = 0;
+            for (int i = 0; i < today->count && i < ROWS_MAX; i++) {
+                const int32_t distance = hit_distance(s_row[i], x, y);
+                if (distance >= 0 && (best < 0 || distance < best_distance)) {
+                    best = i;
+                    best_distance = distance;
+                }
+            }
+            if (best >= 0 && !today->items[best].event && !today->items[best].done) {
+                if (clear_selection_locked()) {
+                    render_locked();
+                }
+                if (hit) {
+                    hit->kind = UI_CARD_TODAY;
+                    hit->rev = today->rev;
+                    hit->index = (uint8_t)best;
+                    strlcpy(hit->text, today->items[best].text, sizeof(hit->text));
+                    hit->binary = false;
+                    hit->on = false;
+                    hit->lock = false;
+                }
+                ui_status_unlock();
+                return UI_CARDS_SHEET;
+            }
+        }
+        gesture = VOICE_BOARD_TAP;
+    }
+    /* "Neu laden" (Punkt 8) liegt ueber allem anderen -- auch auf der Wetterkarte. */
+    if ((voice_board_gesture_t)gesture == VOICE_BOARD_TAP && s_reload &&
+        hit_distance(s_reload, x, y) >= 0) {
+        ui_status_unlock();
+        return UI_CARDS_RELOAD;
     }
     /* Jede Geste ausser Tippen verwirft die Markierung. */
     if ((voice_board_gesture_t)gesture != VOICE_BOARD_TAP && clear_selection_locked()) {
@@ -1380,6 +1547,10 @@ void ui_cards_restore(ui_card_kind_t kind, uint16_t rev, uint8_t index)
     card_list_t *list = &s_lists[kind];
     if (list->rev == rev && index < list->count) {
         list->items[index].done = kind == UI_CARD_SWITCHES ? !list->items[index].done : false;
+        /* Der Chip dieser Zeile nimmt nichts mehr zurueck, was zu nehmen waere. */
+        if (s_last.armed && s_last.kind == kind && s_last.rev == rev && s_last.index == index) {
+            hide_undo_locked();
+        }
         if (s_visible && s_kind == kind) {
             render_locked();
         }
@@ -1434,6 +1605,92 @@ void ui_cards_refresh(void)
 {
 #if CONFIG_VOICE_BOARD_WATCH206
     ui_status_lock();
+    if (s_visible) {
+        render_locked();
+    }
+    ui_status_unlock();
+#endif
+}
+
+ui_cards_action_t ui_cards_confirm_selected(ui_cards_hit_t *hit)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    ui_cards_action_t action = UI_CARDS_NONE;
+    ui_status_lock();
+    if (s_visible && s_kind < UI_CARD_LIST_COUNT && s_sel.active) {
+        card_list_t *list = &s_lists[s_kind];
+        const int index = s_sel.index;
+        /* Dieselben Bedingungen wie beim Tippen auf den OK-Chip. */
+        const bool valid = list->rev == s_sel.rev && index < list->count &&
+                           !list->items[index].event &&
+                           (s_kind == UI_CARD_SWITCHES || !list->items[index].done);
+        clear_selection_locked();
+        if (valid) {
+            action = check_off_locked(list, index, hit);
+        } else {
+            render_locked();
+        }
+    }
+    ui_status_unlock();
+    return action;
+#else
+    (void)hit;
+    return UI_CARDS_NONE;
+#endif
+}
+
+bool ui_cards_check_off(ui_card_kind_t kind, uint16_t rev, uint8_t index, ui_cards_hit_t *hit)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    bool done = false;
+    ui_status_lock();
+    if (s_visible && s_kind == kind && kind < UI_CARD_LIST_COUNT) {
+        card_list_t *list = &s_lists[kind];
+        if (list->rev == rev && index < list->count && !list->items[index].event &&
+            (kind == UI_CARD_SWITCHES || !list->items[index].done)) {
+            clear_selection_locked();
+            done = check_off_locked(list, index, hit) == UI_CARDS_ITEM;
+        }
+    }
+    ui_status_unlock();
+    return done;
+#else
+    (void)kind;
+    (void)rev;
+    (void)index;
+    (void)hit;
+    return false;
+#endif
+}
+
+bool ui_cards_context(ui_card_kind_t *kind, uint16_t *rev, int *index)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    ui_status_lock();
+    const bool visible = s_visible;
+    if (visible) {
+        *kind = s_kind;
+        *rev = s_kind < UI_CARD_LIST_COUNT ? s_lists[s_kind].rev : ui_weather_rev();
+        *index = s_kind < UI_CARD_LIST_COUNT && s_sel.active ? (int)s_sel.index : -1;
+    }
+    ui_status_unlock();
+    return visible;
+#else
+    (void)kind;
+    (void)rev;
+    (void)index;
+    return false;
+#endif
+}
+
+void ui_cards_clear_all(void)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    ui_status_lock();
+    memset(s_lists, 0, sizeof(s_lists));
+    ui_weather_clear_locked();
+    hide_undo_locked();
+    clear_selection_locked();
     if (s_visible) {
         render_locked();
     }

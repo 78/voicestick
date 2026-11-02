@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "sdkconfig.h"
 #include "ui_cards.h"
@@ -22,6 +23,8 @@
 typedef struct {
     uint16_t rev;
     bool received;
+    /* Wann Teil 0 kam (UTC-Sekunden, 0 = nie) -- fuer das Alter in der Kopfzeile (0.5.0). */
+    int64_t received_at;
     char now[W_TEXT_LEN];
     char today[W_TEXT_LEN];
     char rain[W_TEXT_LEN];
@@ -53,6 +56,7 @@ void ui_weather_begin(uint16_t rev, const char *now, const char *today, const ch
     memset(&s_w, 0, sizeof(s_w));
     s_w.rev = rev;
     s_w.received = true;
+    s_w.received_at = (int64_t)time(NULL);
     ui_status_copy_display_text(s_w.now, now ? now : "", sizeof(s_w.now));
     ui_status_copy_display_text(s_w.today, today ? today : "", sizeof(s_w.today));
     ui_status_copy_display_text(s_w.rain, rain ? rain : "", sizeof(s_w.rain));
@@ -121,6 +125,21 @@ uint8_t ui_weather_page_count(void)
         return 1;
     }
     return (s_w.pollen_count > 0 || s_w.warning_count > 0) ? 3 : 2;
+}
+
+int64_t ui_weather_received_at(void)
+{
+    return s_w.received ? s_w.received_at : 0;
+}
+
+uint16_t ui_weather_rev(void)
+{
+    return s_w.rev;
+}
+
+void ui_weather_clear_locked(void)
+{
+    memset(&s_w, 0, sizeof(s_w));
 }
 
 bool ui_weather_received(void)

@@ -40,6 +40,12 @@ void ui_weather_create_locked(lv_obj_t *parent);
 void ui_weather_render_locked(uint8_t page, bool visible);
 /* Wieviele Seiten es gerade gibt (2 oder 3; 1 ohne Daten). */
 uint8_t ui_weather_page_count(void);
+/* Wann das letzte Wetter kam (UTC-Sekunden), 0 = nie (0.5.0). */
+int64_t ui_weather_received_at(void);
+/* Stand der Bruecke (`rev` aus Teil 0) -- fuer `context` (0.5.0). */
+uint16_t ui_weather_rev(void);
+/* Sperre gehalten: alles vergessen, wie vor dem ersten Wetter (Gesperrt, 0.5.0). */
+void ui_weather_clear_locked(void);
 /* Kam je ein Wetter von der Bruecke (auch ein leeres)? */
 bool ui_weather_received(void);
 /* Gibt es ueberhaupt Daten (now nicht leer)? */

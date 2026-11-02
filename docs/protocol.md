@@ -82,7 +82,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.4.6","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.5.0","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 

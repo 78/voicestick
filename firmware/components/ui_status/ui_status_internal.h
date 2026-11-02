@@ -26,6 +26,11 @@ void ui_status_header_refresh_locked(void);
 /* Uhrzeit "07:42" ("--:--" ungestellt) und Datum "So 1.11." (leer ungestellt) -- fuer die Vorschau der Layouts. */
 void ui_status_format_clock(char *out, size_t size);
 void ui_status_format_date(char *out, size_t size);
+/*
+ * "08:12" in Ortszeit fuer einen Zeitpunkt (UTC-Sekunden) -- leer, solange
+ * die Uhr nicht gestellt ist. Sperre gehalten. Fuer das Alter der Karten (0.5.0).
+ */
+void ui_status_format_time_of_locked(int64_t epoch_utc, char *out, size_t size);
 /* Nachtlade-Modus aktiv? Dann vibriert und piept nichts (ui_cards.c fragt vor der Warn-Vibration). */
 bool ui_status_night_mode(void);
 

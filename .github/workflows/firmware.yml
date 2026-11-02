@@ -131,6 +131,11 @@ jobs:
           set -euo pipefail
           cd dist
           python3 "${GITHUB_WORKSPACE}/.github/scripts/firmware-manifest.py"
+          # Die Fassung als eigene kleine Datei (Uhr Paket J, 0.5.0): Die
+          # Bruecke liest sie taeglich und beim Verbinden und bietet der Uhr
+          # ein Update an, ohne das ganze Abbild zu laden.
+          tr -d '[:space:]' < "${GITHUB_WORKSPACE}/firmware/version.txt" > version.txt
+          test -s version.txt
           {
             echo "Automatisch aus \`main\` gebaut, Commit \`${GITHUB_SHA:0:7}\`."
             echo "Rollend — dieser Tag zeigt immer auf den letzten gruenen Lauf aus \`main\`."
@@ -147,6 +152,9 @@ jobs:
             echo
             echo "\`firmware.json\` nennt Commit, Zeitpunkt, Groessen und SHA-256 —"
             echo "daran erkennt der Abholer, ob sich das Herunterladen lohnt."
+            echo
+            echo "\`version.txt\` traegt nur die Fassung (\`$(cat version.txt)\`) —"
+            echo "daran erkennt die Bruecke, ob sie der Uhr ein Update anbietet."
           } > notes.md
 
           # Loeschen und neu anlegen statt verschieben: `gh release edit` zieht
@@ -159,6 +167,6 @@ jobs:
             --notes-file notes.md \
             --prerelease \
             --target "${GITHUB_SHA}" \
-            voice_stick.bin merged.bin voice_watch.bin merged_watch.bin firmware.json
+            voice_stick.bin merged.bin voice_watch.bin merged_watch.bin firmware.json version.txt
 
           echo "Veroeffentlicht: https://github.com/${GITHUB_REPOSITORY}/releases/tag/firmware-latest" >> "$GITHUB_STEP_SUMMARY"

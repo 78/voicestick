@@ -345,6 +345,12 @@ static bool s_empty_history_shown;
  * einen Antwort, unter der sie stehen.
  */
 static char s_choices[UI_STATUS_CHOICES_MAX][UI_STATUS_CHOICE_LEN];
+/*
+ * Der Text, wie die Bruecke ihn geschickt hat (0.5.0): `choice` meldet ihn
+ * zurueck, und die Bruecke ordnet ihn einem Vorschlag zu -- die Anzeige-
+ * Kopie oben hat Typografie schon zu ASCII gemacht und passte dann nicht mehr.
+ */
+static char s_choice_raw[UI_STATUS_CHOICES_MAX][UI_STATUS_CHOICE_LEN];
 static uint8_t s_choice_count;
 static lv_obj_t *s_choice_btn[UI_STATUS_CHOICES_MAX];
 static lv_obj_t *s_choice_label[UI_STATUS_CHOICES_MAX];
@@ -361,6 +367,16 @@ static int64_t s_event_start;
 /* Termin, bis drei Zeilen der Bruecke, dazu die rote Akku-Restzeit. */
 #define FACE_LABELS (UI_STATUS_FACE_LINES + 2)
 static lv_obj_t *s_face_label[FACE_LABELS];
+/*
+ * Zeilen antippbar (0.5.0, Punkt 13): die Arten aus `face.kinds` und je
+ * sichtbarem Label, wofuer es steht (ui_face_hit_t) -- gesetzt beim Zeichnen.
+ * Ohne `kinds` bleibt alles UI_FACE_HIT_NONE.
+ */
+static uint8_t s_face_kinds[UI_STATUS_FACE_LINES];
+static uint8_t s_face_kind_count;
+static uint8_t s_face_label_kind[FACE_LABELS];
+/* Gesperrt (0.5.0, Punkt 32): statt der Zeilen "Gesperrt -- in der App neu koppeln". */
+static bool s_face_locked;
 /*
  * Teckis Stimmung fuer ein paar Sekunden ueber der Szene: freut sich ueber
  * eine Antwort, schaut beim Wischen in die Richtung. Laeuft ab und faellt
@@ -900,10 +916,51 @@ static bool s_render_more;
 static bool s_render_meta;
 static bool s_transcript_active;
 
+#if UI_WATCH
+/*
+ * Lange Antwortflaechen (0.5.0, Punkt 43): Vorschlaege wie "Aufgabe: Milch
+ * holen" passen nicht zu dritt nebeneinander in die 30er. Dann stehen sie
+ * untereinander, volle Breite, in der 20er mit bis zu zwei Zeilen.
+ */
+#define CHOICE_STACK_H 64
+#define CHOICE_STACK_GAP 8
+#define CHOICE_STACK_FONT (&todoteck_watch_font_20)
+
+static bool choices_stacked(void)
+{
+    if (s_choice_count == 0) {
+        return false;
+    }
+    const int32_t w = (CONTENT_W - (s_choice_count - 1) * CHOICE_GAP) / s_choice_count;
+    for (int i = 0; i < s_choice_count; i++) {
+        if (lv_text_get_width(s_choices[i], (uint32_t)strlen(s_choices[i]), UI_FONT_STATUS, 0) >
+            w - 24) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
+/* Was die Antwortflaechen unten belegen, samt Abstand darueber; 0 ohne. */
+static int32_t choices_block_h(void)
+{
+    if (s_choice_count == 0) {
+        return 0;
+    }
+#if UI_WATCH
+    if (choices_stacked()) {
+        return s_choice_count * CHOICE_STACK_H + (s_choice_count - 1) * CHOICE_STACK_GAP +
+               CHOICE_GAP;
+    }
+#endif
+    return CHOICE_H + CHOICE_GAP;
+}
+
 /* Unterkante des Texts: ueber allem, was darunter steht. */
 static int32_t text_bottom_y(void)
 {
-    int32_t y = s_choice_count > 0 ? TEXT_BOTTOM_Y - CHOICE_H - CHOICE_GAP : TEXT_BOTTOM_Y;
+    int32_t y = TEXT_BOTTOM_Y - choices_block_h();
 #if UI_WATCH
     if (s_render_dots) {
         y -= DOTS_ROW_H;
@@ -1537,11 +1594,26 @@ static void render_face_lines_locked(bool visible, const char *event_line)
     int row = 0;
     for (int i = 0; i < FACE_LABELS; i++) {
         lv_obj_add_flag(s_face_label[i], LV_OBJ_FLAG_HIDDEN);
+        s_face_label_kind[i] = UI_FACE_HIT_NONE;
     }
     if (!visible) {
         return;
     }
+    if (s_face_locked) {
+        /* Gesperrt: zwei Zeilen statt Termin und Zeilen -- nichts davon ist antippbar. */
+        lv_label_set_text(s_face_label[0], "Gesperrt");
+        lv_obj_set_style_text_color(s_face_label[0], lv_color_hex(0xe74c3c), 0);
+        lv_obj_align(s_face_label[0], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP);
+        lv_obj_remove_flag(s_face_label[0], LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_face_label[1], "In der App neu koppeln");
+        lv_obj_set_style_text_color(s_face_label[1],
+                                    lv_color_hex(s_face_tint_shown ? NIGHT_TINT_MUTED : 0xc9d1d9), 0);
+        lv_obj_align(s_face_label[1], LV_ALIGN_TOP_MID, 0, FACE_LINE_TOP + FACE_LINE_H);
+        lv_obj_remove_flag(s_face_label[1], LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
     if (event_line[0]) {
+        s_face_label_kind[row] = s_face_kind_count > 0 ? UI_FACE_HIT_EVENT : UI_FACE_HIT_NONE;
         lv_label_set_text(s_face_label[row], event_line);
         lv_obj_set_style_text_color(s_face_label[row],
                                     lv_color_hex(s_face_tint_shown ? NIGHT_TINT_TEXT : 0x5ec4ff), 0);
@@ -1550,6 +1622,7 @@ static void render_face_lines_locked(bool visible, const char *event_line)
         row++;
     }
     for (int i = 0; i < s_face_count && row < FACE_LABELS - 1; i++, row++) {
+        s_face_label_kind[row] = i < s_face_kind_count ? s_face_kinds[i] : UI_FACE_HIT_NONE;
         lv_label_set_text(s_face_label[row], s_face[i]);
         lv_obj_set_style_text_color(s_face_label[row],
                                     lv_color_hex(s_face_tint_shown ? NIGHT_TINT_MUTED : 0xc9d1d9), 0);
@@ -1627,6 +1700,10 @@ static void render_alt_face_locked(ui_face_layout_t layout, const char *clock_te
         place_clock_label_locked(clock_text);
         static char date[24]; /* unter s_lvgl_lock */
         format_face_date(date, sizeof(date));
+        if (s_face_locked) {
+            /* Minimal hat keine Zeilen: das Datum weicht dem Hinweis. */
+            strlcpy(date, "Gesperrt", sizeof(date));
+        }
         lv_label_set_text(s_face_date, date);
         lv_obj_align(s_face_date, LV_ALIGN_TOP_MID, 0, MINIMAL_DATE_Y);
         if (date[0]) {
@@ -1652,8 +1729,12 @@ static void render_alt_face_locked(ui_face_layout_t layout, const char *clock_te
                      ink_center_shift(UI_FONT_CLOCK_LARGE, part), i == 0 ? LARGE_HH_Y : LARGE_MM_Y);
         lv_obj_remove_flag(s_large_label[i], LV_OBJ_FLAG_HIDDEN);
     }
-    const bool is_event = event_line[0] != '\0';
-    const char *line = is_event ? event_line : s_face_count > 0 ? s_face[0] : "";
+    const bool is_event = event_line[0] != '\0' && !s_face_locked;
+    const char *line = s_face_locked ? "Gesperrt" : is_event ? event_line :
+                       s_face_count > 0 ? s_face[0] : "";
+    if (s_face_kind_count > 0 && !s_face_locked) {
+        s_face_label_kind[0] = is_event ? UI_FACE_HIT_EVENT : s_face_kinds[0];
+    }
     if (line[0] && s_face_label[0]) {
         lv_label_set_text(s_face_label[0], line);
         lv_obj_set_style_text_color(
@@ -1908,7 +1989,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         static char event_line[UI_STATUS_FACE_LEN + 40]; /* unter s_lvgl_lock, siehe quoted */
         format_event(event_line, sizeof(event_line));
         const bool face_info = clock_only && !night && s_face_label[0] != NULL &&
-                               (s_face_count > 0 || event_line[0] || s_battery_remaining[0]);
+                               (s_face_count > 0 || event_line[0] || s_battery_remaining[0] || s_face_locked);
 #if UI_WATCH
         if (layout != UI_FACE_INFO) {
             render_alt_face_locked(layout, clock_text, event_line);
@@ -2010,6 +2091,9 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
      * uebrigen nur umrandet -- so trifft der Daumen nicht aus Versehen die
      * falsche, weil beide gleich aussehen.
      */
+#if UI_WATCH
+    const bool stacked = choices_stacked();
+#endif
     for (int i = 0; i < UI_STATUS_CHOICES_MAX; i++) {
         if (!s_choice_btn[i]) {
             continue;
@@ -2018,10 +2102,40 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
             lv_obj_add_flag(s_choice_btn[i], LV_OBJ_FLAG_HIDDEN);
             continue;
         }
-        const int32_t w = (CONTENT_W - (s_choice_count - 1) * CHOICE_GAP) / s_choice_count;
-        lv_obj_set_size(s_choice_btn[i], w, CHOICE_H);
-        lv_obj_align(s_choice_btn[i], LV_ALIGN_TOP_LEFT, i * (w + CHOICE_GAP),
-                     TEXT_BOTTOM_Y - CHOICE_H);
+#if UI_WATCH
+        if (stacked) {
+            /* Untereinander, die erste oben -- volle Breite, zwei Zeilen in der 20er. */
+            const int32_t top = TEXT_BOTTOM_Y - (s_choice_count * CHOICE_STACK_H +
+                                                 (s_choice_count - 1) * CHOICE_STACK_GAP);
+            lv_obj_set_size(s_choice_btn[i], CONTENT_W, CHOICE_STACK_H);
+            lv_obj_set_style_radius(s_choice_btn[i], CHOICE_STACK_H / 2, 0);
+            lv_obj_align(s_choice_btn[i], LV_ALIGN_TOP_LEFT, 0,
+                         top + i * (CHOICE_STACK_H + CHOICE_STACK_GAP));
+            lv_obj_set_style_text_font(s_choice_label[i], CHOICE_STACK_FONT, 0);
+            lv_label_set_long_mode(s_choice_label[i], LV_LABEL_LONG_DOT);
+            lv_obj_set_size(s_choice_label[i], CONTENT_W - 48,
+                            2 * lv_font_get_line_height(CHOICE_STACK_FONT));
+            lv_obj_set_style_text_align(s_choice_label[i], LV_TEXT_ALIGN_CENTER, 0);
+            /* Passt der Text in eine Zeile, steht er mittig statt oben. */
+            if (lv_text_get_width(s_choices[i], (uint32_t)strlen(s_choices[i]),
+                                  CHOICE_STACK_FONT, 0) <= CONTENT_W - 48) {
+                lv_obj_set_height(s_choice_label[i], lv_font_get_line_height(CHOICE_STACK_FONT));
+            }
+        } else {
+            lv_obj_set_style_radius(s_choice_btn[i], CHOICE_H / 2, 0);
+            lv_obj_set_style_text_font(s_choice_label[i], UI_FONT_STATUS, 0);
+            lv_label_set_long_mode(s_choice_label[i], LV_LABEL_LONG_WRAP);
+            lv_obj_set_size(s_choice_label[i], LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        }
+        if (!stacked)
+#endif
+        {
+            const int32_t w = (CONTENT_W - (s_choice_count - 1) * CHOICE_GAP) / s_choice_count;
+            lv_obj_set_size(s_choice_btn[i], w, CHOICE_H);
+            lv_obj_align(s_choice_btn[i], LV_ALIGN_TOP_LEFT, i * (w + CHOICE_GAP),
+                         TEXT_BOTTOM_Y - CHOICE_H);
+        }
+        lv_obj_center(s_choice_label[i]);
         const bool primary = i == 0;
         lv_obj_set_style_bg_opa(s_choice_btn[i], primary ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         lv_obj_set_style_bg_color(s_choice_btn[i], lv_color_hex(0x2ecc71), 0);
@@ -2183,7 +2297,8 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     for (int i = 0; i < 2; i++) {
         lv_obj_set_style_text_color(s_large_label[i], clock_colour, 0);
     }
-    lv_obj_set_style_text_color(s_face_date, tint ? lv_color_hex(NIGHT_TINT_MUTED) : muted, 0);
+    lv_obj_set_style_text_color(s_face_date, s_face_locked ? lv_color_hex(0xe74c3c) :
+                                tint ? lv_color_hex(NIGHT_TINT_MUTED) : muted, 0);
     lv_obj_set_style_text_color(s_meta_label, muted, 0);
 #endif
     /*
@@ -3670,7 +3785,8 @@ void ui_status_copy_display_text(char *dst, const char *src, size_t size)
 }
 
 void ui_status_set_face(const char (*lines)[UI_STATUS_FACE_LEN], uint8_t count,
-                        const char *event_title, int64_t event_start)
+                        const char *event_title, int64_t event_start,
+                        const uint8_t *kinds, uint8_t kind_count)
 {
     if (count > UI_STATUS_FACE_LINES) {
         count = UI_STATUS_FACE_LINES;
@@ -3680,6 +3796,11 @@ void ui_status_set_face(const char (*lines)[UI_STATUS_FACE_LEN], uint8_t count,
         copy_utf8_display(s_face[i], lines[i], sizeof(s_face[i]));
     }
     s_face_count = count;
+    /* `kinds` gilt nur, wenn es zu den Zeilen passt (gleiche Laenge) -- sonst wie bis 0.4.6. */
+    s_face_kind_count = kinds && kind_count == count ? count : 0;
+    for (uint8_t i = 0; i < s_face_kind_count; i++) {
+        s_face_kinds[i] = kinds[i];
+    }
     copy_utf8_display(s_event_title, event_title ? event_title : "", sizeof(s_event_title));
     s_event_start = event_start;
     render_current_locked();
@@ -3719,6 +3840,7 @@ void ui_status_set_choices(const char (*choices)[UI_STATUS_CHOICE_LEN], uint8_t 
     _lock_acquire(&s_lvgl_lock);
     for (uint8_t i = 0; i < count; i++) {
         copy_utf8_display(s_choices[i], choices[i], sizeof(s_choices[i]));
+        strlcpy(s_choice_raw[i], choices[i], sizeof(s_choice_raw[i]));
     }
     s_choice_count = count;
     render_current_locked();
@@ -3746,7 +3868,7 @@ int ui_status_choice_at(int16_t x, int16_t y, char *out, size_t out_size)
         if (x >= area.x1 - 8 && x <= area.x2 + 8 && y >= area.y1 - 16 && y <= area.y2 + 16) {
             hit = i;
             if (out && out_size) {
-                strlcpy(out, s_choices[i], out_size);
+                strlcpy(out, s_choice_raw[i][0] ? s_choice_raw[i] : s_choices[i], out_size);
             }
             break;
         }
@@ -4051,4 +4173,102 @@ bool ui_status_answer_scroll(int dir)
     (void)dir;
     return false;
 #endif
+}
+
+/* ── Paket J, Teil 2 (0.5.0) ───────────────────────────────────────────── */
+
+ui_face_hit_t ui_face_hit_from_name(const char *name)
+{
+    static const char *const NAMES[] = { "task", "weather", "waste", "event" };
+    for (int i = 0; i < 4; i++) {
+        if (name && strcmp(name, NAMES[i]) == 0) {
+            return (ui_face_hit_t)(UI_FACE_HIT_TASK + i);
+        }
+    }
+    return UI_FACE_HIT_OTHER;
+}
+
+/*
+ * Tippen auf eine Zifferblatt-Zeile (Punkt 13). Getroffen ist das Label,
+ * dessen Mitte dem Finger am naechsten liegt -- senkrecht mit einem halben
+ * Zeilenabstand Toleranz, damit die 34-px-Zeilen nahtlos aneinander
+ * grenzen. Nur, solange das Zifferblatt steht und die Zeile eine Art traegt.
+ */
+ui_face_hit_t ui_status_face_hit_at(int16_t x, int16_t y)
+{
+    ui_face_hit_t hit = UI_FACE_HIT_NONE;
+#if UI_WATCH
+    _lock_acquire(&s_lvgl_lock);
+    int32_t best = -1;
+    for (int i = 0; i < FACE_LABELS; i++) {
+        if (!s_face_label[i] || s_face_label_kind[i] == UI_FACE_HIT_NONE ||
+            lv_obj_has_flag(s_face_label[i], LV_OBJ_FLAG_HIDDEN)) {
+            continue;
+        }
+        lv_area_t area;
+        lv_obj_get_coords(s_face_label[i], &area);
+        const int32_t cy = (area.y1 + area.y2) / 2;
+        const int32_t dy = y > cy ? y - cy : cy - y;
+        if (x < area.x1 - UI_HIT_TOLERANCE || x > area.x2 + UI_HIT_TOLERANCE ||
+            dy > FACE_LINE_H / 2 + UI_HIT_TOLERANCE) {
+            continue;
+        }
+        if (best < 0 || dy < best) {
+            best = dy;
+            hit = (ui_face_hit_t)s_face_label_kind[i];
+        }
+    }
+    _lock_release(&s_lvgl_lock);
+#else
+    (void)x;
+    (void)y;
+#endif
+    return hit;
+}
+
+void ui_status_set_locked(bool locked)
+{
+    _lock_acquire(&s_lvgl_lock);
+    if (s_face_locked != locked) {
+        s_face_locked = locked;
+        render_current_locked();
+    }
+    _lock_release(&s_lvgl_lock);
+}
+
+void ui_status_show_latest(void)
+{
+    _lock_acquire(&s_lvgl_lock);
+    /* Ein Schritt "aelter" von hier aus landet genau auf der juengsten Antwort. */
+    s_history_cursor = (int8_t)(s_history_count > 0 ? HISTORY_FIRST - 1 : -1);
+    s_empty_history_shown = false;
+    _lock_release(&s_lvgl_lock);
+    browse_step(1);
+}
+
+void ui_status_history_add_note(const char *line)
+{
+    _lock_acquire(&s_lvgl_lock);
+    ui_history_entry_t *entry = history_push_locked();
+    copy_utf8_display(entry->answer, line ? line : "", sizeof(entry->answer));
+    entry->kind = UI_HISTORY_TURN;
+    entry->outcome = UI_OUTCOME_ANSWER;
+    _lock_release(&s_lvgl_lock);
+}
+
+/* Sperre gehalten (wie ui_status_format_clock fuer die Vorschau): liest nur die Uhr-Felder. */
+void ui_status_format_time_of_locked(int64_t epoch_utc, char *out, size_t size)
+{
+    const bool valid = s_clock_valid;
+    const int32_t offset = s_clock_offset_min;
+    if (!valid || epoch_utc <= 0 || size == 0) {
+        if (size) {
+            out[0] = '\0';
+        }
+        return;
+    }
+    const time_t local = (time_t)epoch_utc + (time_t)offset * 60;
+    struct tm parts;
+    gmtime_r(&local, &parts);
+    snprintf(out, size, "%02u:%02u", (unsigned)parts.tm_hour % 24u, (unsigned)parts.tm_min % 60u);
 }
