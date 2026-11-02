@@ -31,6 +31,7 @@ typedef struct {
     uint8_t group;    /* 1..CARD_GROUPS_MAX in `groups`, 0 = keine */
     bool confirm;     /* Schalter: erst markieren, dann "OK - schalten" (Flag `c`) */
     bool event;       /* Termin (Flag `e`): nicht antippbar, nur zum Lesen */
+    bool select;      /* input_select (Flag `s`, 0.4.5): Tippen oeffnet die Auswahl */
     bool done;        /* angetippt; die Bruecke hat es noch nicht bestaetigt */
 } card_item_t;
 
@@ -875,6 +876,8 @@ void ui_cards_add_item(ui_card_kind_t kind, const char *text, const char *aux,
         item->event = flags && strchr(flags, 'e') != NULL;
         item->colour = item->event ? (CARD_EVENT_COLOUR | CARD_COLOUR_SET) : parse_colour(colour);
         item->confirm = !item->event && flags && strchr(flags, 'c') != NULL;
+        item->select = kind == UI_CARD_SWITCHES && !item->event && flags &&
+                       strchr(flags, 's') != NULL;
         item->done = false;
         item->group = 0;
         if (group && group[0]) {
@@ -1145,6 +1148,27 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
             }
             break;
         }
+        if (s_kind == UI_CARD_SWITCHES && list->items[index].select) {
+            /*
+             * input_select (Flag `s`, 0.4.5): die Auswahl oeffnen statt
+             * weiterschalten -- ohne OK-Schritt, auch bei `c`: Die Wahl in
+             * der Liste ist selbst der zweite Schritt. Gesendet wird hier
+             * noch nichts ausser der Bitte um die Optionen (main.c).
+             */
+            if (clear_selection_locked()) {
+                render_locked();
+            }
+            if (hit) {
+                hit->kind = s_kind;
+                hit->rev = list->rev;
+                hit->index = (uint8_t)index;
+                strlcpy(hit->text, list->items[index].text, sizeof(hit->text));
+                hit->binary = false;
+                hit->on = false;
+            }
+            action = UI_CARDS_OPTIONS;
+            break;
+        }
         if (needs_confirm(list, index)) {
             /*
              * Nur markieren (oder die Markierung auf diese Zeile legen).
@@ -1206,6 +1230,43 @@ void ui_cards_restore(ui_card_kind_t kind, uint16_t rev, uint8_t index)
     if (list->rev == rev && index < list->count) {
         list->items[index].done = kind == UI_CARD_SWITCHES ? !list->items[index].done : false;
         if (s_visible && s_kind == kind) {
+            render_locked();
+        }
+    }
+    ui_status_unlock();
+#else
+    (void)kind;
+    (void)rev;
+    (void)index;
+#endif
+}
+
+void ui_cards_mark_sent(ui_card_kind_t kind, uint16_t rev, uint8_t index)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    if (kind >= UI_CARD_LIST_COUNT) {
+        return;
+    }
+    ui_status_lock();
+    card_list_t *list = &s_lists[kind];
+    if (list->rev == rev && index < list->count) {
+        /*
+         * Wie check_off_locked(), nur ohne Umschalten: `done` heisst bei
+         * einem Wort statt An/Aus "..." bis zur neuen Karte. Der Chip steht
+         * nur, wenn die Karte zu sehen ist -- sonst bleibt der Verlauf.
+         */
+        card_item_t *item = &list->items[index];
+        hide_undo_locked();
+        s_last.kind = kind;
+        s_last.rev = rev;
+        s_last.index = index;
+        s_last.prev_done = item->done;
+        item->done = true;
+        if (s_visible && s_kind == kind && s_undo) {
+            s_last.armed = true;
+            s_undo_timer = lv_timer_create(undo_expired_cb, UNDO_MS, NULL);
+            lv_timer_set_repeat_count(s_undo_timer, 1);
+            lv_obj_remove_flag(s_undo, LV_OBJ_FLAG_HIDDEN);
             render_locked();
         }
     }

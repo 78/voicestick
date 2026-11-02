@@ -45,6 +45,7 @@ typedef enum {
     UI_CARDS_UNDO,   /* "Rueckgaengig" angetippt -- `hit` sagt, welche Zeile */
     UI_CARDS_END,    /* am Ende der Reihe weitergewischt -- nichts mehr rechts */
     UI_CARDS_SELECT, /* Heute: Zeile markiert, wartet auf "OK" -- noch nichts senden */
+    UI_CARDS_OPTIONS, /* Schalter mit Flag `s` (input_select, 0.4.5): Auswahl oeffnen -- `hit` sagt welche */
 } ui_cards_action_t;
 
 typedef struct {
@@ -72,7 +73,10 @@ void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part);
  * Streifen. `group`: Ueberschrift der Gruppe ("Ueberfaellig", nur `today`),
  * ""/NULL = keine. `flags`: "c" = erst markieren, dann "OK" (Schalter mit
  * Bestaetigung); "e" = Termin (0.4.4, nur `today`): nicht antippbar,
- * Streifen in Kalender-Blau statt Projektfarbe; ""/NULL = direkt.
+ * Streifen in Kalender-Blau statt Projektfarbe; "s" = Auswahl (0.4.5, nur
+ * `switches`, ein input_select): Tippen oeffnet die Liste der Optionen
+ * (ui_options.h) statt weiterzuschalten, ohne OK-Schritt, auch neben `c`;
+ * ""/NULL = direkt.
  */
 void ui_cards_add_item(ui_card_kind_t kind, const char *text, const char *aux,
                        const char *colour, const char *group, const char *flags);
@@ -90,6 +94,13 @@ bool ui_cards_visible(void);
  * Tippen, sofern die Liste noch dieselbe ist (`rev`). Zeichnet neu, falls sichtbar.
  */
 void ui_cards_restore(ui_card_kind_t kind, uint16_t rev, uint8_t index);
+
+/*
+ * Eine Option der Auswahl ist gesendet (0.4.5): Die Zeile zeigt "..." bis
+ * zur neuen Karte, und fuenf Sekunden steht "Rueckgaengig" -- wie nach dem
+ * Tippen auf einen Schalter. Nur, wenn die Liste noch dieselbe ist (`rev`).
+ */
+void ui_cards_mark_sent(ui_card_kind_t kind, uint16_t rev, uint8_t index);
 
 /* Gesten (voice_board_gesture_t als int) und Lage des Fingers. */
 ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit_t *hit);

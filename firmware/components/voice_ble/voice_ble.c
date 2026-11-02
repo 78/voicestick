@@ -1074,6 +1074,28 @@ esp_err_t voice_ble_send_item(const char *kind, uint16_t rev, uint8_t index)
     return send_state_json(json);
 }
 
+esp_err_t voice_ble_send_options_request(const char *kind, uint16_t rev, uint8_t index)
+{
+    char json[112];
+    snprintf(json, sizeof(json),
+             "{\"event\":\"options_request\",\"kind\":\"%.16s\",\"rev\":%u,\"index\":%u}",
+             kind ? kind : "", (unsigned)rev, (unsigned)index);
+    ESP_LOGI(TAG, "options_request %s rev=%u index=%u", kind ? kind : "", (unsigned)rev,
+             (unsigned)index);
+    return send_state_json(json);
+}
+
+esp_err_t voice_ble_send_option(const char *kind, uint16_t rev, uint8_t index, uint8_t choice)
+{
+    char json[112];
+    snprintf(json, sizeof(json),
+             "{\"event\":\"option\",\"kind\":\"%.16s\",\"rev\":%u,\"index\":%u,\"choice\":%u}",
+             kind ? kind : "", (unsigned)rev, (unsigned)index, (unsigned)choice);
+    ESP_LOGI(TAG, "option %s rev=%u index=%u choice=%u", kind ? kind : "", (unsigned)rev,
+             (unsigned)index, (unsigned)choice);
+    return send_state_json(json);
+}
+
 esp_err_t voice_ble_send_action(void)
 {
     return send_state_json("{\"event\":\"action\"}");

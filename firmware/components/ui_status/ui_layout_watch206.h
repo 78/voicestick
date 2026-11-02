@@ -163,6 +163,8 @@ LV_FONT_DECLARE(todoteck_clock_64);
  *   Ziffernblatt: lange    main.c handle_touch            ganzer Schirm     --               --
  *   druecken (0.4.4)
  *   Layout-Auswahl: Tippen ui_face_picker.c               ganzer Schirm     --               --
+ *   Option (input_select,  ui_options.c ui_options_touch  378 x 56..59      x 205            6
+ *   0.4.5, bis 8 Zeilen)
  *   Wetterkarte            ui_weather.c                   keine (reine Anzeige)
  *
  * Die schmalste Flaeche ist die "Tippen fuer mehr"-Flaeche mit 52 px. Die

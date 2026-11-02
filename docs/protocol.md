@@ -82,7 +82,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.4.4","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.4.5","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 
@@ -387,7 +387,8 @@ Element 4 is the group heading (`today` only: "Angepinnt", "Überfällig",
 "Heute", "Außerdem wichtig"); the watch draws a thin heading line wherever it
 changes from the row before. Element 5 is a flag string: `c` means the row
 needs the OK step (a switch with `confirm` set in the app) — tap selects, the
-green "OK – schalten" chip toggles. A missing element reads as `""`. An `aux`
+green "OK – schalten" chip toggles. Since 0.4.5 `s` marks an `input_select`: a tap
+opens the option picker (see the 0.4.5 section). A missing element reads as `""`. An `aux`
 that is a date (`31.10.`) marks an overdue task and is drawn red. Rows no
 longer sit on pages: the list scrolls, and up/down move it by one view.
 
@@ -533,6 +534,71 @@ instead of the project colour the row carries a stripe in calendar blue
 `#3b82f6`. All-day events have an empty `aux`. The card counts as empty (Tecki
 and "Heute ist alles erledigt.") only without tasks and without events. Up to
 five group headings per list (was four).
+
+### Fork addition: 0.4.5
+
+Option picker for `input_select` on the Home card (11/2026). Until 0.4.4 a tap
+on such a row stepped to the next option (`item`, the server cycles). Now the
+watch shows the options and the user picks one. Optional in both directions:
+older firmware ignores the flag `s` and keeps sending `item` — the bridge then
+steps on as before; a bridge that never sets `s` leaves the watch as in 0.4.4.
+`device_info` is unchanged.
+
+**Flag `s` in `list`** (bridge → watch, element 5, `switches` only) marks a
+row that is an `input_select`; it may stand next to `c`:
+
+```json
+{"event":"list","kind":"switches","rev":4,"part":0,"items":[["Licht Küche","1","","","c"],["Büro Modus","Feierabend","","","s"]]}
+```
+
+**`options_request`** — watch → bridge on the state characteristic, sent at
+once when an `s` row is tapped (no OK step, even with `c`: the choice in the
+list is the second step). Coordinates as with `item`:
+
+```json
+{"event":"options_request","kind":"switches","rev":4,"index":1}
+```
+
+**`options`** — bridge → watch on `control_rx`, answered from the last glance
+the bridge holds (no server call):
+
+```json
+{"event":"options","rev":4,"index":1,"current":0,"items":["Feierabend","Office","Gaming"]}
+```
+
+`items` are the options in Home Assistant's order, at most 8, each clipped to
+16 characters by the server; `current` is the index of the active option, `-1`
+when unknown. If the message does not fit one write, the bridge drops options
+from the end but never the current one. If `rev` is stale (the card has
+changed since), the bridge answers with an empty list and sends the new card
+afterwards:
+
+```json
+{"event":"options","rev":4,"index":1,"current":-1,"items":[]}
+```
+
+The watch opens the picker right after `options_request` with "Lädt …";
+`options` fills it when `rev` and `index` match the open picker. An empty
+`items` closes it with the error tone; no `options` within 3 s shows "Keine
+Antwort" for 1.5 s and closes.
+
+**`option`** — watch → bridge on the state characteristic, when an option
+other than the active one is tapped; `choice` is the index into `items`:
+
+```json
+{"event":"option","kind":"switches","rev":4,"index":1,"choice":2}
+```
+
+The bridge maps `rev`/`index` to the entity (as with `item`) and `choice` to
+the option text from its glance, and calls the server with that option
+(`input_select.select_option`). Success: status line, undo record under the
+same coordinates as `item`, then a fresh glance. On the watch the row shows
+"..." until the new card arrives, "Rückgängig" stands for 5 s (`undo` with the
+same `kind`/`rev`/`index`), and the history keeps "Büro Modus: Gaming" with
+those coordinates — `undo` from there restores the previous option through the
+server's record. Tapping the active option sends nothing and only closes;
+swipe down (at the top of the list), back from the left edge and 10 s without
+input close without sending.
 
 ### Fork addition: `question` on `ui_state`
 

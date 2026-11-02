@@ -32,6 +32,7 @@
 #include "ui_cards.h"
 #include "ui_control.h"
 #include "ui_history_text.h"
+#include "ui_options.h"
 #include "ui_status.h"
 #include "ui_weather.h"
 #include "voice_ble.h"
@@ -417,6 +418,8 @@ typedef enum {
     APP_EVENT_DISPLAY_OFF,
     /* Drei Sekunden ohne Uebertragung der Bruecke: Verbindung wieder langsam. */
     APP_EVENT_BLE_SETTLE,
+    /* `options` mit leerer Liste (Karte inzwischen neu): Auswahl zu, Fehlerton (Uhr, 0.4.5). */
+    APP_EVENT_OPTIONS_FAILED,
 } app_event_type_t;
 
 typedef struct {
@@ -1743,6 +1746,47 @@ static void ble_speaker_cb(const uint8_t *data, size_t len)
     }
 }
 
+#if CONFIG_VOICE_BOARD_WATCH206
+/*
+ * `options` (0.4.5): die Optionen eines input_select, Antwort der Bruecke
+ * auf `options_request`.
+ *   {"event":"options","rev":4,"index":1,"current":0,"items":["Feierabend","Office","Gaming"]}
+ * Direkt aus dem Bluetooth-Strang wie `list`: ui_options nimmt sich die
+ * Sperre selbst. Eine leere Liste heisst "Karte inzwischen neu" -- die
+ * Auswahl schliesst, der Fehlerton kommt ueber die Warteschlange (Ton und
+ * Vibration gehoeren in den Ereignis-Task).
+ */
+static void apply_options_command(const cJSON *root)
+{
+    const cJSON *rev = cJSON_GetObjectItemCaseSensitive(root, "rev");
+    const cJSON *index = cJSON_GetObjectItemCaseSensitive(root, "index");
+    const cJSON *current = cJSON_GetObjectItemCaseSensitive(root, "current");
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(root, "items");
+    if (!cJSON_IsNumber(rev) || !cJSON_IsNumber(index) || index->valuedouble < 0 ||
+        index->valuedouble > 255) {
+        return;
+    }
+    const char *texts[UI_OPTIONS_MAX];
+    uint8_t count = 0;
+    const cJSON *entry = NULL;
+    if (cJSON_IsArray(items)) {
+        cJSON_ArrayForEach(entry, items) {
+            if (count >= UI_OPTIONS_MAX) {
+                break;
+            }
+            /* Die Position zaehlt (`choice`), also auch ein kaputter Eintrag -- als leere Zeile. */
+            texts[count++] = cJSON_IsString(entry) ? entry->valuestring : "";
+        }
+    }
+    const ui_options_fill_t result =
+        ui_options_fill((uint16_t)rev->valuedouble, (uint8_t)index->valuedouble,
+                        cJSON_IsNumber(current) ? (int)current->valuedouble : -1, texts, count);
+    if (result == UI_OPTIONS_FILL_EMPTY) {
+        queue_app_event(APP_EVENT_OPTIONS_FAILED);
+    }
+}
+#endif
+
 static void ble_control_cb(const char *json)
 {
     cJSON *root = cJSON_Parse(json);
@@ -1801,6 +1845,10 @@ static void ble_control_cb(const char *json)
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "weather") == 0) {
         note_ble_transfer();
         apply_weather_command(root);
+#if CONFIG_VOICE_BOARD_WATCH206
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "options") == 0) {
+        apply_options_command(root);
+#endif
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "watch_settings") == 0) {
         apply_watch_settings_command(root);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "battery_log_request") == 0) {
@@ -2362,6 +2410,7 @@ static void handle_home_timeout(void)
     }
     ESP_LOGI(TAG, "%u s ohne Bedienung -> Ziffernblatt", (unsigned)s_home_after_s);
     ui_face_picker_hide();
+    ui_options_hide();
     ui_control_hide();
     ui_cards_hide();
     ui_status_show_home();
@@ -2383,6 +2432,7 @@ static void handle_palm(void)
     }
     ui_torch_set(false);
     ui_face_picker_hide();
+    ui_options_hide();
     ui_control_hide();
     ui_cards_hide();
     ui_status_show_home();
@@ -2423,14 +2473,19 @@ static void handle_palm(void)
  *                                      Rueckgaengig; Kurz-    schalten; Heute und
  *                                      form <-> ganz; sonst   Schalter mit `c`:
  *                                      aelter                 markieren, dann
- *                                                             "OK"; Rueckg.
+ *                                                             "OK"; Flag `s`:
+ *                                                             Auswahl (0.4.5);
+ *                                                             Rueckg.
  *   Lange druecken    Layout-Auswahl   wie Tippen             wie Tippen          wie Tippen
  *   (0,6-2 s, 0.4.4)  (Info, Minimal,
  *                     Gross)
  *   Hand aufs Display alles still: Aufnahme verworfen, Ebenen zu, Schirm dunkel
  *
  * In der Layout-Auswahl: links/rechts blaettert, Tippen uebernimmt, nach
- * unten oder vom linken Rand bricht ab (auch nach 10 s ohne Eingabe). Bis
+ * unten oder vom linken Rand bricht ab (auch nach 10 s ohne Eingabe). In der
+ * Auswahl eines input_select (0.4.5, Kartenzeile mit Flag `s`): Tippen auf
+ * eine Option waehlt sie (auf die aktive: nur zu), oben/unten scrollt, nach
+ * unten am Anfang oder vom linken Rand bricht ab (auch nach 10 s). Bis
  * 0.4.3 war langer Druck auf dem Schirm frei -- eine Beruehrung bis 0,8 s
  * ohne Wischen war ein Tippen, darueber zaehlte sie als Aermel und tat
  * nichts. Der lange Druck auf die Blaettertaste (Aktion) ist davon
@@ -2538,6 +2593,29 @@ static void choose_face_layout(ui_face_layout_t layout)
     haptic_pattern(1, 30, 0);
 }
 
+/*
+ * Option eines input_select gewaehlt (0.4.5): `option` an die Bruecke, die
+ * daraus `select_option` beim Server macht. Die Zeile zeigt "..." bis zur
+ * neuen Karte, "Rueckgaengig" steht fuenf Sekunden, und der Verlauf haelt
+ * "Buero Modus: Gaming" mit den Karten-Koordinaten -- das `undo` von dort
+ * findet beim Server die vorige Option.
+ */
+static void choose_option(const ui_options_choice_t *choice)
+{
+    ESP_LOGI(TAG, "Option %s rev=%u #%u -> %u", ui_cards_kind_name(choice->kind),
+             (unsigned)choice->rev, (unsigned)choice->index, (unsigned)choice->choice);
+    if (voice_ble_send_option(ui_cards_kind_name(choice->kind), choice->rev, choice->index,
+                              choice->choice) != ESP_OK) {
+        play_tone(AUDIO_TONE_CANCEL);
+        return;
+    }
+    haptic_pattern(1, 40, 0);
+    ui_cards_mark_sent(choice->kind, choice->rev, choice->index);
+    char line[UI_CARD_TEXT_LEN + UI_OPTIONS_TEXT_LEN + 4];
+    snprintf(line, sizeof(line), "%s: %s", choice->title, choice->option);
+    ui_status_history_add_card(line, (uint8_t)choice->kind, choice->rev, choice->index);
+}
+
 static void handle_touch(const app_event_t *event)
 {
     /*
@@ -2548,8 +2626,8 @@ static void handle_touch(const app_event_t *event)
      */
     uint8_t gesture = event->gesture;
     if (gesture == VOICE_BOARD_LONG_PRESS &&
-        (s_night_mode || s_display_dimmed || ui_face_picker_visible() || ui_control_visible() ||
-         ui_cards_visible() || !ui_status_face_shown())) {
+        (s_night_mode || s_display_dimmed || ui_face_picker_visible() || ui_options_visible() ||
+         ui_control_visible() || ui_cards_visible() || !ui_status_face_shown())) {
         gesture = VOICE_BOARD_TAP;
     }
     if (gesture == VOICE_BOARD_PALM) {
@@ -2589,6 +2667,18 @@ static void handle_touch(const app_event_t *event)
         if (action == UI_FACE_PICKER_CHOSEN) {
             choose_face_layout(chosen);
         } else if (action == UI_FACE_PICKER_CANCELLED) {
+            haptic_pattern(1, 15, 0);
+        }
+        return;
+    }
+    /* Auswahl eines input_select (0.4.5): liegt ueber der Karte, alle Gesten gehen an sie. */
+    if (ui_options_visible()) {
+        ui_options_choice_t choice;
+        const ui_options_action_t action =
+            ui_options_touch(gesture, event->touch_x, event->touch_y, &choice);
+        if (action == UI_OPTIONS_CHOSEN) {
+            choose_option(&choice);
+        } else if (action == UI_OPTIONS_CLOSED) {
             haptic_pattern(1, 15, 0);
         }
         return;
@@ -2671,6 +2761,20 @@ static void handle_touch(const app_event_t *event)
         } else if (action == UI_CARDS_CLOSE) {
             /* Von Heute nach rechts oder nach unten: zurueck aufs Zifferblatt. */
             ui_status_show_home();
+        } else if (action == UI_CARDS_OPTIONS) {
+            /*
+             * input_select (Flag `s`, 0.4.5): die Bruecke nach den Optionen
+             * fragen und die Auswahl gleich oeffnen ("Laedt ..."). Ohne
+             * Bruecke kommt nichts -- dann bleibt die Karte, mit Fehlerton.
+             */
+            if (voice_ble_send_options_request(ui_cards_kind_name(hit.kind), hit.rev,
+                                               hit.index) == ESP_OK) {
+                note_ble_transfer();
+                ui_options_open(hit.kind, hit.rev, hit.index, hit.text);
+                haptic_pattern(1, 20, 0);
+            } else {
+                play_tone(AUDIO_TONE_CANCEL);
+            }
         } else if (action == UI_CARDS_SELECT) {
             /* Heute: Zeile markiert, OK-Chip steht -- ein kurzer Stoss sagt das. */
             haptic_pattern(1, 20, 0);
@@ -2931,6 +3035,7 @@ static void app_event_task(void *arg)
             }
             /* Nichts darf die Frist verdecken: Ebenen und Taschenlampe weg. */
             ui_face_picker_hide();
+            ui_options_hide();
             ui_control_hide();
             ui_cards_hide();
             if (ui_torch_on()) {
@@ -2960,6 +3065,12 @@ static void app_event_task(void *arg)
         case APP_EVENT_BATTERY_LOG_REQUEST:
 #if CONFIG_VOICE_BOARD_WATCH206
             send_battery_log(event.epoch);
+#endif
+            break;
+        case APP_EVENT_OPTIONS_FAILED:
+#if CONFIG_VOICE_BOARD_WATCH206
+            /* Die Karte war inzwischen neu: die Bruecke schickt sie gleich nach. */
+            play_tone(AUDIO_TONE_CANCEL);
 #endif
             break;
         case APP_EVENT_BLE_SETTLE:

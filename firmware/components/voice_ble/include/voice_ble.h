@@ -77,6 +77,14 @@ esp_err_t voice_ble_send_button_click(const char *button, uint32_t duration_ms,
 esp_err_t voice_ble_send_choice(uint8_t index, const char *text);
 /* Zeile einer Karte angetippt (Uhr): Art ("today", "shopping", "switches"), Stand, Position. */
 esp_err_t voice_ble_send_item(const char *kind, uint16_t rev, uint8_t index);
+/*
+ * Auswahl eines input_select (Zeile mit Flag `s`, 0.4.5): erst die Bitte um
+ * die Optionen der Zeile -- die Bruecke antwortet mit `options` auf
+ * `control_rx` --, dann die gewaehlte Option als Index in deren `items`.
+ * Koordinaten wie bei `item`. docs/protocol.md, 0.4.5.
+ */
+esp_err_t voice_ble_send_options_request(const char *kind, uint16_t rev, uint8_t index);
+esp_err_t voice_ble_send_option(const char *kind, uint16_t rev, uint8_t index, uint8_t choice);
 /* Bitte an die Bruecke, Zifferblatt und Karten jetzt neu zu schicken. */
 esp_err_t voice_ble_send_glance_request(void);
 /* Aktionstaste der Uhr (PWR lang): was sie tut, legt die Bruecke fest. */
