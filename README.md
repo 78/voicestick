@@ -214,6 +214,18 @@ Watch-only on top of that:
 | Action button | Hold PWR for 1.5 s: the watch sends `{"event":"action"}`, and the bridge runs the sentence configured for it as a text turn (e.g. "Was steht heute an?") |
 | Tecki's moods | Looks up happily for three seconds after an answer, glances in the direction of a swipe, and sleeps on the watch face between 22:00 and 06:00 |
 | Tecki as status | On the watch face and the ready scene a fixed ranking decides his pose: update running (eyes shut, dots) > no bridge (searching look) > battery ≤ 15 % without charging (tired) > mood > scene |
+| Data age and reload (0.5.0) | Under the header of every card the time its data arrived ("08:12", dim); from 15 min on "Stand 08:12" in grey. A "Neu laden" chip at the bottom — on an empty card and with stale data — sends `glance_request` |
+| BOOT short (0.5.0) | Released before the 400 ms that start a recording: in a list it is "OK" on the selected row (nothing selected: nothing; not in the option picker); on the watch face it shows the latest answer and sends `read_last`, so the bridge reads it out again if speech is on |
+| Tappable face lines (0.5.0) | With `face.kinds` from the bridge a tap on a task or waste line or on the event countdown opens Today, a weather line the weather card; without `kinds` (or `other`) a tap opens the history as before |
+| Action sheet and details (0.5.0) | A long press on a task on Today (not on events or checked-off rows) opens a sheet: "Erledigt", "+1 Std", "Heute Abend", "Morgen", "Details". "Später" sends `later`; the row shows "...", "Rückgängig" stands 5 s and the history entry ("Später (morgen): …") undoes it for 15 min. "Details" asks the bridge (`detail_request`) and shows title, project · due · priority, description and up to eight subtasks (done ones struck through) in a scrolling scene. No swipe actions on rows: left/right already switch cards |
+| Speaking with context (0.5.0) | A recording started while a card is open first sends `context` (card, stand, selected row), so the server reads a bare "Milch" on the shopping list as a shopping item |
+| Reminders (0.5.0) | Todoteck reminders the bridge takes from the device feed come as `reminder`: reminder pattern, a full-screen card with "Erledigt" and "+15 min" (or "OK" when it is not a task), back closes without answering; every reminder also lands in the history, the latest one wins the screen |
+| Lock PIN (0.5.0) | Optional four digits 1–4 set in the app (`watch_settings.lock_pin`, only the hash reaches the watch). After the OK of a lock row the watch asks for them on a 2 × 2 pad if it is not unlocked; unlocked lasts until 10 min without input or wrist raise, or until the USB cable comes off. Three wrong entries block for 60 s |
+| Locked (0.5.0) | When the server rejects the device token the bridge sends `locked`: cards emptied, the face shows "Gesperrt — in der App neu koppeln", the talk button answers with the error pattern; `unlocked` or a new face lifts it |
+| Diagnostics (0.5.0) | Long press (or tap) on the "Akku" tile in the control centre: firmware, bridge version and server state (`bridge_info`), signal strength, age of the last data, last error text, free RAM/PSRAM, uptime, reset reason, frames per second and frame time; refreshed every 10 s |
+| Crash report (0.5.0) | After a panic, watchdog or brownout reset the watch sends `crash_report` once after `device_info`; the bridge forwards it to the server. Only a prepared string — the boot path does not wait for anything |
+| Firmware update hint (0.5.0) | The bridge compares `version.txt` from the release `firmware-latest` with `device_info` and sends `update_available`; the watch asks once per version "Update x.y.z — Jetzt installieren?", "Später" asks again after 24 h. Yes sends `update_start`, the bridge downloads `voice_watch.bin` and runs the usual BLE OTA |
+| Suggestions instead of "Nicht verstanden" (0.5.0) | Up to three `choices` of up to 32 characters; if they do not fit side by side they stack full width in two lines |
 | Energy (0.4.1, package H) | Measure first: every 10 min a sample of time, charge and state goes into a 48 h ring in RTC memory, the bridge collects it (`battery_log`, docs/protocol.md) and the server works out the discharge rate per firmware version. Then save: the screen is bright for 15 s, dimmed for 15 s, then off (AMOLED sleep-in, LVGL refresh paused); wrist raise, tap or button bring it back, the palm switches it off at once; night charging keeps the dark time and never switches off. The motion sensor runs in wake-on-motion (accelerometer only, 21 Hz) and raises an interrupt on GPIO21 instead of being polled every 100 ms; the same line and the touch line wake the chip from light sleep. Bluetooth advertises 30 s at 60–120 ms, then at 500–1000 ms (a touch or button restarts the fast 30 s); the connection idles at 400–500 ms with slave latency 4 and 8 s supervision and goes to 15–30 ms while recording, during OTA and for 3 s around every face/list/weather transfer. The CPU idles at 40 MHz (XTAL) with light sleep, holds 80 MHz while the screen is bright and 160 MHz only while recording or updating (0.4.1 set 240 for the watch and did not boot; 0.4.2 is back on 160). Deep sleep after 5 min of inactivity on battery, woken by the buttons only; light sleep stays off on USB (the USB-serial port would drop) |
 
 Gestures on the watch — one rule for every scene (0.5.0): **swipe right is
@@ -232,11 +244,13 @@ areas are listed in `firmware/components/ui_status/ui_layout_watch206.h`):
 | Swipe up | nothing | next view of a long answer | list on by one view (Weather: next page) | closes |
 | Swipe left | Today | newer; from the newest back to the watch face | next card; nothing after Weather | — |
 | Swipe right | into the history (the balance first) | older | previous card; from Today back to the watch face | closes |
-| Tap | opens the history | yes/no; "Nochmal" / "Rückgängig"; short ⇄ full answer; otherwise one older | check off / toggle; rows with the "OK" pill first select, then "OK"; `input_select` (`s`): option picker (0.4.5); "Rückgängig"; events (`e`) do nothing | tile |
-| Long press (0.6–2 s, since 0.4.4) | layout picker (Info, Minimal, Groß) | like a tap | like a tap | like a tap |
+| Tap | a line with a kind (0.5.0): Today or Weather; otherwise opens the history | yes/no; "Nochmal" / "Rückgängig"; short ⇄ full answer; otherwise one older | check off / toggle; rows with the "OK" pill first select, then "OK"; `input_select` (`s`): option picker (0.4.5); "Rückgängig"; "Neu laden"; events (`e`) do nothing | tile; "Akku": diagnostics (0.5.0) |
+| Long press (0.6–2 s, since 0.4.4) | layout picker (Info, Minimal, Groß) | like a tap | Today task: action sheet (0.5.0); otherwise like a tap | "Akku": diagnostics (0.5.0); otherwise like a tap |
+| BOOT short (0.5.0) | latest answer + `read_last` | nothing | "OK" on the selected row | nothing |
 | Palm on the screen | everything quiet: recording discarded, layers closed, screen dark | | | |
 
-Sub-scenes (layout picker, option picker) carry a visible back arrow "‹" at
+Sub-scenes (layout picker, option picker, and since 0.5.0 action sheet,
+details, reminder, update question, PIN pad and diagnostics) carry a visible back arrow "‹" at
 the top left (≥ 48 px touch area); a tap on it or a swipe right closes them
 without sending. A dimmed screen is only woken by the first touch; during a
 recording the screen does nothing; during the transcript only "Abbrechen"
@@ -252,7 +266,8 @@ confirmation, and nothing opens over the transcript.
 once ("Folgenreiches braucht OK, alles andere wirkt sofort"). Rows on Today,
 switches the app marks as "Bestätigen" (`c`) and locks (`k`) carry a grey
 "OK" pill: the first tap selects, the green chip carries it out. Shopping
-items and plain switches act on the tap, with "Rückgängig" for 5 s.
+items and plain switches act on the tap, with "Rückgängig" for 5 s. With a
+lock PIN set, a lock additionally asks for the PIN after its OK (0.5.0).
 
 Haptics on the watch — exactly four patterns (0.5.0, `voice_board.h`); the
 only exception is the 60 ms tick when a recording starts:
@@ -260,9 +275,9 @@ only exception is the 60 ms tick when a recording starts:
 | Pattern | Vibration | When |
 | --- | --- | --- |
 | Success | 2 × short (50 ms) | answer arrived, row checked off or toggled, option or layout chosen, undo / repeat sent, tile switched, action sent, transcript cancelled |
-| Error | 1 × long (320 ms) | error answer, nothing sent (no bridge), recording discarded |
-| Question | 1 × medium (140 ms) | a second step follows: row selected for "OK", option picker or layout picker opened |
-| Reminder | 3 × short | event in 10 min, a new weather warning |
+| Error | 1 × long (320 ms) | error answer, nothing sent (no bridge), recording discarded, wrong PIN, talk button while locked (0.5.0) |
+| Question | 1 × medium (140 ms) | a second step follows: row selected for "OK", option picker, layout picker, action sheet, PIN pad, diagnostics or update question opened |
+| Reminder | 3 × short | event in 10 min, a new weather warning, a Todoteck reminder (0.5.0) |
 
 Not yet: Wi-Fi, the second microphone, wake from deep sleep by the IMU
 (its interrupt on GPIO21 wakes from light sleep since 0.4.1, but a cold boot
@@ -337,7 +352,8 @@ python -m esptool --chip esp32s3 write_flash 0x0 merged.bin
 ### Getting the image without a GitHub login
 
 Runs on `main` additionally attach both images, plus a small `firmware.json`
-manifest (commit, build time, sizes, SHA-256), to the rolling pre-release
+manifest (commit, build time, sizes, SHA-256) and `version.txt` (just the
+firmware version, which the bridge reads to offer the watch an update), to the rolling pre-release
 [`firmware-latest`](https://github.com/Fauteck/todoteck-voicestick/releases/tag/firmware-latest).
 Artifacts stay for per-commit debugging, but they are a poor pickup path: an
 artifact is always a ZIP, expires after 90 days, and needs a token even on a

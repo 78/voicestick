@@ -632,6 +632,72 @@ when its `aux` is `"Offen"` (or `"1"`). Without a device letter the row keeps
 "OK" pill before their `aux`, so the second step is visible before the tap;
 the `item` sent after the OK is unchanged.
 
+**Package J, part 2: functions with protocol.** Every message below is
+optional in both directions: an older bridge never sends them and the watch
+behaves as in 0.4.6; an older watch ignores them. `device_info` stays as it
+is — the new facts go out as separate events after it.
+
+*Bridge → watch (`control_rx`):*
+
+| Event | Fields | Watch |
+| --- | --- | --- |
+| `face` + `kinds` | `kinds`: parallel to `lines`, each `task`, `weather`, `waste`, `event` or `other`; same length or omitted | Tapping a line opens Today (`task`, `waste`, the event countdown) or the weather card (`weather`); `other` and no `kinds` keep the old tap |
+| `watch_settings` + `lock_pin` | `""` or 64 hex = SHA-256 of `"todoteck-uhr:" + pin`, pin four digits 1–4 | Asks for the PIN before switching a lock (`k`) — see below. A new hash locks again; invalid values are ignored |
+| `detail` | `rev`, `index`, `part`, `total`; part 0: `title`, `project`, `due`, `prio` (1–4); later parts: `text` or `subtasks` (`[[title, 0/1], …]`, max 8) | Fills the details scene of that Today row; part 0 resets it. A part for another row is dropped. A stale row comes back as part 0 titled "Nicht verfügbar" |
+| `reminder` | `id` (bridge's running number), `title`, `body`, `task` | Reminder pattern (3× short), full-screen card with "Erledigt" and "+15 min" (`task:false`: "OK"), and a history entry "Erinnerung: …". The latest wins; back closes without an answer |
+| `bridge_info` | `version`, `server` (`ok`/`fehler`) | Shown on the diagnostics page |
+| `locked` | — | Cards and weather emptied, open sheets closed, the face shows "Gesperrt — in der App neu koppeln", the talk button answers with the error pattern |
+| `unlocked` | — | Lifts `locked` (may come without a preceding `locked`); a new `face` lifts it as well. The watch asks for a `glance_request` |
+| `update_available` | `version` | Once per version a card "Update x.y.z — Jetzt installieren?"; "Später" (or back) asks again after 24 h (kept in NVS) |
+
+```json
+{"event":"face","lines":["Pool messen 18:00","12° · Regen ab 15 Uhr"],"kinds":["task","weather"]}
+{"event":"detail","rev":7,"index":2,"part":0,"total":3,"title":"Pool messen","project":"Haushalt","due":"Mo 18:00","prio":2}
+{"event":"detail","rev":7,"index":2,"part":1,"total":3,"text":"pH und Chlor prüfen."}
+{"event":"detail","rev":7,"index":2,"part":2,"total":3,"subtasks":[["Kärcher holen",0],["Abspülen",1]]}
+{"event":"reminder","id":17,"title":"Pool messen","body":"Um 18:00 Uhr.","task":true}
+{"event":"bridge_info","version":"2.14.0","server":"ok"}
+{"event":"locked"}
+{"event":"unlocked"}
+{"event":"update_available","version":"0.5.1"}
+```
+
+*Watch → bridge (`state_tx`):*
+
+| Event | When |
+| --- | --- |
+| `read_last` | BOOT pressed briefly (released before 400 ms) on the watch face; the watch shows the latest answer, the bridge reads it out again if speech output is on |
+| `later` (`kind`, `rev`, `index`, `preset`: `1h`/`evening`/`tomorrow`) | "+1 Std", "Heute Abend", "Morgen" in the action sheet of a Today task (long press on the row). The row shows "..." and "Rückgängig" for 5 s; the history entry undoes it with the usual `undo` |
+| `detail_request` (`kind`, `rev`, `index`) | "Details" in the action sheet; the details scene shows "Lädt …" until part 0 arrives, "Keine Antwort" after 3 s |
+| `context` (`card`, `rev`, `index`) | Right before `button_down` while a card is open: `today`, `shopping`, `switches` or `weather`; `index` is the marked row (also the row of an open action sheet or details scene), otherwise -1 |
+| `reminder_action` (`id`, `action`: `done`/`snooze`/`dismiss`) | "Erledigt", "+15 min" or "OK" on a reminder card |
+| `update_start` | "Jetzt installieren" on the update card; the bridge downloads `voice_watch.bin` and starts the usual BLE OTA |
+| `crash_report` (`reason`, `fw`, `uptime_s`?) | Once after `device_info`, after a start following `panic`, `task_wdt`, `int_wdt`, `wdt` or `brownout`. `uptime_s` is the runtime of the crashed start (to 10 s, only if it survived in RTC memory); `pc` is never sent — there is no core-dump partition, and the partition table stays as it is |
+
+```json
+{"event":"read_last"}
+{"event":"later","kind":"today","rev":7,"index":2,"preset":"evening"}
+{"event":"detail_request","kind":"today","rev":7,"index":2}
+{"event":"context","card":"shopping","rev":4,"index":-1}
+{"event":"reminder_action","id":17,"action":"snooze"}
+{"event":"update_start"}
+{"event":"crash_report","reason":"panic","fw":"0.5.0","uptime_s":3620}
+```
+
+**Choices up to 32 characters.** `choices` on `ui_state` may now carry
+suggestions instead of "Nicht verstanden" (up to three, each up to 32
+characters, about 40 bytes of UTF-8). If they do not fit side by side, the
+watch stacks them full width in two lines. `choice` returns the label exactly
+as received, so the bridge can map it back to its suggestion.
+
+**Lock PIN.** With `lock_pin` set, switching a lock (`k`) after its OK asks
+for the four digits on a 2 × 2 pad. The watch hashes `"todoteck-uhr:" +
+digits` with SHA-256 and compares; it never knows the PIN. Unlocked lasts
+until 10 minutes pass without movement — the watch counts input and wrist
+raises, it has no wear sensor — or the USB cable is removed; after a cold
+start it is locked again. Three wrong entries block the pad for 60 s. Back
+or a swipe right cancels; the row returns to its state and nothing is sent.
+
 ### Fork addition: `question` on `ui_state`
 
 The Todoteck bridge adds one optional field to the `ready` state:
