@@ -208,3 +208,54 @@ static inline esp_err_t voice_board_touch_init(voice_board_touch_cb_t cb)
 }
 
 #endif
+
+/*
+ * Das Haptik-Vokabular (Paket J, 0.5.0): genau vier Muster, damit der Arm
+ * lernt, was eine Vibration heisst, ohne auf den Schirm zu sehen. Jede
+ * Rueckmeldung der Uhr ist eines davon -- vorher gab es rund zehn Laengen
+ * zwischen 15 und 300 ms, und keine sagte etwas Bestimmtes.
+ *
+ *   Erfolg       2 x kurz    etwas ist angekommen oder ausgefuehrt
+ *   Fehler       1 x lang    hat nicht geklappt, nichts gesendet
+ *   Frage        1 x mittel  ein zweiter Schritt kommt (OK, Auswahl)
+ *   Erinnerung   3 x kurz    Termin gleich, neue Warnung
+ *
+ * Die eine Ausnahme ist der Tick beim Start einer Aufnahme (60 ms, "jetzt
+ * sprechen") -- er ist kein Ergebnis, sondern ein Startsignal. Die Tabelle
+ * steht auch im README (Abschnitt der Uhr). Auf dem StickS3 ohne Motor tut
+ * das nichts.
+ */
+typedef enum {
+    VOICE_HAPTIC_SUCCESS,
+    VOICE_HAPTIC_ERROR,
+    VOICE_HAPTIC_ATTENTION,
+    VOICE_HAPTIC_REMINDER,
+    VOICE_HAPTIC_RECORD_TICK,
+} voice_haptic_t;
+
+#define VOICE_HAPTIC_SHORT_MS 50
+#define VOICE_HAPTIC_GAP_MS 90
+#define VOICE_HAPTIC_MEDIUM_MS 140
+#define VOICE_HAPTIC_LONG_MS 320
+#define VOICE_HAPTIC_TICK_MS 60
+
+static inline void voice_board_haptic_kind(voice_haptic_t kind)
+{
+    switch (kind) {
+    case VOICE_HAPTIC_SUCCESS:
+        voice_board_haptic_pattern(2, VOICE_HAPTIC_SHORT_MS, VOICE_HAPTIC_GAP_MS);
+        break;
+    case VOICE_HAPTIC_ERROR:
+        voice_board_haptic_pattern(1, VOICE_HAPTIC_LONG_MS, 0);
+        break;
+    case VOICE_HAPTIC_ATTENTION:
+        voice_board_haptic_pattern(1, VOICE_HAPTIC_MEDIUM_MS, 0);
+        break;
+    case VOICE_HAPTIC_REMINDER:
+        voice_board_haptic_pattern(3, VOICE_HAPTIC_SHORT_MS, VOICE_HAPTIC_GAP_MS);
+        break;
+    case VOICE_HAPTIC_RECORD_TICK:
+        voice_board_haptic_pattern(1, VOICE_HAPTIC_TICK_MS, 0);
+        break;
+    }
+}

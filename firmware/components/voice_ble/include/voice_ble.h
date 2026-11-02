@@ -118,3 +118,13 @@ esp_err_t voice_ble_send_recording_discarded(uint32_t session_id);
  * Akku-Protokolls (`battery_log`, docs/protocol.md).
  */
 esp_err_t voice_ble_send_state_json(const char *json);
+/*
+ * Ein Ereignis, das einmal direkt nach `device_info` rausgeht (0.5.0, der
+ * Absturz-Bericht `crash_report`): Die Bruecke kennt das Geraet dann schon.
+ * Gesetzt vor voice_ble_init(); nach dem ersten erfolgreichen Senden ist es
+ * vergessen -- ein Neuverbinden schickt es nicht noch einmal. Hoechstens
+ * 160 Byte, laengeres wird nicht gesendet.
+ */
+void voice_ble_set_boot_report(const char *json);
+/* Empfangsstaerke der Verbindung in dBm (Diagnose); ESP_ERR_INVALID_STATE ohne Verbindung. */
+esp_err_t voice_ble_rssi(int8_t *rssi);

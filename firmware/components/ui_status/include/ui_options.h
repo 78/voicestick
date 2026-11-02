@@ -9,9 +9,10 @@
  * grosse Zeilen, die aktuelle gruen umrandet. Die Optionen kennt die Uhr
  * nicht -- sie fragt die Bruecke (`options_request`) und zeigt bis zur
  * Antwort (`options`) "Laedt ...". Tippen auf eine Option waehlt sie (main.c
- * schickt `option`), Tippen auf die aktive schliesst nur. Nach unten wischen
- * (am Anfang der Liste), vom linken Rand zurueck und zehn Sekunden ohne
- * Eingabe schliessen ohne Senden; kommt binnen drei Sekunden keine Antwort,
+ * schickt `option`), Tippen auf die aktive schliesst nur. Nach rechts
+ * wischen, das Zurueck "‹" links oben (0.5.0) und zehn Sekunden ohne Eingabe
+ * schliessen ohne Senden; oben/unten scrollt nur (bis 0.4.6 schloss "nach
+ * unten" am Anfang der Liste). Kommt binnen drei Sekunden keine Antwort,
  * steht anderthalb Sekunden "Keine Antwort". docs/protocol.md, 0.4.5.
  *
  * Auf dem StickS3 gibt es die Szene nicht; die Funktionen tun dort nichts.

@@ -29,10 +29,15 @@
 #include "battery_log.h"
 #include "voice_board.h"
 #include "esp_ota_ops.h"
+#if CONFIG_VOICE_BOARD_WATCH206
+#include "esp_app_desc.h"
+#include "mbedtls/sha256.h"
+#endif
 #include "ui_cards.h"
 #include "ui_control.h"
 #include "ui_history_text.h"
 #include "ui_options.h"
+#include "ui_sheets.h"
 #include "ui_status.h"
 #include "ui_weather.h"
 #include "voice_ble.h"
@@ -110,6 +115,17 @@ static const char *TAG = "voice_stick";
  * seit jeher auf dem Schirm; jetzt stimmt es auch.
  */
 #define PRIMARY_MIN_HOLD_MS 500
+#if CONFIG_VOICE_BOARD_WATCH206
+/*
+ * Uhr: Die Sprechtaste (BOOT) startet die Aufnahme erst nach so langem
+ * Halten (11/2026). Vorher startete schon das Druecken, und ein kurzer Druck
+ * endete jedes Mal in "Zu kurz" -- ein Fehler fuer etwas, das niemand als
+ * Aufnahme gemeint hatte. Ein kurzer Druck tut jetzt nichts (ausser in der
+ * Transkript-Frist, wo er abbricht, und bei laufender Aufnahme, wo er sie
+ * verwirft). Die Mindestdauer oben zaehlt ab Aufnahmebeginn.
+ */
+#define TALK_HOLD_MS 400
+#endif
 /* Wie lange der Abbruch-Ton auf den Abbau des Aufnahmepfads wartet. */
 #define CANCEL_TONE_WAIT_MS 600
 
@@ -242,12 +258,12 @@ static esp_timer_handle_t s_night_peek_timer;
 /*
  * Nachtmodus (Paket I, 0.4.4): im Fenster `watch_settings.night` (Ortszeit,
  * darf ueber Mitternacht gehen; Voreinstellung 21:00-06:30) zeigt das
- * Zifferblatt alles in gedaempftem Rot, und die Helligkeit ist hoechstens
+ * Zifferblatt alles in gedaempftem Bernstein (bis 0.4.6 Rot), und die Helligkeit ist hoechstens
  * "Dunkel" -- in jeder Szene. Stellt der Nutzer im Kontrollzentrum hoeher,
  * gilt das bis zum naechsten Schirm-aus (s_night_bright_override). Geprueft
  * im Akku-Takt (zehn Sekunden) und wenn die Uhr gestellt wird. Nicht zu
  * verwechseln mit dem Nachtlade-Modus oben: der gilt nur am Kabel und hat
- * Vorrang; im Fenster ist er ebenfalls rot.
+ * Vorrang; im Fenster ist er ebenfalls bernsteinfarben.
  *
  * Im RTC-Speicher wie die anderen `watch_settings`. `s_night_from_min ==
  * s_night_to_min` heisst aus (`night: ""`).
@@ -260,6 +276,64 @@ static bool s_night_bright_override;
 static RTC_DATA_ATTR uint8_t s_face_layout = UI_FACE_INFO;
 static void update_night_window(void);
 static void apply_brightness_now(void);
+static void hide_overlays(void);
+static void note_motion(void);
+static void handle_boot_short(void);
+static void send_context(void);
+/*
+ * Paket J, Teil 2 (0.5.0) -- Zustand der neuen Funktionen, nur die Uhr.
+ *
+ * Schloss-Sperre (Punkt 31): `watch_settings.lock_pin` ist "" oder der
+ * SHA-256 (hex) von "todoteck-uhr:" + PIN -- die Uhr kennt die PIN nicht,
+ * sie vergleicht den Hash der eingegebenen Folge. Entsperrt gilt, bis 10
+ * Minuten ohne Bewegung vergehen (Bedienung oder Handgelenk heben -- die
+ * Uhr hat keinen eigenen Tragesensor) oder das Kabel abgezogen wird. Alles
+ * im RTC-Speicher wie die anderen `watch_settings`; nach einem Kaltstart
+ * ist sie wieder gesperrt.
+ */
+static RTC_DATA_ATTR char s_lock_pin[65];
+static RTC_DATA_ATTR bool s_pin_unlocked;
+static RTC_DATA_ATTR int64_t s_pin_motion_s;
+#define PIN_IDLE_S (10 * 60)
+#define PIN_FAILS_MAX 3
+#define PIN_BLOCK_US (60 * 1000 * 1000LL)
+static uint8_t s_pin_fails;
+static int64_t s_pin_block_until_us;
+/* Die Schloss-Zeile, die nach der richtigen PIN geschaltet wird. */
+static ui_cards_hit_t s_pin_hit;
+static bool s_pin_pending;
+/* Aktionsblatt (Punkte 14/15/20): die Aufgabe, zu der es offen ist. */
+static ui_cards_hit_t s_sheet_hit;
+/* Details offen fuer diese Zeile (Heute) -- fuer `context`. */
+static bool s_detail_open;
+static uint16_t s_detail_rev;
+static uint8_t s_detail_index;
+/* Erinnerung (Punkt 19): Nummer der Bruecke und ob "Erledigt" geht. */
+static uint16_t s_reminder_id;
+static bool s_reminder_task;
+/* Update-Hinweis (Punkt 37): die angebotene Fassung; "Spaeter" merkt sie im NVS. */
+static char s_update_version[17];
+#define UPDATE_NVS_NAMESPACE "update"
+#define UPDATE_SNOOZE_S (24 * 60 * 60)
+/* Gesperrt (Punkt 32): der Server lehnt das Geraete-Token ab. */
+static volatile bool s_watch_locked;
+/* Fuer die Diagnose (Punkt 36). */
+static char s_bridge_version[25];
+static bool s_bridge_server_ok;
+static bool s_bridge_known;
+static volatile int64_t s_last_glance_us;
+static char s_last_error[64];
+static esp_reset_reason_t s_reset_reason;
+static char s_diag_text[480];
+/*
+ * Absturz-Bericht (Punkt 35): die Laufzeit des vorigen Starts. Im
+ * RTC-Speicher ohne Initialisierung -- er ueberlebt Panic und Watchdog,
+ * nicht aber das Abschalten; die Marke sagt, ob der Wert gilt. Nachgezogen
+ * im Akku-Takt (zehn Sekunden).
+ */
+static RTC_NOINIT_ATTR uint32_t s_uptime_magic;
+static RTC_NOINIT_ATTR uint32_t s_uptime_s;
+#define UPTIME_MAGIC 0x55707431u
 #endif
 /* Langer Druck auf die Blaettertaste hat die Aktion ausgeloest -- das Loslassen blaettert nicht. */
 static bool s_action_fired;
@@ -354,6 +428,10 @@ typedef enum {
 } interaction_mode_t;
 
 static interaction_mode_t s_interaction_mode = INTERACTION_MODE_HOLD_TO_TALK;
+#if CONFIG_VOICE_BOARD_WATCH206
+/* Sprechtaste gedrueckt, Haltezeit laeuft noch: Loslassen davor tut nichts. */
+static bool s_talk_armed;
+#endif
 
 static const char *app_ui_state_name(app_ui_state_t state)
 {
@@ -404,6 +482,10 @@ typedef enum {
     APP_EVENT_TOUCH,
     /* Langer Druck auf die Blaettertaste der Uhr: die frei belegte Aktion. */
     APP_EVENT_ACTION,
+#if CONFIG_VOICE_BOARD_WATCH206
+    /* Uhr: Sprechtaste lange genug gehalten -- jetzt beginnt die Aufnahme. */
+    APP_EVENT_TALK_LONG,
+#endif
     /* Transkript zuerst (nur die Uhr): Text in `text`, Frist in ms in `size`. */
     APP_EVENT_TRANSCRIPT,
     /* Rueckkehr-Zeitgeber der Uhr abgelaufen. */
@@ -420,6 +502,17 @@ typedef enum {
     APP_EVENT_BLE_SETTLE,
     /* `options` mit leerer Liste (Karte inzwischen neu): Auswahl zu, Fehlerton (Uhr, 0.4.5). */
     APP_EVENT_OPTIONS_FAILED,
+#if CONFIG_VOICE_BOARD_WATCH206
+    /* Paket J, Teil 2 (0.5.0): */
+    /* `reminder`: Titel in `question`, Text in `text`, Nummer in `size`, `task` in `written`. */
+    APP_EVENT_REMINDER,
+    /* `update_available`: Fassung in `text`. */
+    APP_EVENT_UPDATE_AVAILABLE,
+    /* `bridge_info`: Fassung der Bruecke in `text`, Server ok in `size`. */
+    APP_EVENT_BRIDGE_INFO,
+    /* `locked` (`size` 1) / `unlocked` oder ein neues Zifferblatt (`size` 0). */
+    APP_EVENT_LOCK_STATE,
+#endif
 } app_event_type_t;
 
 typedef struct {
@@ -471,6 +564,7 @@ typedef struct {
 } app_event_t;
 
 static void update_battery_status(void);
+static const char *reset_reason_text(esp_reset_reason_t reason);
 static void queue_app_event(app_event_type_t type);
 static void queue_app_event_with_ota(app_event_type_t type, uint32_t written, uint32_t size);
 /*
@@ -513,17 +607,18 @@ static bool is_external_powered(void)
 }
 
 /*
- * Jede Vibration der Uhr geht hier durch: im Nachtlade-Modus bleibt der
- * Motor still (auf dem StickS3 gibt es ohnehin keinen).
+ * Jede Vibration der Uhr geht hier durch: eines der vier Muster aus
+ * voice_board.h (Paket J) oder der Aufnahme-Tick. Im Nachtlade-Modus bleibt
+ * der Motor still (auf dem StickS3 gibt es ohnehin keinen).
  */
-static void haptic_pattern(uint8_t count, uint32_t on_ms, uint32_t off_ms)
+static void haptic(voice_haptic_t kind)
 {
 #if CONFIG_VOICE_BOARD_WATCH206
     if (s_night_mode) {
         return;
     }
 #endif
-    voice_board_haptic_pattern(count, on_ms, off_ms);
+    voice_board_haptic_kind(kind);
 }
 
 /*
@@ -795,6 +890,7 @@ static void note_user_input(void)
 {
 #if CONFIG_VOICE_BOARD_WATCH206
     s_answer_unread = false;
+    note_motion();
 #endif
     note_activity();
     /* Unverbunden: Wer das Geraet anfasst, will es auch finden -- 30 s schnelle Werbung. */
@@ -970,25 +1066,27 @@ static void enter_deep_sleep(void)
  * keinen Motor. Es laeuft auch dann, wenn der Ton ausfaellt (Aufnahmepfad
  * belegt): Gerade dann ist es die einzige Rueckmeldung.
  *
- *   Start      ein kurzer Stoss       "jetzt sprechen"
- *   Antwort    zwei kurze             "da ist was"
- *   Fehler     ein langer             "hat nicht geklappt"
- *   Verworfen  ein ganz kurzer        "nichts passiert"
+ *   Start      der Aufnahme-Tick (60 ms)   "jetzt sprechen"
+ *   Antwort    Erfolg (2 x kurz)           "da ist was"
+ *   Fehler     Fehler (1 x lang)           "hat nicht geklappt"
+ *   Verworfen  Fehler (1 x lang)           "nichts passiert" -- bis 0.4.6 ein
+ *              eigener ganz kurzer Stoss; das Vokabular (Paket J) kennt nur
+ *              vier Muster, und "nichts gesendet" ist ein Fehler.
  */
 static void haptic_for_tone(audio_tone_t tone)
 {
     switch (tone) {
     case AUDIO_TONE_START:
-        haptic_pattern(1, 60, 0);
+        haptic(VOICE_HAPTIC_RECORD_TICK);
         break;
     case AUDIO_TONE_DONE:
-        haptic_pattern(2, 50, 90);
+        haptic(VOICE_HAPTIC_SUCCESS);
         break;
     case AUDIO_TONE_ERROR:
-        haptic_pattern(1, 300, 0);
+        haptic(VOICE_HAPTIC_ERROR);
         break;
     case AUDIO_TONE_CANCEL:
-        haptic_pattern(1, 30, 0);
+        haptic(VOICE_HAPTIC_ERROR);
         break;
     default:
         break;
@@ -1098,6 +1196,8 @@ static uint32_t start_recording(void)
     }
 
     s_recording = true;
+    /* Mikrofon offen: der rote Punkt oben (Paket J; auf dem StickS3 nichts). */
+    ui_status_set_mic_open(true);
 #if CONFIG_VOICE_BOARD_WATCH206
     s_recorded_since_sample = true;
 #endif
@@ -1121,6 +1221,7 @@ static uint32_t stop_recording(void)
 
     const uint32_t session_id = audio_pipeline_session_id();
     s_recording = false;
+    ui_status_set_mic_open(false);
     stop_recording_tick();
     audio_pipeline_stop();
     release_recording_pm_locks();
@@ -1343,6 +1444,15 @@ static void talk_button_up_cb(void *button_handle, void *usr_data)
     queue_app_event(APP_EVENT_TALK_UP);
 }
 
+#if CONFIG_VOICE_BOARD_WATCH206
+static void talk_button_long_cb(void *button_handle, void *usr_data)
+{
+    (void)button_handle;
+    (void)usr_data;
+    queue_app_event(APP_EVENT_TALK_LONG);
+}
+#endif
+
 static void browse_button_down_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
@@ -1422,8 +1532,38 @@ static void apply_face_command(const cJSON *root)
         s_next_event_start = start_s;
         s_event_reminded = false;
     }
+    /*
+     * `kinds` (0.5.0, Punkt 13): parallel zu `lines` -- "task", "weather",
+     * "waste", "event", "other". Fehlt es oder passt die Laenge nicht, ist
+     * keine Zeile antippbar (wie bis 0.4.6). Leere Zeilen fallen oben weg,
+     * ihre Art also mit.
+     */
+    uint8_t kinds[UI_STATUS_FACE_LINES] = {0};
+    uint8_t kind_count = 0;
+#if CONFIG_VOICE_BOARD_WATCH206
+    const cJSON *kind_arr = cJSON_GetObjectItemCaseSensitive(root, "kinds");
+    if (cJSON_IsArray(kind_arr) && cJSON_IsArray(arr) &&
+        cJSON_GetArraySize(kind_arr) == cJSON_GetArraySize(arr)) {
+        for (int i = 0; i < cJSON_GetArraySize(arr) && kind_count < UI_STATUS_FACE_LINES; i++) {
+            const cJSON *line = cJSON_GetArrayItem(arr, i);
+            if (!cJSON_IsString(line) || !line->valuestring[0]) {
+                continue;
+            }
+            const cJSON *kind = cJSON_GetArrayItem(kind_arr, i);
+            kinds[kind_count++] = (uint8_t)ui_face_hit_from_name(cJSON_IsString(kind)
+                                                                     ? kind->valuestring : "");
+        }
+    }
+    s_last_glance_us = esp_timer_get_time();
+    if (s_watch_locked) {
+        /* Ein neues Zifferblatt heisst: Der Server nimmt das Token wieder. */
+        app_event_t ev = { .type = APP_EVENT_LOCK_STATE, .size = 0 };
+        (void)xQueueSend(s_app_event_queue, &ev, 0);
+    }
+#endif
     ui_status_set_face((const char (*)[UI_STATUS_FACE_LEN])lines, count,
-                       cJSON_IsString(title) ? title->valuestring : "", start_s);
+                       cJSON_IsString(title) ? title->valuestring : "", start_s,
+                       kinds, kind_count);
 }
 
 /*
@@ -1557,6 +1697,8 @@ static void apply_watch_settings_ui(void)
     if (s_tile_count > 0) {
         ui_control_set_tiles(s_tiles, s_tile_count);
     }
+    /* Lautlos und "Dunkel & still" stehen im RTC-Speicher -- ihre Zeichen auch nach dem Tiefschlaf. */
+    ui_status_set_quiet_marks(s_silent, s_cinema);
 }
 #endif
 
@@ -1680,12 +1822,44 @@ static void apply_watch_settings_command(const cJSON *root)
     if (cJSON_IsString(night) && !parse_night_window(night->valuestring)) {
         ESP_LOGW(TAG, "watch_settings: Nachtfenster \"%s\" ungueltig", night->valuestring);
     }
+    /*
+     * Seit 0.5.0: `lock_pin` -- "" (aus) oder 64 Hex-Zeichen. Anderes bleibt
+     * ungueltig liegen; der bisherige Wert gilt weiter. Ein neuer Hash
+     * sperrt sofort wieder.
+     */
+    const cJSON *lock_pin = cJSON_GetObjectItemCaseSensitive(root, "lock_pin");
+    if (cJSON_IsString(lock_pin)) {
+        const char *hash = lock_pin->valuestring;
+        bool valid = hash[0] == '\0' || strlen(hash) == 64;
+        char lower[65];
+        size_t n = 0;
+        for (; valid && hash[n]; n++) {
+            const char c = hash[n];
+            if (c >= '0' && c <= '9') {
+                lower[n] = c;
+            } else if (c >= 'a' && c <= 'f') {
+                lower[n] = c;
+            } else if (c >= 'A' && c <= 'F') {
+                lower[n] = (char)(c - 'A' + 'a');
+            } else {
+                valid = false;
+            }
+        }
+        lower[valid ? n : 0] = '\0';
+        if (!valid) {
+            ESP_LOGW(TAG, "watch_settings: lock_pin ungueltig");
+        } else if (strcmp(lower, s_lock_pin) != 0) {
+            strlcpy(s_lock_pin, lower, sizeof(s_lock_pin));
+            s_pin_unlocked = false;
+        }
+    }
     ESP_LOGI(TAG, "watch_settings: Schrift %u, Rueckkehr %u s, %u Kacheln, Layout %s, "
-             "Nacht %02u:%02u-%02u:%02u",
+             "Nacht %02u:%02u-%02u:%02u, PIN %s", 
              (unsigned)s_font_level, (unsigned)s_home_after_s, (unsigned)s_tile_count,
              ui_face_layout_name((ui_face_layout_t)s_face_layout),
              (unsigned)(s_night_from_min / 60) % 24u, (unsigned)(s_night_from_min % 60),
-             (unsigned)(s_night_to_min / 60) % 24u, (unsigned)(s_night_to_min % 60));
+             (unsigned)(s_night_to_min / 60) % 24u, (unsigned)(s_night_to_min % 60),
+             s_lock_pin[0] ? "an" : "aus");
     apply_watch_settings_ui();
 #else
     (void)root;
@@ -1707,7 +1881,7 @@ static void check_event_reminder(void)
     if (now >= start - EVENT_REMINDER_LEAD_S && now < start) {
         s_event_reminded = true;
         ESP_LOGI(TAG, "Termin in %lld s -> Erinnerung", (long long)(start - now));
-        haptic_pattern(3, 120, 150);
+        haptic(VOICE_HAPTIC_REMINDER);
         note_activity();
         ui_status_show_home();
     }
@@ -1785,6 +1959,87 @@ static void apply_options_command(const cJSON *root)
         queue_app_event(APP_EVENT_OPTIONS_FAILED);
     }
 }
+
+/*
+ * `detail` (0.5.0, Punkte 14/15/20): eine Aufgabe in Teilen, Antwort auf
+ * `detail_request`. Jeder Teil nennt `total`; Teil 0 traegt Titel, Projekt,
+ * Termin und Prioritaet, die Folgeteile `text` oder `subtasks`.
+ *   {"event":"detail","rev":7,"index":2,"part":0,"total":3,"title":"Pool messen","project":"Haushalt","due":"Mo 18:00","prio":2}
+ *   {"event":"detail","rev":7,"index":2,"part":1,"total":3,"text":"pH und Chlor ..."}
+ *   {"event":"detail","rev":7,"index":2,"part":2,"total":3,"subtasks":[["Kaercher holen",0],["Abspuelen",1]]}
+ * Direkt aus dem Bluetooth-Strang wie `options`: ui_sheets nimmt sich die Sperre.
+ */
+#define DETAIL_SUBTASKS_MAX 8
+static void apply_detail_command(const cJSON *root)
+{
+    const cJSON *rev = cJSON_GetObjectItemCaseSensitive(root, "rev");
+    const cJSON *index = cJSON_GetObjectItemCaseSensitive(root, "index");
+    const cJSON *part = cJSON_GetObjectItemCaseSensitive(root, "part");
+    const cJSON *total = cJSON_GetObjectItemCaseSensitive(root, "total");
+    if (!cJSON_IsNumber(rev) || !cJSON_IsNumber(index) || !cJSON_IsNumber(part) ||
+        index->valuedouble < 0 || index->valuedouble > 255 || part->valuedouble < 0 ||
+        part->valuedouble > 255) {
+        return;
+    }
+    const cJSON *title = cJSON_GetObjectItemCaseSensitive(root, "title");
+    const cJSON *project = cJSON_GetObjectItemCaseSensitive(root, "project");
+    const cJSON *due = cJSON_GetObjectItemCaseSensitive(root, "due");
+    const cJSON *prio = cJSON_GetObjectItemCaseSensitive(root, "prio");
+    const cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
+    const cJSON *subtasks = cJSON_GetObjectItemCaseSensitive(root, "subtasks");
+    const char *sub_text[DETAIL_SUBTASKS_MAX];
+    bool sub_done[DETAIL_SUBTASKS_MAX];
+    uint8_t sub_count = 0;
+    const cJSON *entry = NULL;
+    if (cJSON_IsArray(subtasks)) {
+        cJSON_ArrayForEach(entry, subtasks) {
+            if (sub_count >= DETAIL_SUBTASKS_MAX) {
+                break;
+            }
+            const cJSON *name = cJSON_GetArrayItem(entry, 0);
+            const cJSON *done = cJSON_GetArrayItem(entry, 1);
+            if (!cJSON_IsString(name)) {
+                continue;
+            }
+            sub_text[sub_count] = name->valuestring;
+            sub_done[sub_count] = (cJSON_IsNumber(done) && done->valuedouble != 0) ||
+                                  cJSON_IsTrue(done);
+            sub_count++;
+        }
+    }
+    ui_detail_part((uint16_t)rev->valuedouble, (uint8_t)index->valuedouble,
+                   (uint8_t)part->valuedouble,
+                   cJSON_IsNumber(total) && total->valuedouble > 0 && total->valuedouble < 256
+                       ? (uint8_t)total->valuedouble : 0,
+                   cJSON_IsString(title) ? title->valuestring : NULL,
+                   cJSON_IsString(project) ? project->valuestring : NULL,
+                   cJSON_IsString(due) ? due->valuestring : NULL,
+                   cJSON_IsNumber(prio) ? (int)prio->valuedouble : 0,
+                   cJSON_IsString(text) ? text->valuestring : NULL,
+                   sub_text, sub_done, sub_count);
+}
+
+/*
+ * Kleine Ereignisse der Bruecke fuer den Ereignis-Task (0.5.0): Ton,
+ * Vibration, Schirm und NVS gehoeren dorthin, nicht in den Bluetooth-Strang.
+ */
+static void queue_bridge_event(app_event_type_t type, const char *text, const char *question,
+                               uint32_t size, uint32_t written)
+{
+    if (!s_app_event_queue) {
+        return;
+    }
+    app_event_t event = {
+        .type = type,
+        .size = size,
+        .written = written,
+    };
+    copy_utf8_clipped(event.text, text ? text : "", sizeof(event.text));
+    copy_utf8_clipped(event.question, question ? question : "", sizeof(event.question));
+    if (xQueueSend(s_app_event_queue, &event, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "drop Bruecken-Ereignis %d: app queue full", (int)type);
+    }
+}
 #endif
 
 static void ble_control_cb(const char *json)
@@ -1842,12 +2097,49 @@ static void ble_control_cb(const char *json)
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "list") == 0) {
         note_ble_transfer();
         apply_list_command(root);
+#if CONFIG_VOICE_BOARD_WATCH206
+        s_last_glance_us = esp_timer_get_time();
+#endif
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "weather") == 0) {
         note_ble_transfer();
         apply_weather_command(root);
 #if CONFIG_VOICE_BOARD_WATCH206
+        s_last_glance_us = esp_timer_get_time();
+#endif
+#if CONFIG_VOICE_BOARD_WATCH206
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "options") == 0) {
         apply_options_command(root);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "detail") == 0) {
+        note_ble_transfer();
+        apply_detail_command(root);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "reminder") == 0) {
+        /* {"event":"reminder","id":17,"title":"Pool messen","body":"Um 18:00 Uhr.","task":true} */
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
+        const cJSON *title = cJSON_GetObjectItemCaseSensitive(root, "title");
+        const cJSON *body = cJSON_GetObjectItemCaseSensitive(root, "body");
+        const cJSON *task = cJSON_GetObjectItemCaseSensitive(root, "task");
+        if (cJSON_IsNumber(id) && id->valuedouble >= 0 && id->valuedouble <= 65535) {
+            queue_bridge_event(APP_EVENT_REMINDER, cJSON_IsString(body) ? body->valuestring : "",
+                               cJSON_IsString(title) ? title->valuestring : "",
+                               (uint32_t)id->valuedouble, cJSON_IsTrue(task) ? 1 : 0);
+        }
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "update_available") == 0) {
+        /* {"event":"update_available","version":"0.5.1"} */
+        const cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
+        if (cJSON_IsString(version) && version->valuestring[0]) {
+            queue_bridge_event(APP_EVENT_UPDATE_AVAILABLE, version->valuestring, "", 0, 0);
+        }
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "bridge_info") == 0) {
+        /* {"event":"bridge_info","version":"2.14.0","server":"ok"} */
+        const cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
+        const cJSON *server = cJSON_GetObjectItemCaseSensitive(root, "server");
+        queue_bridge_event(APP_EVENT_BRIDGE_INFO,
+                           cJSON_IsString(version) ? version->valuestring : "", "",
+                           cJSON_IsString(server) && strcmp(server->valuestring, "ok") == 0, 0);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "locked") == 0) {
+        queue_bridge_event(APP_EVENT_LOCK_STATE, "", "", 1, 0);
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "unlocked") == 0) {
+        queue_bridge_event(APP_EVENT_LOCK_STATE, "", "", 0, 0);
 #endif
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "watch_settings") == 0) {
         apply_watch_settings_command(root);
@@ -1912,6 +2204,45 @@ static uint32_t primary_hold_ms(void)
         return (uint32_t)((s_primary_release_us - s_primary_down_us) / 1000);
     }
     return elapsed_button_ms(s_primary_down_us);
+}
+
+/*
+ * Beginnt einen Turn auf der Sprechtaste: Aufnahme starten und der Bruecke
+ * melden. Gemeinsamer Weg fuer das Druecken (StickS3, Klick-Modus) und das
+ * Halten auf der Uhr (APP_EVENT_TALK_LONG).
+ */
+static void apply_app_ui_state(const char *state, const char *text, const char *question);
+
+static void begin_primary_recording(void)
+{
+#if CONFIG_VOICE_BOARD_WATCH206
+    /* Kontext vor `button_down` (Punkt 16): welche Karte offen ist. */
+    if (voice_ble_is_ready() && !s_ota_updating && !s_recording) {
+        send_context();
+    }
+#endif
+    s_primary_session_id = start_recording();
+    if (s_primary_session_id == 0) {
+        s_primary_down_us = 0;
+        if (!voice_ble_is_ready() && !s_ota_updating) {
+            /*
+             * Keine Bruecke: Bisher geschah dann sichtbar nichts
+             * -- start_recording() schrieb nur ins Log. Auf der
+             * Waveshare-Uhr sah das aus wie eine tote Taste.
+             */
+            ui_status_set_not_connected();
+            play_tone(AUDIO_TONE_CANCEL);
+        }
+        return;
+    }
+    esp_err_t primary_down_err = s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK
+        ? voice_ble_send_button_click("primary", 0, s_primary_session_id)
+        : voice_ble_send_button_down("primary", s_primary_session_id);
+    if (s_primary_session_id != 0 && primary_down_err != ESP_OK) {
+        (void)stop_recording();
+        s_primary_session_id = 0;
+        apply_app_ui_state("ready", "", "");
+    }
 }
 
 static void apply_app_ui_state(const char *state, const char *text, const char *question)
@@ -1994,6 +2325,10 @@ static void apply_app_ui_state_choices(const char *state, const char *text, cons
         ui_status_set_partial_text("Bestätigen oder abbrechen");
     } else if (strcmp(state, "error") == 0) {
         s_app_ui_state = APP_UI_STATE_ERROR;
+#if CONFIG_VOICE_BOARD_WATCH206
+        copy_utf8_clipped(s_last_error, text && text[0] ? text : "Unbekannter Fehler",
+                          sizeof(s_last_error));
+#endif
         ui_status_set_error(text && text[0] ? text : "Unbekannter Fehler");
         play_tone(AUDIO_TONE_ERROR);
         voice_ble_request_slow_interval();
@@ -2149,7 +2484,7 @@ static void update_night_window(void)
     s_night_window = in;
     s_night_bright_override = false;
     ESP_LOGI(TAG, "Nachtmodus %s", in ? "an" : "aus");
-    ui_status_set_night_red(in);
+    ui_status_set_night_tint(in);
     /* Der Nachtlade-Modus haelt seine eigene Helligkeit; sonst gilt die neue Obergrenze sofort. */
     if (!s_night_mode && !ui_torch_on()) {
         apply_brightness_now();
@@ -2341,9 +2676,11 @@ static void handle_control_tile(int tile)
         break;
     case UI_CONTROL_SILENT:
         s_silent = !s_silent;
+        ui_status_set_quiet_marks(s_silent, s_cinema);
         break;
     case UI_CONTROL_CINEMA:
         s_cinema = !s_cinema;
+        ui_status_set_quiet_marks(s_silent, s_cinema);
         break;
     case UI_CONTROL_SAVER:
         s_saver = !s_saver;
@@ -2357,7 +2694,7 @@ static void handle_control_tile(int tile)
     default:
         return;
     }
-    haptic_pattern(1, 25, 0);
+    haptic(VOICE_HAPTIC_SUCCESS);
     const ui_control_state_t st = control_state();
     ui_control_update(&st);
 }
@@ -2372,7 +2709,7 @@ static void cancel_transcript(void)
     ESP_LOGI(TAG, "Transkript abgebrochen");
     if (voice_ble_send_cancel_transcript() == ESP_OK) {
         ui_status_set_transcript_cancelled();
-        haptic_pattern(1, 40, 0);
+        haptic(VOICE_HAPTIC_SUCCESS);
     } else {
         ui_status_set_not_connected();
         play_tone(AUDIO_TONE_CANCEL);
@@ -2409,8 +2746,7 @@ static void handle_home_timeout(void)
         s_answer_unread = false;
     }
     ESP_LOGI(TAG, "%u s ohne Bedienung -> Ziffernblatt", (unsigned)s_home_after_s);
-    ui_face_picker_hide();
-    ui_options_hide();
+    hide_overlays();
     ui_control_hide();
     ui_cards_hide();
     ui_status_show_home();
@@ -2431,8 +2767,7 @@ static void handle_palm(void)
         abort_recording();
     }
     ui_torch_set(false);
-    ui_face_picker_hide();
-    ui_options_hide();
+    hide_overlays();
     ui_control_hide();
     ui_cards_hide();
     ui_status_show_home();
@@ -2451,27 +2786,34 @@ static void handle_palm(void)
 
 /*
  * Die Gestensprache der Uhr -- ein Regelwerk fuer alle Szenen (10/2026,
- * Reihe seit 11/2026). Dieselbe Tabelle steht im README (Abschnitt der Uhr).
+ * Reihe seit 11/2026, eine Regel seit Paket J, 0.5.0). Dieselbe Tabelle
+ * steht im README (Abschnitt der Uhr).
+ *
+ * Die Regel: Nach rechts wischen ist zurueck -- ueberall. Nach oben/unten
+ * wischen scrollt -- nur das. Die einzige Kante ist der obere Rand: Von dort
+ * nach unten oeffnet das Kontrollzentrum, egal was zu sehen ist.
  *
  * Waagerecht liegt alles in einer Reihe: Verlauf | Zifferblatt | Heute |
- * Einkauf | Zuhause | Wetter. Nach links wischen holt, was rechts liegt.
+ * Einkauf | Zuhause | Wetter. Nach links wischen holt, was rechts liegt;
+ * nach rechts, was links liegt -- von den Karten aus also zurueck zum
+ * Zifferblatt, vom Zifferblatt aus in den Verlauf.
  *
  *   Geste             Zifferblatt      Antwort / Verlauf      Karten              Kontrollzentrum
  *   ----------------  ---------------  ---------------------  ------------------  ---------------
- *   vom oberen Rand   Kontrollzentrum  Kontrollzentrum        Kontrollzentrum     schliesst
+ *   vom oberen Rand   Kontrollzentrum  Kontrollzentrum        Kontrollzentrum     --
  *   nach unten
- *   vom linken Rand   Verlauf          Zifferblatt            Zifferblatt         Zifferblatt
+ *   vom linken Rand   Verlauf          Zifferblatt            wie rechts          wie rechts
  *   nach rechts
- *   nach unten        nichts           zurueck: Zifferblatt   Liste zurueck; am   schliesst
- *                                                             Anfang: Zifferblatt
- *   nach oben         Karten           Karten                 Liste weiter        schliesst
+ *   nach unten        nichts           voriger Ausschnitt     Liste zurueck; am   nichts
+ *                                      einer langen Antwort   Anfang nichts
+ *   nach oben         nichts           naechster Ausschnitt   Liste weiter        schliesst
  *   links             Heute            neuer; von der         naechste Karte;     --
  *                                      juengsten: Zifferbl.   am Ende nichts
- *   rechts            Verlauf (zuerst  aelter                 vorige Karte; von   --
+ *   rechts            Verlauf (zuerst  aelter                 vorige Karte; von   schliesst
  *                     die Bilanz)                             Heute: Zifferblatt
  *   Tippen            Verlauf oeffnen  Ja/Nein; Nochmal /     Zeile abhaken /     Kachel
- *                                      Rueckgaengig; Kurz-    schalten; Heute und
- *                                      form <-> ganz; sonst   Schalter mit `c`:
+ *                                      Rueckgaengig; Kurz-    schalten; Zeilen
+ *                                      form <-> ganz; sonst   mit "OK"-Pille:
  *                                      aelter                 markieren, dann
  *                                                             "OK"; Flag `s`:
  *                                                             Auswahl (0.4.5);
@@ -2481,40 +2823,46 @@ static void handle_palm(void)
  *                     Gross)
  *   Hand aufs Display alles still: Aufnahme verworfen, Ebenen zu, Schirm dunkel
  *
- * In der Layout-Auswahl: links/rechts blaettert, Tippen uebernimmt, nach
- * unten oder vom linken Rand bricht ab (auch nach 10 s ohne Eingabe). In der
- * Auswahl eines input_select (0.4.5, Kartenzeile mit Flag `s`): Tippen auf
- * eine Option waehlt sie (auf die aktive: nur zu), oben/unten scrollt, nach
- * unten am Anfang oder vom linken Rand bricht ab (auch nach 10 s). Bis
- * 0.4.3 war langer Druck auf dem Schirm frei -- eine Beruehrung bis 0,8 s
- * ohne Wischen war ein Tippen, darueber zaehlte sie als Aermel und tat
- * nichts. Der lange Druck auf die Blaettertaste (Aktion) ist davon
- * unberuehrt.
+ * Unterszenen (Layout-Auswahl, Auswahl eines input_select) tragen links oben
+ * ein sichtbares Zurueck "‹" (ui_chrome.h); Antippen oder nach rechts
+ * wischen schliesst sie ohne Senden, ebenso zehn Sekunden ohne Eingabe. In
+ * der Layout-Auswahl blaettern links und oben weiter, unten zurueck; Tippen
+ * daneben uebernimmt. In der Auswahl scrollt oben/unten eine lange Liste,
+ * Tippen auf eine Option waehlt sie (auf die aktive: nur zu).
  *
  * Sonderfaelle: Ein gedimmter Schirm wird von der ersten Beruehrung nur
  * geweckt; waehrend der Aufnahme tut der Schirm nichts (das Handgelenk
  * liegt oft am Aermel); in der Transkript-Szene zaehlt nur "Abbrechen"
  * (und die Hand, die ebenfalls abbricht); bei der Taschenlampe schaltet jede
- * Beruehrung sie aus.
+ * Beruehrung sie aus. Der lange Druck auf die Blaettertaste (Aktion) ist
+ * etwas anderes und unberuehrt.
  *
  * Abweichungen von vorher, mit Grund:
- *   - Karten, nach unten: schliesst sofort. Vorher blaetterte es erst eine
- *     Seite zurueck und schloss nur auf der ersten -- dieselbe Geste tat je
- *     nach Seite zweierlei. Die Seiten laufen mit "nach oben" im Kreis.
- *   - Karten zu fuehrt aufs Zifferblatt (11/2026: die Karten liegen jetzt
- *     rechts daneben in der Reihe, nicht mehr eine Ebene darueber -- Wunsch
- *     des Nutzers). Nach oben oeffnet sie weiterhin, als zweiter Weg.
- *   - Verlauf: Rechts ist jetzt aelter, links neuer (vorher umgekehrt),
- *     damit der Verlauf links und die Karten rechts vom Zifferblatt liegen.
- *   - Nach oben oeffnet die Karten nur, wenn gerade nichts laeuft (keine
- *     Aufnahme, kein Denken). Vorher ging das auch mitten im Nachdenken, und
- *     die Antwort kam hinter der Karte an.
+ *   - Paket J (0.5.0): Oben/unten oeffnet und schliesst nichts mehr.
+ *     Bis 0.4.6 ging "nach unten" vom Verlauf aufs Zifferblatt und am
+ *     Anfang einer Liste zurueck, "nach oben" oeffnete vom Zifferblatt die
+ *     Karten und "nach unten" schloss das Kontrollzentrum -- dieselbe Geste
+ *     scrollte an einer Stelle und navigierte an der naechsten. Zu den
+ *     Karten geht es nach links, zurueck nach rechts. Das Kontrollzentrum
+ *     schliesst nach oben (die Ebene wird zurueckgeschoben) oder rechts.
+ *   - Paket J: Der linke Rand ist nur noch im Verlauf eine eigene Geste (auf
+ *     einen Schlag zum Zifferblatt). Auf Karten und Unterszenen ist jedes
+ *     Wischen nach rechts zurueck; dort brauchte es den Rand nicht mehr.
+ *   - Karten zu fuehrt aufs Zifferblatt (11/2026: die Karten liegen rechts
+ *     daneben in der Reihe, nicht mehr eine Ebene darueber -- Wunsch des
+ *     Nutzers).
+ *   - Verlauf: Rechts ist aelter, links neuer (seit 11/2026), damit der
+ *     Verlauf links und die Karten rechts vom Zifferblatt liegen.
+ *   - Nach links oeffnet die Karten nur, wenn gerade nichts laeuft (keine
+ *     Aufnahme, kein Denken). Sonst kaeme die Antwort hinter der Karte an.
  *   - Tippen auf eine Antwort in Kurzform zeigt die ganze (und zurueck).
  *     Ohne Kurzform bleibt Tippen, was es war: die Blaettertaste.
  *   - Karte Heute, Tippen (11/2026): markiert die Zeile nur; abgehakt wird
  *     erst mit "OK - erledigt" in der Zeile. Ein Fehltipp am Handgelenk
  *     hakte vorher sofort ab. Einkauf und Zuhause bleiben beim direkten
- *     Tippen (Wunsch des Nutzers).
+ *     Tippen (Wunsch des Nutzers) -- ausser Schaltern mit `c` und
+ *     Schloessern; welche Zeilen nachfragen, zeigt seit 0.5.0 die graue
+ *     "OK"-Pille vor dem Tippen.
  *   - Kontrollzentrum und Karten oeffnen nicht in der Transkript-Szene:
  *     Sie verdeckten genau die zwei Sekunden, in denen "Abbrechen" gilt.
  */
@@ -2562,7 +2910,7 @@ static bool handle_history_chip(int16_t x, int16_t y)
         return false;
     }
     if (err == ESP_OK) {
-        haptic_pattern(1, 30, 0);
+        haptic(VOICE_HAPTIC_SUCCESS);
     } else {
         ui_status_set_not_connected();
         play_tone(AUDIO_TONE_CANCEL);
@@ -2590,7 +2938,7 @@ static void choose_face_layout(ui_face_layout_t layout)
     if (voice_ble_send_face_layout(ui_face_layout_name(layout)) != ESP_OK) {
         ESP_LOGW(TAG, "face_layout nicht gesendet (keine Bruecke)");
     }
-    haptic_pattern(1, 30, 0);
+    haptic(VOICE_HAPTIC_SUCCESS);
 }
 
 /*
@@ -2609,11 +2957,522 @@ static void choose_option(const ui_options_choice_t *choice)
         play_tone(AUDIO_TONE_CANCEL);
         return;
     }
-    haptic_pattern(1, 40, 0);
+    haptic(VOICE_HAPTIC_SUCCESS);
     ui_cards_mark_sent(choice->kind, choice->rev, choice->index);
     char line[UI_CARD_TEXT_LEN + UI_OPTIONS_TEXT_LEN + 4];
     snprintf(line, sizeof(line), "%s: %s", choice->title, choice->option);
     ui_status_history_add_card(line, (uint8_t)choice->kind, choice->rev, choice->index);
+}
+
+
+/* ── Paket J, Teil 2 (0.5.0) ─────────────────────────────────────────── */
+
+/* Alle Blaetter und Unterszenen zu -- Rueckkehr, Hand aufs Display, Transkript, Sperre. */
+static void hide_overlays(void)
+{
+    if (s_pin_pending) {
+        /* Die Schloss-Zeile zeigt wieder ihren Stand: geschaltet wurde nichts. */
+        ui_cards_restore(s_pin_hit.kind, s_pin_hit.rev, s_pin_hit.index);
+        s_pin_pending = false;
+    }
+    ui_pin_hide();
+    ui_prompt_hide();
+    ui_detail_hide();
+    s_detail_open = false;
+    ui_diag_hide();
+    ui_face_picker_hide();
+    ui_options_hide();
+}
+
+/*
+ * Bewegung fuer die Schloss-Sperre: Bedienung oder Handgelenk heben. Lag die
+ * letzte mehr als zehn Minuten zurueck, gilt die Uhr ab jetzt wieder als
+ * gesperrt -- geprueft hier, weil die Bedienung, die das Schloss schalten
+ * will, selbst eine Bewegung ist.
+ */
+static void note_motion(void)
+{
+    const int64_t now = (int64_t)time(NULL);
+    if (now - s_pin_motion_s >= PIN_IDLE_S || now < s_pin_motion_s) {
+        s_pin_unlocked = false;
+    }
+    s_pin_motion_s = now;
+}
+
+static bool pin_required(void)
+{
+    return s_lock_pin[0] != '\0' && !s_pin_unlocked;
+}
+
+/* SHA-256 von "todoteck-uhr:" + Ziffern als Hex, verglichen mit `lock_pin`. */
+static bool pin_matches(const char *digits)
+{
+    char input[32];
+    const int len = snprintf(input, sizeof(input), "todoteck-uhr:%s", digits);
+    if (len <= 0 || len >= (int)sizeof(input)) {
+        return false;
+    }
+    unsigned char hash[32];
+    if (mbedtls_sha256((const unsigned char *)input, (size_t)len, hash, 0) != 0) {
+        return false;
+    }
+    char hex[65];
+    for (int i = 0; i < 32; i++) {
+        snprintf(hex + 2 * i, 3, "%02x", hash[i]);
+    }
+    return strcmp(hex, s_lock_pin) == 0;
+}
+
+/*
+ * Eine Zeile ist abgehakt bzw. geschaltet (nach Tippen, OK, BOOT oder dem
+ * Aktionsblatt): `item` an die Bruecke und ein Verlaufseintrag (V5) mit den
+ * Koordinaten fuer `undo` aus dem Verlauf.
+ */
+static void send_card_item(const ui_cards_hit_t *hit)
+{
+    if (voice_ble_send_item(ui_cards_kind_name(hit->kind), hit->rev, hit->index) != ESP_OK) {
+        play_tone(AUDIO_TONE_CANCEL);
+        return;
+    }
+    haptic(VOICE_HAPTIC_SUCCESS);
+    char line[UI_CARD_TEXT_LEN + 16];
+    if (hit->kind == UI_CARD_SWITCHES) {
+        /* Ohne An/Aus (Option, Schloss) kennt die Uhr den Zielstand nicht. */
+        snprintf(line, sizeof(line), "%s: %s", hit->text,
+                 !hit->binary ? "weiter" : hit->on ? "An" : "Aus");
+    } else {
+        snprintf(line, sizeof(line), "Erledigt: %s", hit->text);
+    }
+    ui_status_history_add_card(line, (uint8_t)hit->kind, hit->rev, hit->index);
+}
+
+/* Ein Ereignis mit Karten-Koordinaten (`later`, `detail_request`) an die Bruecke. */
+static esp_err_t send_card_event(const char *event, const ui_cards_hit_t *hit, const char *preset)
+{
+    char json[128];
+    if (preset) {
+        snprintf(json, sizeof(json),
+                 "{\"event\":\"%s\",\"kind\":\"%s\",\"rev\":%u,\"index\":%u,\"preset\":\"%s\"}",
+                 event, ui_cards_kind_name(hit->kind), (unsigned)hit->rev, (unsigned)hit->index,
+                 preset);
+    } else {
+        snprintf(json, sizeof(json), "{\"event\":\"%s\",\"kind\":\"%s\",\"rev\":%u,\"index\":%u}",
+                 event, ui_cards_kind_name(hit->kind), (unsigned)hit->rev, (unsigned)hit->index);
+    }
+    ESP_LOGI(TAG, "%s", json);
+    return voice_ble_send_state_json(json);
+}
+
+/* Das Aktionsblatt einer Aufgabe in Heute (langer Druck). */
+static const char *const SHEET_BUTTONS[] = { "Erledigt", "+1 Std", "Heute Abend", "Morgen",
+                                             "Details" };
+static const char *const SHEET_PRESETS[] = { NULL, "1h", "evening", "tomorrow", NULL };
+static const char *const SHEET_PRESET_WORDS[] = { NULL, "+1 Std", "heute Abend", "morgen", NULL };
+#define SHEET_IDLE_MS 10000
+
+static void handle_sheet_choice(int choice)
+{
+    const ui_cards_hit_t *hit = &s_sheet_hit;
+    if (choice == 0) {
+        ui_cards_hit_t done;
+        memset(&done, 0, sizeof(done));
+        if (ui_cards_check_off(hit->kind, hit->rev, hit->index, &done)) {
+            send_card_item(&done);
+        } else {
+            /* Die Karte ist inzwischen neu: nichts abgehakt, die Bruecke schickt sie gleich. */
+            play_tone(AUDIO_TONE_CANCEL);
+        }
+        return;
+    }
+    if (choice >= 1 && choice <= 3) {
+        if (send_card_event("later", hit, SHEET_PRESETS[choice]) != ESP_OK) {
+            ui_status_set_not_connected();
+            play_tone(AUDIO_TONE_CANCEL);
+            return;
+        }
+        haptic(VOICE_HAPTIC_SUCCESS);
+        /* Wie nach dem Abhaken: "..." bis zur neuen Karte, fuenf Sekunden "Rueckgaengig". */
+        ui_cards_mark_sent(hit->kind, hit->rev, hit->index);
+        char line[UI_CARD_TEXT_LEN + 24];
+        snprintf(line, sizeof(line), "Später (%s): %s", SHEET_PRESET_WORDS[choice], hit->text);
+        ui_status_history_add_card(line, (uint8_t)hit->kind, hit->rev, hit->index);
+        return;
+    }
+    if (choice == 4) {
+        if (send_card_event("detail_request", hit, NULL) != ESP_OK) {
+            ui_status_set_not_connected();
+            play_tone(AUDIO_TONE_CANCEL);
+            return;
+        }
+        note_ble_transfer();
+        s_detail_open = true;
+        s_detail_rev = hit->rev;
+        s_detail_index = hit->index;
+        ui_detail_open(hit->rev, hit->index, hit->text);
+    }
+}
+
+/* Antwort auf eine Erinnerung (Punkt 19). */
+static void send_reminder_action(const char *action)
+{
+    char json[80];
+    snprintf(json, sizeof(json), "{\"event\":\"reminder_action\",\"id\":%u,\"action\":\"%s\"}",
+             (unsigned)s_reminder_id, action);
+    ESP_LOGI(TAG, "%s", json);
+    if (voice_ble_send_state_json(json) == ESP_OK) {
+        haptic(VOICE_HAPTIC_SUCCESS);
+    } else {
+        ui_status_set_not_connected();
+        play_tone(AUDIO_TONE_CANCEL);
+    }
+}
+
+/* "Spaeter" (oder Ja) auf den Update-Hinweis: diese Fassung erst in 24 h wieder anbieten. */
+static void update_snooze(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(UPDATE_NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        return;
+    }
+    const int64_t now = (int64_t)time(NULL);
+    (void)nvs_set_str(nvs, "ver", s_update_version);
+    (void)nvs_set_i64(nvs, "next", now + UPDATE_SNOOZE_S);
+    (void)nvs_commit(nvs);
+    nvs_close(nvs);
+}
+
+/*
+ * `update_available` (Punkt 37): einmal je Fassung fragen, nach "Spaeter"
+ * wieder in 24 Stunden. Nicht, solange etwas laeuft -- die Bruecke fragt
+ * beim naechsten Verbinden und taeglich ohnehin wieder.
+ */
+static void handle_update_available(const char *version)
+{
+    if (!version[0] || s_ota_updating || s_recording || !cards_allowed() ||
+        ui_status_transcript_shown() || ui_pin_visible() || ui_prompt_visible()) {
+        return;
+    }
+    char stored[17] = "";
+    int64_t next = 0;
+    nvs_handle_t nvs;
+    if (nvs_open(UPDATE_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        size_t len = sizeof(stored);
+        if (nvs_get_str(nvs, "ver", stored, &len) != ESP_OK) {
+            stored[0] = '\0';
+        }
+        if (nvs_get_i64(nvs, "next", &next) != ESP_OK) {
+            next = 0;
+        }
+        nvs_close(nvs);
+    }
+    const int64_t now = (int64_t)time(NULL);
+    if (strcmp(stored, version) == 0 && now < next) {
+        ESP_LOGI(TAG, "Update %s: spaeter, noch %lld s", version, (long long)(next - now));
+        return;
+    }
+    strlcpy(s_update_version, version, sizeof(s_update_version));
+    char title[40];
+    snprintf(title, sizeof(title), "Update %s", s_update_version);
+    static const char *const buttons[] = { "Jetzt installieren", "Später" };
+    note_activity();
+    ui_prompt_show(UI_PROMPT_UPDATE, title, "Die neue Firmware liegt bereit. Jetzt installieren?",
+                   buttons, 2, 0);
+    haptic(VOICE_HAPTIC_ATTENTION);
+}
+
+static void handle_prompt_result(ui_prompt_kind_t kind, int result)
+{
+    switch (kind) {
+    case UI_PROMPT_SHEET:
+        if (result >= 0) {
+            handle_sheet_choice(result);
+        }
+        break;
+    case UI_PROMPT_REMINDER:
+        /* Zurueck schliesst nur: die Erinnerung bleibt auf dem Handy. */
+        if (result == 0) {
+            send_reminder_action(s_reminder_task ? "done" : "dismiss");
+        } else if (result == 1 && s_reminder_task) {
+            send_reminder_action("snooze");
+        }
+        break;
+    case UI_PROMPT_UPDATE:
+        if (result == 0) {
+            if (voice_ble_send_state_json("{\"event\":\"update_start\"}") == ESP_OK) {
+                /* Den Fortschritt zeigt das OTA selbst, sobald die Bruecke das Abbild hat. */
+                haptic(VOICE_HAPTIC_SUCCESS);
+            } else {
+                ui_status_set_not_connected();
+                play_tone(AUDIO_TONE_CANCEL);
+            }
+        }
+        /* Ja wie Spaeter: Klappt das Update nicht, fragt die Uhr erst morgen wieder. */
+        update_snooze();
+        break;
+    case UI_PROMPT_NONE:
+        break;
+    }
+}
+
+/* Eine Erinnerung aus Todoteck (Punkt 19): Muster "Erinnerung", Vollbild-Karte, Verlauf. */
+static void handle_reminder(const app_event_t *event)
+{
+    s_reminder_id = (uint16_t)event->size;
+    s_reminder_task = event->written != 0;
+    char line[96];
+    snprintf(line, sizeof(line), "Erinnerung: %s", event->question);
+    ui_status_history_add_note(line);
+    if (s_recording || ui_status_transcript_shown()) {
+        /* Mitten im Satz nicht dazwischen -- sie steht im Verlauf. */
+        return;
+    }
+    hide_overlays();
+    haptic(VOICE_HAPTIC_REMINDER);
+    if (!s_cinema) {
+        note_activity();
+    }
+    static const char *const task_buttons[] = { "Erledigt", "+15 min" };
+    static const char *const info_buttons[] = { "OK" };
+    ui_prompt_show(UI_PROMPT_REMINDER, event->question[0] ? event->question : "Erinnerung",
+                   event->text, s_reminder_task ? task_buttons : info_buttons,
+                   s_reminder_task ? 2 : 1, 0);
+}
+
+/* Gesperrt / wieder frei (Punkt 32). */
+static void apply_lock_state(bool locked)
+{
+    if (locked == s_watch_locked) {
+        return;
+    }
+    s_watch_locked = locked;
+    ESP_LOGW(TAG, "Bruecke meldet: %s", locked ? "gesperrt" : "wieder frei");
+    ui_status_set_locked(locked);
+    if (locked) {
+        hide_overlays();
+        ui_control_hide();
+        ui_cards_hide();
+        ui_cards_clear_all();
+        if (!s_recording) {
+            ui_status_show_home();
+        }
+        haptic(VOICE_HAPTIC_ERROR);
+    } else {
+        note_ble_transfer();
+        (void)voice_ble_send_glance_request();
+    }
+}
+
+/* Die PIN ist vollstaendig (Punkt 31): pruefen, schalten oder zaehlen. */
+static void handle_pin_entry(const char *digits)
+{
+    const int64_t now_us = esp_timer_get_time();
+    char message[48];
+    if (now_us < s_pin_block_until_us) {
+        snprintf(message, sizeof(message), "Gesperrt, noch %u s",
+                 (unsigned)((s_pin_block_until_us - now_us) / 1000000 + 1));
+        ui_pin_reset(message, true);
+        haptic(VOICE_HAPTIC_ERROR);
+        return;
+    }
+    if (pin_matches(digits)) {
+        s_pin_unlocked = true;
+        s_pin_fails = 0;
+        ui_pin_hide();
+        if (s_pin_pending) {
+            s_pin_pending = false;
+            send_card_item(&s_pin_hit);
+        }
+        return;
+    }
+    haptic(VOICE_HAPTIC_ERROR);
+    s_pin_fails++;
+    if (s_pin_fails >= PIN_FAILS_MAX) {
+        s_pin_fails = 0;
+        s_pin_block_until_us = now_us + PIN_BLOCK_US;
+        ui_pin_reset("Dreimal falsch: 60 s gesperrt", true);
+        return;
+    }
+    snprintf(message, sizeof(message), "Falsch, noch %u Versuch%s",
+             (unsigned)(PIN_FAILS_MAX - s_pin_fails), PIN_FAILS_MAX - s_pin_fails == 1 ? "" : "e");
+    ui_pin_reset(message, true);
+}
+
+/*
+ * Was eine Karte gemeldet hat -- gemeinsam fuer Tippen, langen Druck und
+ * BOOT kurz (Punkt 11). Ein Schloss fragt vorher nach der PIN, falls eine
+ * gesetzt und die Uhr nicht entsperrt ist.
+ */
+static void handle_cards_action(ui_cards_action_t action, const ui_cards_hit_t *hit)
+{
+    if (action == UI_CARDS_ITEM) {
+        if (hit->lock && pin_required()) {
+            s_pin_hit = *hit;
+            s_pin_pending = true;
+            ui_pin_show("PIN für Schlösser");
+            ui_pin_reset(s_pin_block_until_us > esp_timer_get_time() ? "Noch gesperrt" : "",
+                         s_pin_block_until_us > esp_timer_get_time());
+            haptic(VOICE_HAPTIC_ATTENTION);
+            return;
+        }
+        send_card_item(hit);
+    } else if (action == UI_CARDS_UNDO) {
+        ESP_LOGI(TAG, "Rueckgaengig: %s #%u", ui_cards_kind_name(hit->kind), (unsigned)hit->index);
+        if (voice_ble_send_undo(ui_cards_kind_name(hit->kind), hit->rev, hit->index) == ESP_OK) {
+            haptic(VOICE_HAPTIC_SUCCESS);
+        } else {
+            play_tone(AUDIO_TONE_CANCEL);
+        }
+    } else if (action == UI_CARDS_CLOSE) {
+        /* Von Heute nach rechts: zurueck aufs Zifferblatt. */
+        ui_status_show_home();
+    } else if (action == UI_CARDS_OPTIONS) {
+        /*
+         * input_select (Flag `s`, 0.4.5): die Bruecke nach den Optionen
+         * fragen und die Auswahl gleich oeffnen ("Laedt ..."). Ohne
+         * Bruecke kommt nichts -- dann bleibt die Karte, mit Fehlerton.
+         */
+        if (voice_ble_send_options_request(ui_cards_kind_name(hit->kind), hit->rev,
+                                           hit->index) == ESP_OK) {
+            note_ble_transfer();
+            ui_options_open(hit->kind, hit->rev, hit->index, hit->text);
+            haptic(VOICE_HAPTIC_ATTENTION);
+        } else {
+            play_tone(AUDIO_TONE_CANCEL);
+        }
+    } else if (action == UI_CARDS_SELECT) {
+        /* Zeile markiert, OK-Chip steht: "ein zweiter Schritt kommt". */
+        haptic(VOICE_HAPTIC_ATTENTION);
+    } else if (action == UI_CARDS_SHEET) {
+        s_sheet_hit = *hit;
+        ui_prompt_show(UI_PROMPT_SHEET, hit->text, "", SHEET_BUTTONS, 5, SHEET_IDLE_MS);
+        haptic(VOICE_HAPTIC_ATTENTION);
+    } else if (action == UI_CARDS_RELOAD) {
+        note_ble_transfer();
+        if (voice_ble_send_glance_request() == ESP_OK) {
+            haptic(VOICE_HAPTIC_SUCCESS);
+        } else {
+            ui_status_set_not_connected();
+            play_tone(AUDIO_TONE_CANCEL);
+        }
+    }
+    /*
+     * UI_CARDS_END (rechts von Wetter kommt nichts mehr) vibrierte bis
+     * 0.4.6 ganz kurz. Das Vokabular (Paket J) kennt dafuer kein Muster
+     * -- nichts ist passiert, also meldet sich auch nichts.
+     */
+}
+
+/*
+ * BOOT kurz (Punkte 11 und 12): in einer Liste "OK" auf die markierte
+ * Zeile; auf dem Zifferblatt die letzte Antwort zeigen und die Bruecke
+ * bitten, sie noch einmal vorzulesen (`read_last`). Sonst nichts.
+ */
+static void handle_boot_short(void)
+{
+    if (ui_pin_visible() || ui_prompt_visible() || ui_detail_visible() || ui_diag_visible() ||
+        ui_options_visible() || ui_face_picker_visible() || ui_control_visible() || ui_torch_on()) {
+        return;
+    }
+    if (ui_cards_visible()) {
+        ui_cards_hit_t hit;
+        memset(&hit, 0, sizeof(hit));
+        const ui_cards_action_t action = ui_cards_confirm_selected(&hit);
+        if (action == UI_CARDS_ITEM) {
+            handle_cards_action(action, &hit);
+        }
+        return;
+    }
+    if (ui_status_face_shown()) {
+        ESP_LOGI(TAG, "BOOT kurz auf dem Zifferblatt -> letzte Antwort");
+        ui_status_show_latest();
+        (void)voice_ble_send_state_json("{\"event\":\"read_last\"}");
+    }
+}
+
+/*
+ * Vor einer Aufnahme (Punkt 16): Welche Karte offen ist und welche Zeile
+ * markiert, damit der Server ein blosses "Milch" auf der Einkaufsliste
+ * versteht. Nur, wenn eine Karte zu sehen ist; Details und Aktionsblatt
+ * zaehlen als Markierung ihrer Zeile.
+ */
+static void send_context(void)
+{
+    ui_card_kind_t kind = UI_CARD_TODAY;
+    uint16_t rev = 0;
+    int index = -1;
+    if (!ui_cards_context(&kind, &rev, &index)) {
+        return;
+    }
+    if (kind == UI_CARD_TODAY && s_detail_open && ui_detail_visible()) {
+        rev = s_detail_rev;
+        index = s_detail_index;
+    } else if (kind == UI_CARD_TODAY && ui_prompt_kind() == UI_PROMPT_SHEET) {
+        rev = s_sheet_hit.rev;
+        index = s_sheet_hit.index;
+    }
+    char json[96];
+    snprintf(json, sizeof(json), "{\"event\":\"context\",\"card\":\"%s\",\"rev\":%u,\"index\":%d}",
+             ui_cards_kind_name(kind), (unsigned)rev, index);
+    ESP_LOGI(TAG, "%s", json);
+    (void)voice_ble_send_state_json(json);
+}
+
+/* Die Zeilen der Diagnose-Seite (Punkt 36). */
+static const char *build_diag_text(void)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    char *p = s_diag_text;
+    size_t left = sizeof(s_diag_text);
+    int n = 0;
+#define DIAG_LINE(...)                                       \
+    do {                                                     \
+        n = snprintf(p, left, __VA_ARGS__);                  \
+        if (n > 0 && (size_t)n < left) {                     \
+            p += n;                                          \
+            left -= (size_t)n;                               \
+        }                                                    \
+    } while (0)
+    DIAG_LINE("Firmware %s\n", app ? app->version : "?");
+    if (s_bridge_known) {
+        DIAG_LINE("Brücke %s, Server %s\n", s_bridge_version[0] ? s_bridge_version : "?",
+                  s_bridge_server_ok ? "ok" : "Fehler");
+    } else {
+        DIAG_LINE("Brücke %s\n", voice_ble_is_connected() ? "ohne Angabe" : "nicht verbunden");
+    }
+    int8_t rssi = 0;
+    if (voice_ble_rssi(&rssi) == ESP_OK) {
+        DIAG_LINE("Funk %d dBm\n", (int)rssi);
+    } else {
+        DIAG_LINE("Funk -\n");
+    }
+    const int64_t glance = s_last_glance_us;
+    if (glance > 0) {
+        const int64_t ago_s = (esp_timer_get_time() - glance) / 1000000;
+        if (ago_s < 120) {
+            DIAG_LINE("Daten vor %lld s\n", (long long)ago_s);
+        } else {
+            DIAG_LINE("Daten vor %lld min\n", (long long)(ago_s / 60));
+        }
+    } else {
+        DIAG_LINE("Daten noch keine\n");
+    }
+    DIAG_LINE("Fehler: %s\n", s_last_error[0] ? s_last_error : "keiner");
+    DIAG_LINE("RAM %u kB, PSRAM %u kB frei\n",
+              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+    const int64_t up_s = esp_timer_get_time() / 1000000;
+    DIAG_LINE("Laufzeit %u h %02u min\n", (unsigned)(up_s / 3600), (unsigned)((up_s / 60) % 60));
+    DIAG_LINE("Neustart: %s\n", reset_reason_text(s_reset_reason));
+    ui_render_stats_t stats;
+    if (ui_status_render_stats(&stats)) {
+        DIAG_LINE("Bild %u.%u/s, %u.%u ms, max %u ms", (unsigned)(stats.fps_x10 / 10),
+                  (unsigned)(stats.fps_x10 % 10), (unsigned)(stats.avg_ms_x10 / 10),
+                  (unsigned)(stats.avg_ms_x10 % 10), (unsigned)stats.max_ms);
+    } else {
+        DIAG_LINE("Bild: noch keine Messung");
+    }
+#undef DIAG_LINE
+    return s_diag_text;
 }
 
 static void handle_touch(const app_event_t *event)
@@ -2625,9 +3484,14 @@ static void handle_touch(const app_event_t *event)
      * Wischen als Tippen). Bei gedimmtem Schirm weckt er nur, wie jedes Tippen.
      */
     uint8_t gesture = event->gesture;
+    /*
+     * Seit 0.5.0 auch auf den Karten (Aktionsblatt einer Aufgabe in Heute)
+     * und im Kontrollzentrum (Diagnose auf "Akku"); die Blaetter nehmen ihn
+     * wie ein Tippen.
+     */
     if (gesture == VOICE_BOARD_LONG_PRESS &&
         (s_night_mode || s_display_dimmed || ui_face_picker_visible() || ui_options_visible() ||
-         ui_control_visible() || ui_cards_visible() || !ui_status_face_shown())) {
+         (!ui_control_visible() && !ui_cards_visible() && !ui_status_face_shown()))) {
         gesture = VOICE_BOARD_TAP;
     }
     if (gesture == VOICE_BOARD_PALM) {
@@ -2659,6 +3523,39 @@ static void handle_touch(const app_event_t *event)
         }
         return;
     }
+    /*
+     * Die Blaetter (0.5.0) liegen ueber allem und bekommen jede Geste: PIN,
+     * Frage (Aktionsblatt, Erinnerung, Update), Details, Diagnose.
+     */
+    if (ui_pin_visible()) {
+        char digits[UI_PIN_DIGITS + 1] = "";
+        const ui_pin_action_t action = ui_pin_touch(gesture, event->touch_x, event->touch_y, digits);
+        if (action == UI_PIN_DONE) {
+            handle_pin_entry(digits);
+        } else if (action == UI_PIN_CLOSED && s_pin_pending) {
+            ui_cards_restore(s_pin_hit.kind, s_pin_hit.rev, s_pin_hit.index);
+            s_pin_pending = false;
+        }
+        return;
+    }
+    if (ui_prompt_visible()) {
+        const ui_prompt_kind_t kind = ui_prompt_kind();
+        const int result = ui_prompt_touch(gesture, event->touch_x, event->touch_y);
+        if (result != UI_PROMPT_TOUCH_NONE) {
+            handle_prompt_result(kind, result);
+        }
+        return;
+    }
+    if (ui_detail_visible()) {
+        if (ui_detail_touch(gesture, event->touch_x, event->touch_y)) {
+            s_detail_open = false;
+        }
+        return;
+    }
+    if (ui_diag_visible()) {
+        (void)ui_diag_touch(gesture, event->touch_x, event->touch_y);
+        return;
+    }
     /* Auswahl des Zifferblatt-Layouts: alle Gesten gehen an sie. */
     if (ui_face_picker_visible()) {
         ui_face_layout_t chosen = UI_FACE_INFO;
@@ -2666,8 +3563,6 @@ static void handle_touch(const app_event_t *event)
             ui_face_picker_touch(gesture, event->touch_x, event->touch_y, &chosen);
         if (action == UI_FACE_PICKER_CHOSEN) {
             choose_face_layout(chosen);
-        } else if (action == UI_FACE_PICKER_CANCELLED) {
-            haptic_pattern(1, 15, 0);
         }
         return;
     }
@@ -2678,39 +3573,43 @@ static void handle_touch(const app_event_t *event)
             ui_options_touch(gesture, event->touch_x, event->touch_y, &choice);
         if (action == UI_OPTIONS_CHOSEN) {
             choose_option(&choice);
-        } else if (action == UI_OPTIONS_CLOSED) {
-            haptic_pattern(1, 15, 0);
         }
         return;
     }
-    if (gesture == VOICE_BOARD_LONG_PRESS) {
-        /* Nur noch auf dem Zifferblatt (s. o.): die Auswahl der Layouts. */
+    if (gesture == VOICE_BOARD_LONG_PRESS && !ui_control_visible() && !ui_cards_visible()) {
+        /* Auf dem Zifferblatt (s. o.): die Auswahl der Layouts. */
         ui_face_picker_show((ui_face_layout_t)s_face_layout);
-        haptic_pattern(1, 40, 0);
+        haptic(VOICE_HAPTIC_ATTENTION);
         return;
     }
     /*
-     * Zurueck-Geste vom linken Rand (Paket G): Ein Wischen nach rechts, das
-     * am linken Rand beginnt, geht ueberall eine Ebene zurueck -- Karten,
-     * Wetter und Kontrollzentrum aufs Zifferblatt, der Verlauf ebenso. Auf
-     * dem Zifferblatt selbst gibt es nichts, wohin; dort bleibt es das
-     * normale Wischen nach rechts (in den Verlauf).
+     * Vom linken Rand nach rechts im Verlauf (Paket G): auf einen Schlag
+     * zurueck aufs Zifferblatt, statt Eintrag fuer Eintrag nach links. Seit
+     * Paket J (0.5.0) nur noch dort -- auf Karten und im Kontrollzentrum ist
+     * jedes Wischen nach rechts ohnehin "zurueck".
      */
     if (gesture == VOICE_BOARD_SWIPE_RIGHT && event->touch_x < BACK_EDGE_PX &&
-        (ui_control_visible() || ui_cards_visible() || ui_status_in_history())) {
-        ui_control_hide();
-        ui_cards_hide();
+        !ui_control_visible() && !ui_cards_visible() && ui_status_in_history()) {
         ui_status_show_home();
         return;
     }
     if (ui_control_visible()) {
-        if (gesture == VOICE_BOARD_TAP) {
+        if (gesture == VOICE_BOARD_TAP || gesture == VOICE_BOARD_LONG_PRESS) {
             const int tile = ui_control_tile_at(event->touch_x, event->touch_y);
-            if (tile >= 0) {
+            if (tile == UI_CONTROL_BATTERY) {
+                /*
+                 * Diagnose (0.5.0, Punkt 36): langer Druck auf "Akku" -- und
+                 * das Tippen, das dort bisher nichts tat. Die Seite liegt ueber
+                 * dem Kontrollzentrum; zurueck fuehrt wieder dorthin.
+                 */
+                ui_diag_show(build_diag_text());
+                haptic(VOICE_HAPTIC_ATTENTION);
+            } else if (tile >= 0) {
                 handle_control_tile(tile);
             }
         } else if (gesture == VOICE_BOARD_SWIPE_UP ||
-                   gesture == VOICE_BOARD_SWIPE_DOWN) {
+                   gesture == VOICE_BOARD_SWIPE_RIGHT) {
+            /* Nach oben schiebt die Ebene zurueck, nach rechts ist zurueck (0.5.0). */
             ui_control_hide();
         }
         return;
@@ -2728,64 +3627,28 @@ static void handle_touch(const app_event_t *event)
     }
     if (ui_cards_visible()) {
         ui_cards_hit_t hit;
+        memset(&hit, 0, sizeof(hit));
         const ui_cards_action_t action = ui_cards_touch(gesture, event->touch_x,
                                                         event->touch_y, &hit);
-        if (action == UI_CARDS_ITEM) {
-            if (voice_ble_send_item(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
-                haptic_pattern(1, 40, 0);
-                /*
-                 * Karten-Aktion als Verlaufseintrag (V5): "Erledigt: Muell
-                 * rausstellen" bzw. "Licht Kueche: An", mit den Koordinaten
-                 * fuer ein spaeteres `undo` aus dem Verlauf (15 Minuten).
-                 */
-                char line[UI_CARD_TEXT_LEN + 16];
-                if (hit.kind == UI_CARD_SWITCHES) {
-                    /* Ohne An/Aus (Option, Schloss) kennt die Uhr den Zielstand nicht. */
-                    snprintf(line, sizeof(line), "%s: %s", hit.text,
-                             !hit.binary ? "weiter" : hit.on ? "An" : "Aus");
-                } else {
-                    snprintf(line, sizeof(line), "Erledigt: %s", hit.text);
-                }
-                ui_status_history_add_card(line, (uint8_t)hit.kind, hit.rev, hit.index);
-            } else {
-                play_tone(AUDIO_TONE_CANCEL);
-            }
-        } else if (action == UI_CARDS_UNDO) {
-            ESP_LOGI(TAG, "Rueckgaengig: %s #%u", ui_cards_kind_name(hit.kind),
-                     (unsigned)hit.index);
-            if (voice_ble_send_undo(ui_cards_kind_name(hit.kind), hit.rev, hit.index) == ESP_OK) {
-                haptic_pattern(1, 30, 0);
-            } else {
-                play_tone(AUDIO_TONE_CANCEL);
-            }
-        } else if (action == UI_CARDS_CLOSE) {
-            /* Von Heute nach rechts oder nach unten: zurueck aufs Zifferblatt. */
-            ui_status_show_home();
-        } else if (action == UI_CARDS_OPTIONS) {
-            /*
-             * input_select (Flag `s`, 0.4.5): die Bruecke nach den Optionen
-             * fragen und die Auswahl gleich oeffnen ("Laedt ..."). Ohne
-             * Bruecke kommt nichts -- dann bleibt die Karte, mit Fehlerton.
-             */
-            if (voice_ble_send_options_request(ui_cards_kind_name(hit.kind), hit.rev,
-                                               hit.index) == ESP_OK) {
-                note_ble_transfer();
-                ui_options_open(hit.kind, hit.rev, hit.index, hit.text);
-                haptic_pattern(1, 20, 0);
-            } else {
-                play_tone(AUDIO_TONE_CANCEL);
-            }
-        } else if (action == UI_CARDS_SELECT) {
-            /* Heute: Zeile markiert, OK-Chip steht -- ein kurzer Stoss sagt das. */
-            haptic_pattern(1, 20, 0);
-        } else if (action == UI_CARDS_END) {
-            /* Rechts von Wetter kommt nichts mehr: ein kurzer Stoss sagt das. */
-            haptic_pattern(1, 15, 0);
-        }
+        handle_cards_action(action, &hit);
         return;
     }
     switch ((voice_board_gesture_t)gesture) {
     case VOICE_BOARD_TAP: {
+        /*
+         * Zifferblatt-Zeile mit Art (0.5.0, Punkt 13): Aufgabe, Muell und
+         * Termin oeffnen Heute, Wetter die Wetterkarte. Ohne `kinds` (oder
+         * "other") bleibt das Tippen, was es war.
+         */
+        if (ui_status_face_shown() && cards_allowed()) {
+            const ui_face_hit_t line = ui_status_face_hit_at(event->touch_x, event->touch_y);
+            if (line != UI_FACE_HIT_NONE && line != UI_FACE_HIT_OTHER) {
+                ui_cards_show(line == UI_FACE_HIT_WEATHER ? UI_CARD_WEATHER : UI_CARD_TODAY);
+                note_ble_transfer();
+                (void)voice_ble_send_glance_request();
+                break;
+            }
+        }
         char choice[UI_STATUS_CHOICE_LEN];
         const int index = ui_status_choice_at(event->touch_x, event->touch_y,
                                               choice, sizeof(choice));
@@ -2805,7 +3668,7 @@ static void handle_touch(const app_event_t *event)
             play_tone(AUDIO_TONE_CANCEL);
             break;
         }
-        haptic_pattern(1, 30, 0);
+        haptic(VOICE_HAPTIC_SUCCESS);
         apply_app_ui_state("thinking", "", "");
         break;
     }
@@ -2832,21 +3695,17 @@ static void handle_touch(const app_event_t *event)
         ui_status_browse_history();
         ui_status_set_mood(UI_STATUS_MOOD_LOOK_LEFT, 1200);
         break;
+    /*
+     * Oben/unten scrollt nur (Paket J, 0.5.0): eine lange Antwort Ausschnitt
+     * fuer Ausschnitt; wo es nichts zu scrollen gibt, tut die Geste nichts.
+     * Bis 0.4.6 ging "nach unten" aufs Zifferblatt und "nach oben" zu den
+     * Karten -- dieselben Gesten scrollten auf den Karten.
+     */
     case VOICE_BOARD_SWIPE_DOWN:
-        ui_status_show_home();
+        (void)ui_status_answer_scroll(-1);
         break;
     case VOICE_BOARD_SWIPE_UP:
-        if (!cards_allowed()) {
-            break;
-        }
-        /*
-         * Hoch zu den Karten (Heute, Einkauf, Zuhause). Was dort steht, kam
-         * mit dem letzten Abgleich; die Bitte um einen frischen kostet
-         * nichts und zieht die Karte nach, sobald er da ist.
-         */
-        ui_cards_show(UI_CARD_TODAY);
-        note_ble_transfer();
-        (void)voice_ble_send_glance_request();
+        (void)ui_status_answer_scroll(1);
         break;
     default:
         break;
@@ -2873,6 +3732,13 @@ static void app_event_task(void *arg)
             ESP_LOGI(TAG, "button talk down");
             note_user_input();
 #if CONFIG_VOICE_BOARD_WATCH206
+            if (s_watch_locked && !s_recording) {
+                /* Gesperrt (Punkt 32): Der Server nimmt nichts an -- nur Fehler-Haptik. */
+                ESP_LOGI(TAG, "Sprechtaste, aber gesperrt");
+                haptic(VOICE_HAPTIC_ERROR);
+                ui_status_show_home();
+                break;
+            }
             if (!s_recording && ui_status_transcript_cancellable()) {
                 /*
                  * Sprechtaste kurz waehrend der Frist: Abbrechen, keine neue
@@ -2921,36 +3787,53 @@ static void app_event_task(void *arg)
                     (void)voice_ble_send_button_click("primary", 0, 0);
                     break;
                 }
-                s_primary_session_id = start_recording();
-                if (s_primary_session_id == 0) {
-                    s_primary_down_us = 0;
-                    if (!voice_ble_is_ready() && !s_ota_updating) {
-                        /*
-                         * Keine Bruecke: Bisher geschah dann sichtbar nichts
-                         * -- start_recording() schrieb nur ins Log. Auf der
-                         * Waveshare-Uhr sah das aus wie eine tote Taste.
-                         */
-                        ui_status_set_not_connected();
-                        play_tone(AUDIO_TONE_CANCEL);
-                    }
+#if CONFIG_VOICE_BOARD_WATCH206
+                if (s_interaction_mode == INTERACTION_MODE_HOLD_TO_TALK) {
+                    /* Erst nach TALK_HOLD_MS (APP_EVENT_TALK_LONG) beginnt die Aufnahme. */
+                    s_talk_armed = true;
                     break;
                 }
-                esp_err_t primary_down_err = s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK
-                    ? voice_ble_send_button_click("primary", 0, s_primary_session_id)
-                    : voice_ble_send_button_down("primary", s_primary_session_id);
-                if (s_primary_session_id != 0 && primary_down_err != ESP_OK) {
-                    (void)stop_recording();
-                    s_primary_session_id = 0;
-                    apply_app_ui_state("ready", "", "");
-                }
+#endif
+                begin_primary_recording();
             }
             break;
+#if CONFIG_VOICE_BOARD_WATCH206
+        case APP_EVENT_TALK_LONG:
+            if (!s_talk_armed || s_recording) {
+                break;
+            }
+            s_talk_armed = false;
+            if (!voice_board_talk_button_pressed()) {
+                /* Das Loslassen ist unterwegs: kein Halten, keine Aufnahme. */
+                s_primary_down_us = 0;
+                break;
+            }
+            ESP_LOGI(TAG, "button talk held -> Aufnahme");
+            /* Die Haltedauer zaehlt ab hier, nicht ab dem Druecken. */
+            s_primary_down_us = esp_timer_get_time();
+            begin_primary_recording();
+            break;
+#endif
         case APP_EVENT_TALK_UP:
             ESP_LOGI(TAG, "button talk up");
             note_activity();
             if (s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK) {
                 break;
             }
+#if CONFIG_VOICE_BOARD_WATCH206
+            if (s_talk_armed) {
+                /*
+                 * Kurz gedrueckt: keine Aufnahme, also auch kein "Zu kurz".
+                 * Seit 0.5.0 ist BOOT kurz in Listen "OK" und auf dem
+                 * Zifferblatt "letzte Antwort" (Punkte 11, 12).
+                 */
+                ESP_LOGI(TAG, "Sprechtaste kurz");
+                s_talk_armed = false;
+                s_primary_down_us = 0;
+                handle_boot_short();
+                break;
+            }
+#endif
             if (!s_recording && s_primary_session_id == 0 && s_primary_down_us == 0) {
                 break;
             }
@@ -3034,8 +3917,7 @@ static void app_event_task(void *arg)
                 break;
             }
             /* Nichts darf die Frist verdecken: Ebenen und Taschenlampe weg. */
-            ui_face_picker_hide();
-            ui_options_hide();
+            hide_overlays();
             ui_control_hide();
             ui_cards_hide();
             if (ui_torch_on()) {
@@ -3073,6 +3955,25 @@ static void app_event_task(void *arg)
             play_tone(AUDIO_TONE_CANCEL);
 #endif
             break;
+#if CONFIG_VOICE_BOARD_WATCH206
+        case APP_EVENT_REMINDER:
+            handle_reminder(&event);
+            break;
+        case APP_EVENT_UPDATE_AVAILABLE:
+            handle_update_available(event.text);
+            break;
+        case APP_EVENT_BRIDGE_INFO:
+            copy_utf8_clipped(s_bridge_version, event.text, sizeof(s_bridge_version));
+            s_bridge_server_ok = event.size != 0;
+            s_bridge_known = true;
+            if (ui_diag_visible()) {
+                ui_diag_update(build_diag_text());
+            }
+            break;
+        case APP_EVENT_LOCK_STATE:
+            apply_lock_state(event.size != 0);
+            break;
+#endif
         case APP_EVENT_BLE_SETTLE:
             if (!s_recording && !s_ota_updating && !voice_ble_ota_is_active()) {
                 (void)voice_ble_request_slow_interval();
@@ -3096,7 +3997,7 @@ static void app_event_task(void *arg)
                 break;
             }
             if (voice_ble_send_action() == ESP_OK) {
-                haptic_pattern(2, 40, 60);
+                haptic(VOICE_HAPTIC_SUCCESS);
                 apply_app_ui_state("thinking", "", "");
             } else {
                 ui_status_set_not_connected();
@@ -3113,6 +4014,7 @@ static void app_event_task(void *arg)
             break;
         case APP_EVENT_BLE_DISCONNECTED:
             s_recording = false;
+            ui_status_set_mic_open(false);
             s_ota_updating = false;
             s_app_ui_state = APP_UI_STATE_READY;
             stop_host_response_timer();
@@ -3186,6 +4088,9 @@ static void app_event_task(void *arg)
 #if WRIST_WAKE_ENABLED
             note_activity();
             voice_ble_advertise_fast();
+#endif
+#if CONFIG_VOICE_BOARD_WATCH206
+            note_motion();
 #endif
             break;
         case APP_EVENT_TIME:
@@ -3303,9 +4208,12 @@ static void app_event_task(void *arg)
 }
 
 static esp_err_t init_gpio_button(gpio_num_t gpio_num, uint8_t active_level,
-                                  button_handle_t *button)
+                                  uint16_t long_press_ms, button_handle_t *button)
 {
-    const button_config_t button_config = {0};
+    /* 0 = Voreinstellung der Komponente (1,5 s). */
+    const button_config_t button_config = {
+        .long_press_time = long_press_ms,
+    };
     const button_gpio_config_t gpio_config = {
         .gpio_num = gpio_num,
         .active_level = active_level,
@@ -3322,13 +4230,19 @@ static esp_err_t init_buttons(void)
         return ESP_ERR_NO_MEM;
     }
 
+#if CONFIG_VOICE_BOARD_WATCH206
+    const uint16_t talk_long_ms = TALK_HOLD_MS;
+#else
+    const uint16_t talk_long_ms = 0;
+#endif
     esp_err_t err = init_gpio_button(VOICE_BOARD_PIN_BUTTON_TALK,
-                                     VOICE_BOARD_BUTTON_TALK_ACTIVE_LEVEL, &s_talk_button);
+                                     VOICE_BOARD_BUTTON_TALK_ACTIVE_LEVEL, talk_long_ms,
+                                     &s_talk_button);
     if (err != ESP_OK) {
         return err;
     }
     err = init_gpio_button(VOICE_BOARD_PIN_BUTTON_BROWSE,
-                           VOICE_BOARD_BUTTON_BROWSE_ACTIVE_LEVEL, &s_browse_button);
+                           VOICE_BOARD_BUTTON_BROWSE_ACTIVE_LEVEL, 0, &s_browse_button);
     if (err != ESP_OK) {
         return err;
     }
@@ -3360,6 +4274,12 @@ static esp_err_t init_buttons(void)
      */
     err = iot_button_register_cb(s_browse_button, BUTTON_LONG_PRESS_START, NULL,
                                  browse_button_long_cb, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+    /* Sprechtaste: Aufnahme erst nach TALK_HOLD_MS Halten. */
+    err = iot_button_register_cb(s_talk_button, BUTTON_LONG_PRESS_START, NULL,
+                                 talk_button_long_cb, NULL);
     if (err != ESP_OK) {
         return err;
     }
@@ -3620,6 +4540,16 @@ static void update_battery_status(void)
         s_battery_percent = level;
         ui_status_set_battery(level, charging, usb_powered);
 #if CONFIG_VOICE_BOARD_WATCH206
+        /* Kabel ab (Punkt 31): Wer die Uhr vom Ladeplatz nimmt, entsperrt die Schloesser neu. */
+        if (external_power_changed && !charging && !usb_powered) {
+            s_pin_unlocked = false;
+        }
+        /* Laufzeit fuer einen spaeteren Absturz-Bericht (Punkt 35). */
+        s_uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+        s_uptime_magic = UPTIME_MAGIC;
+        if (ui_diag_visible()) {
+            ui_diag_update(build_diag_text());
+        }
         update_battery_estimate(level, charging || usb_powered);
         battery_log_sample(level, charging, usb_powered);
         update_night_mode();
@@ -3673,12 +4603,71 @@ static const char *reset_reason_text(esp_reset_reason_t reason)
     }
 }
 
+#if CONFIG_VOICE_BOARD_WATCH206
+/*
+ * Absturz-Bericht (0.5.0, Punkt 35): Nach Panic, Watchdog oder Brownout
+ * legt die Uhr einmal `crash_report` bereit; voice_ble schickt ihn direkt
+ * nach `device_info`, die Bruecke reicht ihn an den Server. Hier wird nur
+ * ein Text gesetzt -- nichts liest den Flash, nichts wartet, der Start
+ * laeuft wie immer (0.4.1 hatte eine Bootschleife). Die Laufzeit stammt aus
+ * dem RTC-Speicher des vorigen Starts, auf zehn Sekunden genau; die
+ * Absturzadresse fehlt, weil es ohne Core-Dump-Partition keine gibt.
+ */
+static void prepare_crash_report(esp_reset_reason_t reason)
+{
+    const char *name = NULL;
+    switch (reason) {
+    case ESP_RST_PANIC:
+        name = "panic";
+        break;
+    case ESP_RST_TASK_WDT:
+        name = "task_wdt";
+        break;
+    case ESP_RST_INT_WDT:
+        name = "int_wdt";
+        break;
+    case ESP_RST_WDT:
+        name = "wdt";
+        break;
+    case ESP_RST_BROWNOUT:
+        name = "brownout";
+        break;
+    default:
+        break;
+    }
+    const bool uptime_valid = s_uptime_magic == UPTIME_MAGIC;
+    const uint32_t uptime_s = s_uptime_s;
+    /* Ab jetzt zaehlt dieser Start. */
+    s_uptime_magic = UPTIME_MAGIC;
+    s_uptime_s = 0;
+    if (!name) {
+        return;
+    }
+    const esp_app_desc_t *app = esp_app_get_description();
+    char json[160];
+    if (uptime_valid) {
+        snprintf(json, sizeof(json),
+                 "{\"event\":\"crash_report\",\"reason\":\"%s\",\"fw\":\"%.32s\",\"uptime_s\":%lu}",
+                 name, app ? app->version : "?", (unsigned long)uptime_s);
+    } else {
+        snprintf(json, sizeof(json), "{\"event\":\"crash_report\",\"reason\":\"%s\",\"fw\":\"%.32s\"}",
+                 name, app ? app->version : "?");
+    }
+    ESP_LOGW(TAG, "Absturz-Bericht bereit: %s", json);
+    voice_ble_set_boot_report(json);
+}
+#endif
+
 void app_main(void)
 {
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(TAG, "boot reset_reason=%d (%s) wakeup_cause=%d ext1_status=0x%llx",
              reset_reason, reset_reason_text(reset_reason), esp_sleep_get_wakeup_cause(),
              (unsigned long long)esp_sleep_get_ext1_wakeup_status());
+#if CONFIG_VOICE_BOARD_WATCH206
+    s_reset_reason = reset_reason;
+    prepare_crash_report(reset_reason);
+#endif
 
     ESP_ERROR_CHECK(init_power_management());
     ESP_ERROR_CHECK(voice_board_init());

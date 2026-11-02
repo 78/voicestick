@@ -9,6 +9,11 @@
  * Antwort der Bruecke ("Laedt ..."), anderthalb Sekunden "Keine Antwort",
  * zehn Sekunden ohne Eingabe bei stehenden Optionen. Er laeuft im
  * LVGL-Strang mit gehaltener Sperre und schreibt nichts in den NVS.
+ *
+ * Gesten seit Paket J (0.5.0) nach der einen Regel: rechts wischen schliesst
+ * (ueberall, nicht mehr nur vom linken Rand), oben/unten scrollt nur (am
+ * Anfang schloss "nach unten" bis 0.4.6), und links oben steht ein sichtbares
+ * Zurueck "‹" (ui_chrome.h), das ebenfalls schliesst.
  */
 #include "ui_options.h"
 
@@ -19,13 +24,12 @@
 #include "voice_board.h"
 
 #if CONFIG_VOICE_BOARD_WATCH206
+#include "ui_chrome.h"
 #include "ui_layout_watch206.h"
 
 #define OPT_IDLE_MS 10000
 #define OPT_ANSWER_MS 3000
 #define OPT_NO_ANSWER_MS 1500
-/* Bis hierher zaehlt ein Wischen nach rechts als "vom linken Rand": zurueck (wie main.c). */
-#define OPT_BACK_EDGE_PX 30
 
 /* Titel unter der Kopfzeile (dort steht die kleine Uhrzeit), Liste darunter. */
 #define OPT_TITLE_Y (HEADER_H + 6)
@@ -44,12 +48,8 @@ typedef enum {
     OPT_SHOWN,
 } opt_state_t;
 
-/* Dieselben Stufen wie die Kartenzeilen: klein 20, normal 23, gross 26. */
-static const lv_font_t *const LEVEL_FONT[3] = {
-    &todoteck_watch_font_20, &todoteck_watch_font_23, &todoteck_watch_font_26,
-};
-
 static lv_obj_t *s_root;
+static lv_obj_t *s_back;
 static lv_obj_t *s_title;
 static lv_obj_t *s_message;
 static lv_obj_t *s_list;
@@ -89,18 +89,16 @@ static void create_locked(void)
     lv_obj_set_style_bg_color(s_root, lv_color_hex(0x000000), 0);
     lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
 
+    /* Das sichtbare Zurueck links oben; der Titel haelt auf beiden Seiten Abstand davon. */
+    s_back = ui_back_create(s_root);
+
     s_title = lv_label_create(s_root);
-    lv_obj_set_style_text_font(s_title, &todoteck_watch_font_26, 0);
     lv_obj_set_style_text_color(s_title, lv_color_hex(0x2ecc71), 0);
     lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_title, LV_LABEL_LONG_DOT);
-    lv_obj_set_size(s_title, CONTENT_W - 2 * UI_HEADER_INSET_X,
-                    lv_font_get_line_height(&todoteck_watch_font_26));
-    lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, OPT_TITLE_Y);
     lv_label_set_text(s_title, "");
 
     s_message = lv_label_create(s_root);
-    lv_obj_set_style_text_font(s_message, UI_FONT_QUESTION, 0);
     lv_obj_set_style_text_color(s_message, lv_color_hex(0x9aa3ad), 0);
     lv_obj_align(s_message, LV_ALIGN_TOP_MID, 0, OPT_LIST_TOP + list_h() / 3);
     lv_label_set_text(s_message, "");
@@ -153,6 +151,16 @@ static void show_obj(lv_obj_t *o, bool on)
     }
 }
 
+/* Titel und Hinweis in der Typo-Skala -- vor jedem Oeffnen, die Groesse kann sich geaendert haben. */
+static void apply_fonts_locked(void)
+{
+    const lv_font_t *title = UI_TYPO(UI_TYPO_TITLE);
+    lv_obj_set_style_text_font(s_title, title, 0);
+    lv_obj_set_size(s_title, CONTENT_W - 2 * UI_BACK_RESERVE, lv_font_get_line_height(title));
+    lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, OPT_TITLE_Y);
+    lv_obj_set_style_text_font(s_message, UI_TYPO(UI_TYPO_BODY), 0);
+}
+
 static void set_message_locked(const char *text)
 {
     char clean[32];
@@ -163,7 +171,7 @@ static void set_message_locked(const char *text)
 
 static void render_rows_locked(void)
 {
-    const lv_font_t *font = LEVEL_FONT[ui_status_font_level() % 3];
+    const lv_font_t *font = UI_TYPO(UI_TYPO_BODY);
     const int32_t line_h = lv_font_get_line_height(font);
     int32_t h = line_h + 2 * OPT_ROW_PAD;
     if (h < OPT_ROW_MIN_H) {
@@ -300,6 +308,7 @@ void ui_options_open(ui_card_kind_t kind, uint16_t rev, uint8_t index, const cha
     s_count = 0;
     s_current = -1;
     s_content_h = 0;
+    apply_fonts_locked();
     lv_label_set_text(s_title, s_title_text);
     set_message_locked("Lädt …");
     lv_obj_remove_flag(s_message, LV_OBJ_FLAG_HIDDEN);
@@ -402,6 +411,12 @@ ui_options_action_t ui_options_touch(int gesture, int16_t x, int16_t y,
     switch ((voice_board_gesture_t)gesture) {
     case VOICE_BOARD_TAP:
     case VOICE_BOARD_LONG_PRESS: {
+        if (ui_back_hit(s_back, x, y)) {
+            /* Das sichtbare Zurueck: schliesst, auch waehrend "Laedt ...". */
+            hide_locked();
+            action = UI_OPTIONS_CLOSED;
+            break;
+        }
         if (!shown) {
             /* Noch keine Optionen: Tippen tut nichts, die Frist laeuft weiter. */
             break;
@@ -436,23 +451,16 @@ ui_options_action_t ui_options_touch(int gesture, int16_t x, int16_t y,
         }
         break;
     case VOICE_BOARD_SWIPE_DOWN:
-        /* Wie bei den Karten: erst zurueckscrollen, am Anfang eine Ebene zurueck. */
-        if (shown && scroll_page_locked(-1)) {
+        /* Wie bei den Karten: nur zurueckscrollen, am Anfang nichts (0.5.0). */
+        if (shown) {
+            (void)scroll_page_locked(-1);
             arm_timer_locked(OPT_IDLE_MS);
-            break;
         }
-        hide_locked();
-        action = UI_OPTIONS_CLOSED;
         break;
     case VOICE_BOARD_SWIPE_RIGHT:
-        if (x < OPT_BACK_EDGE_PX) {
-            hide_locked();
-            action = UI_OPTIONS_CLOSED;
-            break;
-        }
-        if (shown) {
-            arm_timer_locked(OPT_IDLE_MS);
-        }
+        /* Rechts ist zurueck -- ueberall, nicht mehr nur vom linken Rand. */
+        hide_locked();
+        action = UI_OPTIONS_CLOSED;
         break;
     default:
         if (shown) {

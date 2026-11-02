@@ -3,9 +3,10 @@
 /*
  * Die Karten der Uhr: Heute, Einkauf, Zuhause, Wetter.
  *
- * Erreichbar vom Ziffernblatt mit einem Wischen nach links (oder nach oben);
- * links/rechts wechselt die Karte, nach oben scrollt die Liste weiter, nach
- * unten zurueck -- am Anfang eine Ebene zurueck. Ein Tippen auf eine Zeile
+ * Erreichbar vom Ziffernblatt mit einem Wischen nach links; links/rechts
+ * wechselt die Karte (rechts von Heute aus: zurueck aufs Zifferblatt), nach
+ * oben scrollt die Liste weiter, nach unten zurueck -- und nur das (0.5.0,
+ * vorher am Anfang eine Ebene zurueck). Ein Tippen auf eine Zeile
  * hakt sie ab (Einkauf) oder schaltet sie um (Zuhause) -- ausgefuehrt von
  * der Bruecke, die Karte zeigt es sofort. Auf Heute (und bei Schaltern mit
  * Flag `c`) markiert das Tippen die Zeile nur; ausgefuehrt wird erst mit
@@ -46,6 +47,8 @@ typedef enum {
     UI_CARDS_END,    /* am Ende der Reihe weitergewischt -- nichts mehr rechts */
     UI_CARDS_SELECT, /* Heute: Zeile markiert, wartet auf "OK" -- noch nichts senden */
     UI_CARDS_OPTIONS, /* Schalter mit Flag `s` (input_select, 0.4.5): Auswahl oeffnen -- `hit` sagt welche */
+    UI_CARDS_SHEET,  /* Heute, langer Druck auf eine Aufgabe (0.5.0): Aktionsblatt -- `hit` sagt welche */
+    UI_CARDS_RELOAD, /* "Neu laden" angetippt (0.5.0): `glance_request` schicken */
 } ui_cards_action_t;
 
 typedef struct {
@@ -60,6 +63,8 @@ typedef struct {
     char text[UI_CARD_TEXT_LEN];
     bool on;
     bool binary;
+    /* Ein Schloss (Flag `k`, 0.5.0): vor dem Senden fragt main.c nach der PIN, falls eine gesetzt ist. */
+    bool lock;
 } ui_cards_hit_t;
 
 /* "today", "shopping", "switches" -> Art; -1 bei Unbekanntem. */
@@ -76,7 +81,9 @@ void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part);
  * Streifen in Kalender-Blau statt Projektfarbe; "s" = Auswahl (0.4.5, nur
  * `switches`, ein input_select): Tippen oeffnet die Liste der Optionen
  * (ui_options.h) statt weiterzuschalten, ohne OK-Schritt, auch neben `c`;
- * ""/NULL = direkt.
+ * "l"/"w"/"f"/"k" (0.5.0, nur `switches`): Art des Geraets -- light,
+ * switch/input_boolean, fan, lock -- fuer das Symbol links in der Zeile;
+ * `k` fragt immer nach wie `c`. ""/NULL = direkt.
  */
 void ui_cards_add_item(ui_card_kind_t kind, const char *text, const char *aux,
                        const char *colour, const char *group, const char *flags);
@@ -104,3 +111,25 @@ void ui_cards_mark_sent(ui_card_kind_t kind, uint16_t rev, uint8_t index);
 
 /* Gesten (voice_board_gesture_t als int) und Lage des Fingers. */
 ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit_t *hit);
+
+/*
+ * Paket J, Teil 2 (0.5.0) -- nur die Uhr.
+ *
+ * BOOT kurz in einer Liste (Punkt 11): "OK" auf die markierte Zeile, als
+ * haette man den Chip getippt. UI_CARDS_ITEM mit `hit`, sonst UI_CARDS_NONE
+ * (nichts markiert, Wetterkarte, Karten zu).
+ */
+ui_cards_action_t ui_cards_confirm_selected(ui_cards_hit_t *hit);
+/*
+ * "Erledigt" aus dem Aktionsblatt: Zeile `index` abhaken wie nach dem OK --
+ * nur, wenn die Karte noch zu sehen ist und dieselbe Liste traegt. `true`
+ * mit `hit`, sonst `false` (dann ist nichts geschehen).
+ */
+bool ui_cards_check_off(ui_card_kind_t kind, uint16_t rev, uint8_t index, ui_cards_hit_t *hit);
+/*
+ * Fuer `context` (Punkt 16): Welche Karte ist offen, welcher Stand, welche
+ * Zeile markiert (-1: keine)? `false`, wenn keine Karte zu sehen ist.
+ */
+bool ui_cards_context(ui_card_kind_t *kind, uint16_t *rev, int *index);
+/* Gesperrt (Punkt 32): alle Listen und das Wetter vergessen, wie vor der ersten Verbindung. */
+void ui_cards_clear_all(void);

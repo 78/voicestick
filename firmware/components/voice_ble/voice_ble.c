@@ -536,6 +536,11 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
     {0},
 };
 
+/* Einmal nach `device_info` (voice_ble_set_boot_report); leer = nichts. */
+static char s_boot_report[160];
+
+static esp_err_t send_state_json(const char *json);
+
 static int gap_event_cb(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
@@ -626,6 +631,10 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
                 esp_err_t rc = voice_ble_send_device_info();
                 if (rc != ESP_OK) {
                     ESP_LOGW(TAG, "device_info send failed err=0x%x", rc);
+                } else if (s_boot_report[0] && send_state_json(s_boot_report) == ESP_OK) {
+                    /* Einmal je Start: nach dem ersten Erfolg vergessen. */
+                    ESP_LOGI(TAG, "boot report sent: %s", s_boot_report);
+                    s_boot_report[0] = '\0';
                 }
             }
         }
@@ -1024,6 +1033,23 @@ esp_err_t voice_ble_send_state_json(const char *json)
     return send_state_json(json);
 }
 
+void voice_ble_set_boot_report(const char *json)
+{
+    if (!json || strlen(json) >= sizeof(s_boot_report)) {
+        s_boot_report[0] = '\0';
+        return;
+    }
+    strlcpy(s_boot_report, json, sizeof(s_boot_report));
+}
+
+esp_err_t voice_ble_rssi(int8_t *rssi)
+{
+    if (!rssi || !s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ble_gap_conn_rssi(s_conn_handle, rssi) == 0 ? ESP_OK : ESP_FAIL;
+}
+
 esp_err_t voice_ble_send_device_info(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
@@ -1052,13 +1078,14 @@ esp_err_t voice_ble_send_choice(uint8_t index, const char *text)
      * zurueck. Anfuehrungszeichen und Backslash wuerden das JSON brechen --
      * sie werden zu Leerzeichen, statt hier einen Escaper zu pflegen.
      */
-    char clean[32];
+    char clean[64];
     size_t n = 0;
     for (const char *p = text ? text : ""; *p && n + 1 < sizeof(clean); p++) {
         clean[n++] = (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) ? ' ' : *p;
     }
     clean[n] = '\0';
-    char json[96];
+    /* Seit 0.5.0 auch Vorschlaege bis 32 Zeichen (UTF-8 bis rund 40 Byte): 64 statt 32. */
+    char json[128];
     snprintf(json, sizeof(json), "{\"event\":\"choice\",\"index\":%u,\"text\":\"%s\"}",
              (unsigned)index, clean);
     ESP_LOGI(TAG, "choice %u: %s", (unsigned)index, clean);

@@ -6,9 +6,14 @@
 
 #include "esp_err.h"
 
-/* Antwortmoeglichkeiten auf eine Rueckfrage: hoechstens drei, je 15 Byte Text. */
+/*
+ * Antwortmoeglichkeiten auf eine Rueckfrage: hoechstens drei. Bis 0.4.6 je
+ * 15 Byte ("Ja", "Nein"); seit 0.5.0 (Punkt 43) auch Vorschlaege statt
+ * "Nicht verstanden" mit bis zu 32 Zeichen -- in UTF-8 bis rund 40 Byte.
+ * Was nicht nebeneinander passt, steht untereinander in zwei Zeilen.
+ */
 #define UI_STATUS_CHOICES_MAX 3
-#define UI_STATUS_CHOICE_LEN 16
+#define UI_STATUS_CHOICE_LEN 41
 
 /* Zeilen unter der Uhrzeit (nur die Uhr): hoechstens drei, je 56 Byte (bis 0.3.6: 40). */
 #define UI_STATUS_FACE_LINES 3
@@ -108,7 +113,8 @@ void ui_status_show_home(void);
  * keiner). Die Uhr fuehrt den Countdown selbst nach.
  */
 void ui_status_set_face(const char (*lines)[UI_STATUS_FACE_LEN], uint8_t count,
-                        const char *event_title, int64_t event_start);
+                        const char *event_title, int64_t event_start,
+                        const uint8_t *kinds, uint8_t kind_count);
 /* Teckis Stimmung fuer `duration_ms`, danach wieder die Szene. */
 void ui_status_set_mood(ui_status_mood_t mood, uint32_t duration_ms);
 void ui_status_set_choices(const char (*choices)[UI_STATUS_CHOICE_LEN], uint8_t count);
@@ -163,10 +169,11 @@ void ui_status_set_battery_remaining(const char *line);
 void ui_status_set_night_mode(bool on);
 /*
  * Nachtmodus (0.4.4, nur die Uhr wertet es aus): im Fenster `watch_settings.night`
- * zeigt das Zifferblatt -- alle drei Layouts -- alles in gedaempftem Rot.
- * Andere Szenen bleiben farbig; die Helligkeit deckelt main.c.
+ * zeigt das Zifferblatt -- alle drei Layouts -- alles in gedaempftem
+ * Bernstein (bis 0.4.6 Rot; Rot bleibt seit 0.5.0 den Warnungen). Andere
+ * Szenen bleiben farbig; die Helligkeit deckelt main.c.
  */
-void ui_status_set_night_red(bool on);
+void ui_status_set_night_tint(bool on);
 
 /*
  * Zifferblatt-Layouts (0.4.4): `watch_settings.face` und die Auswahl am
@@ -217,3 +224,67 @@ void ui_status_set_partial_text(const char *text);
 void ui_status_set_ota_progress(uint32_t written, uint32_t size);
 void ui_status_set_ota_rebooting(void);
 void ui_status_set_error(const char *message);
+
+/*
+ * Paket J (0.5.0), nur die Uhr -- auf dem StickS3 tun die Funktionen nichts.
+ *
+ * Lautlos und "Dunkel & still" sichtbar: je ein kleines Zeichen in der
+ * Kopfzeile jeder Szene (auch auf dem Zifferblatt), solange es an ist.
+ */
+void ui_status_set_quiet_marks(bool silent, bool still);
+/* Roter Punkt oben mittig, solange das Mikrofon offen ist -- in jeder Szene. */
+void ui_status_set_mic_open(bool open);
+
+/*
+ * Renderzeit (Punkt 47): zusammengefasst ueber rund zehn Sekunden, in denen
+ * gezeichnet wurde -- fuer die Diagnose-Seite. `false`, solange noch kein
+ * Fenster voll ist (oder auf dem StickS3).
+ */
+typedef struct {
+    uint32_t frames;     /* Bilder im Fenster */
+    uint16_t window_s;   /* Laenge des Fensters in Sekunden */
+    uint16_t fps_x10;    /* Bilder je Sekunde mal zehn */
+    uint16_t avg_ms_x10; /* mittlere Zeit je Bild in ms mal zehn */
+    uint16_t max_ms;     /* laengstes Bild im Fenster */
+} ui_render_stats_t;
+bool ui_status_render_stats(ui_render_stats_t *out);
+
+/*
+ * Lange Antwort (Punkt 42): Passt die ganze Antwort nicht auf den Schirm,
+ * steht sie in Ausschnitten mit Seitenpunkten darunter. Einen Ausschnitt
+ * weiter (+1) oder zurueck (-1); `false`, wenn es in der Richtung keinen
+ * gibt -- dann tut die Geste nichts.
+ */
+bool ui_status_answer_scroll(int dir);
+
+/*
+ * Zifferblatt-Zeilen antippbar (Punkt 13): `face.kinds` der Bruecke, parallel
+ * zu `lines`, als diese Werte (`kinds` in ui_status_set_face; 0 Eintraege =
+ * keine, dann ist keine Zeile ein Ziel -- wie bis 0.4.6). Der Termin-
+ * Countdown gilt mit `kinds` als UI_FACE_HIT_EVENT.
+ */
+typedef enum {
+    UI_FACE_HIT_NONE,
+    UI_FACE_HIT_TASK,
+    UI_FACE_HIT_WEATHER,
+    UI_FACE_HIT_WASTE,
+    UI_FACE_HIT_EVENT,
+    UI_FACE_HIT_OTHER,
+} ui_face_hit_t;
+/* "task", "weather", ... -> Art; Unbekanntes wird UI_FACE_HIT_OTHER. */
+ui_face_hit_t ui_face_hit_from_name(const char *name);
+/* Welche Zifferblatt-Zeile liegt unter dem Finger? NONE ausserhalb oder ohne `kinds`. */
+ui_face_hit_t ui_status_face_hit_at(int16_t x, int16_t y);
+/*
+ * Gesperrt (Punkt 32): Die Bruecke meldet, dass der Server das Geraete-Token
+ * ablehnt. Das Zifferblatt zeigt dann statt der Zeilen "Gesperrt -- in der
+ * App neu koppeln".
+ */
+void ui_status_set_locked(bool locked);
+/* Die juengste Antwort zeigen (BOOT kurz auf dem Zifferblatt, Punkt 12); ohne Verlauf die Bilanz. */
+void ui_status_show_latest(void);
+/*
+ * Ein Verlaufseintrag ohne Frage und ohne Rueckgaengig (Erinnerungen,
+ * Punkt 19) -- die Szene aendert sich nicht.
+ */
+void ui_status_history_add_note(const char *line);

@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "sdkconfig.h"
 #include "ui_cards.h"
@@ -22,6 +23,8 @@
 typedef struct {
     uint16_t rev;
     bool received;
+    /* Wann Teil 0 kam (UTC-Sekunden, 0 = nie) -- fuer das Alter in der Kopfzeile (0.5.0). */
+    int64_t received_at;
     char now[W_TEXT_LEN];
     char today[W_TEXT_LEN];
     char rain[W_TEXT_LEN];
@@ -53,6 +56,7 @@ void ui_weather_begin(uint16_t rev, const char *now, const char *today, const ch
     memset(&s_w, 0, sizeof(s_w));
     s_w.rev = rev;
     s_w.received = true;
+    s_w.received_at = (int64_t)time(NULL);
     ui_status_copy_display_text(s_w.now, now ? now : "", sizeof(s_w.now));
     ui_status_copy_display_text(s_w.today, today ? today : "", sizeof(s_w.today));
     ui_status_copy_display_text(s_w.rain, rain ? rain : "", sizeof(s_w.rain));
@@ -123,6 +127,21 @@ uint8_t ui_weather_page_count(void)
     return (s_w.pollen_count > 0 || s_w.warning_count > 0) ? 3 : 2;
 }
 
+int64_t ui_weather_received_at(void)
+{
+    return s_w.received ? s_w.received_at : 0;
+}
+
+uint16_t ui_weather_rev(void)
+{
+    return s_w.rev;
+}
+
+void ui_weather_clear_locked(void)
+{
+    memset(&s_w, 0, sizeof(s_w));
+}
+
 bool ui_weather_received(void)
 {
     return s_w.received;
@@ -150,6 +169,17 @@ bool ui_weather_take_new_warning_locked(void)
 #include "ui_layout_watch206.h"
 
 /*
+ * Schriften aus der Typo-Skala (Paket J): Kopfzeile, Regen, Stunden,
+ * Wetterwort und Sonne/Wind in Meta, der Tag und die Zeilen der Folgeseiten
+ * in Inhalt. Die Stundenzellen (115 px breit) und die Spalten der Tage sind
+ * auf hoechstens 20 bzw. 26 px ausgelegt -- Meta wird nie groesser als 20,
+ * Inhalt nie groesser als 26. Ausgenommen ist nur die Temperatur "jetzt" in
+ * der 30er: eine Anzeige-Ziffer wie die Uhrzeit.
+ */
+#define W_META UI_TYPO(UI_TYPO_META)
+#define W_BODY UI_TYPO(UI_TYPO_BODY)
+
+/*
  * Ein Vorrat an Labels, je Seite anders belegt (Schrift, Farbe, Lage, Text
  * setzt render). Seite 1 braucht 11, Seite 2 fuenf Zeilen zu dreien, Seite 3
  * bis zu sieben -- 16 Labels reichen fuer jede, und mehr Objekte kosten
@@ -172,7 +202,6 @@ void ui_weather_create_locked(lv_obj_t *parent)
         return;
     }
     s_head = lv_label_create(parent);
-    lv_obj_set_style_text_font(s_head, UI_FONT_SMALL, 0);
     lv_obj_set_style_text_color(s_head, lv_color_hex(0x9aa3ad), 0);
     lv_label_set_long_mode(s_head, LV_LABEL_LONG_DOT);
     lv_obj_set_width(s_head, CONTENT_W - 32);
@@ -180,7 +209,6 @@ void ui_weather_create_locked(lv_obj_t *parent)
     lv_obj_add_flag(s_head, LV_OBJ_FLAG_HIDDEN);
 
     s_warn = lv_label_create(parent);
-    lv_obj_set_style_text_font(s_warn, UI_FONT_QUESTION, 0);
     lv_obj_set_style_text_color(s_warn, lv_color_hex(0xe74c3c), 0);
     lv_label_set_long_mode(s_warn, LV_LABEL_LONG_DOT);
     lv_obj_set_width(s_warn, CONTENT_W - 32);
@@ -225,7 +253,7 @@ static void render_page_now(void)
         lv_label_set_text(s_warn, s_w.warnings[0]);
         lv_obj_align(s_warn, LV_ALIGN_TOP_MID, 0, y);
         lv_obj_remove_flag(s_warn, LV_OBJ_FLAG_HIDDEN);
-        y += lv_font_get_line_height(UI_FONT_QUESTION) + 4;
+        y += lv_font_get_line_height(W_BODY) + 4;
     }
     if (s_w.stale[0]) {
         char stand[24];
@@ -233,42 +261,42 @@ static void render_page_now(void)
         lv_label_set_text(s_head, stand);
         lv_obj_align(s_head, LV_ALIGN_TOP_MID, 0, y);
         lv_obj_remove_flag(s_head, LV_OBJ_FLAG_HIDDEN);
-        y += lv_font_get_line_height(UI_FONT_SMALL) + 4;
+        y += lv_font_get_line_height(W_META) + 4;
     }
     y += 6;
     put(used++, s_w.now, &todoteck_watch_font_30, white, 0, y, CONTENT_W, LV_TEXT_ALIGN_CENTER);
     y += lv_font_get_line_height(&todoteck_watch_font_30) + 6;
-    put(used++, s_w.today, &todoteck_watch_font_23, white, 0, y, CONTENT_W, LV_TEXT_ALIGN_CENTER);
-    y += lv_font_get_line_height(&todoteck_watch_font_23) + 6;
-    put(used++, s_w.rain, &todoteck_watch_font_20, rainy(s_w.rain) ? BLUE : grey, 0, y, CONTENT_W,
+    put(used++, s_w.today, W_BODY, white, 0, y, CONTENT_W, LV_TEXT_ALIGN_CENTER);
+    y += lv_font_get_line_height(W_BODY) + 6;
+    put(used++, s_w.rain, W_META, rainy(s_w.rain) ? BLUE : grey, 0, y, CONTENT_W,
         LV_TEXT_ALIGN_CENTER);
-    y += lv_font_get_line_height(&todoteck_watch_font_20) + 14;
+    y += lv_font_get_line_height(W_META) + 14;
     /* Stundenreihe 2 x 3: "12h 11°", Regenstunden blau. */
     const int32_t cell_w = (CONTENT_W - 32) / 3;
     for (int i = 0; i < s_w.hour_count && i < W_HOURS; i++) {
         char cell[16];
         snprintf(cell, sizeof(cell), "%s %s", s_w.hour_label[i], s_w.hour_temp[i]);
-        put(used++, cell, &todoteck_watch_font_20, s_w.hour_rain[i] ? BLUE : white,
-            16 + (i % 3) * cell_w, y + (i / 3) * (lv_font_get_line_height(&todoteck_watch_font_20) + 6),
+        put(used++, cell, W_META, s_w.hour_rain[i] ? BLUE : white,
+            16 + (i % 3) * cell_w, y + (i / 3) * (lv_font_get_line_height(W_META) + 6),
             cell_w, LV_TEXT_ALIGN_CENTER);
     }
     if (s_w.hour_count > 0) {
-        y += ((s_w.hour_count + 2) / 3) * (lv_font_get_line_height(&todoteck_watch_font_20) + 6) + 12;
+        y += ((s_w.hour_count + 2) / 3) * (lv_font_get_line_height(W_META) + 6) + 12;
     }
     /* Sonne und Wind unten, klein und grau. */
-    const int32_t small_h = lv_font_get_line_height(UI_FONT_SMALL);
+    const int32_t small_h = lv_font_get_line_height(W_META);
     int32_t bottom = W_BOTTOM - small_h;
     if (s_w.wind[0]) {
         char wind[32];
         snprintf(wind, sizeof(wind), "Wind %s", s_w.wind);
-        put(used++, wind, UI_FONT_SMALL, grey, 0, bottom > y ? bottom : y, CONTENT_W,
+        put(used++, wind, W_META, grey, 0, bottom > y ? bottom : y, CONTENT_W,
             LV_TEXT_ALIGN_CENTER);
         bottom -= small_h + 4;
     }
     if (s_w.sun[0]) {
         char sun[32];
         snprintf(sun, sizeof(sun), "Sonne %s", s_w.sun);
-        put(used++, sun, UI_FONT_SMALL, grey, 0, bottom > y ? bottom : y, CONTENT_W,
+        put(used++, sun, W_META, grey, 0, bottom > y ? bottom : y, CONTENT_W,
             LV_TEXT_ALIGN_CENTER);
     }
 }
@@ -280,16 +308,16 @@ static void render_page_days(void)
     lv_label_set_text(s_head, "Nächste Tage");
     lv_obj_align(s_head, LV_ALIGN_TOP_MID, 0, W_TOP);
     lv_obj_remove_flag(s_head, LV_OBJ_FLAG_HIDDEN);
-    const int32_t top = W_TOP + lv_font_get_line_height(UI_FONT_SMALL) + 12;
+    const int32_t top = W_TOP + lv_font_get_line_height(W_META) + 12;
     const int32_t pitch = (W_BOTTOM - top) / W_DAYS;
-    const int32_t line_h = lv_font_get_line_height(&todoteck_watch_font_23);
+    const int32_t line_h = lv_font_get_line_height(W_BODY);
     int used = 0;
     for (int i = 0; i < s_w.day_count && i < W_DAYS; i++) {
         const int32_t y = top + i * pitch + (pitch - line_h) / 2;
         /* Tag gruen, Temperaturen weiss, Wetter rechts -- blau bei Regen. */
-        put(used++, s_w.day_name[i], &todoteck_watch_font_23, green, 16, y, 46, LV_TEXT_ALIGN_LEFT);
-        put(used++, s_w.day_temps[i], &todoteck_watch_font_23, white, 62, y, 130, LV_TEXT_ALIGN_LEFT);
-        put(used++, s_w.day_cond[i], &todoteck_watch_font_20,
+        put(used++, s_w.day_name[i], W_BODY, green, 16, y, 46, LV_TEXT_ALIGN_LEFT);
+        put(used++, s_w.day_temps[i], W_BODY, white, 62, y, 130, LV_TEXT_ALIGN_LEFT);
+        put(used++, s_w.day_cond[i], W_META,
             rainy(s_w.day_cond[i]) ? BLUE : lv_color_hex(0xc9d1d9), 192, y + 2, CONTENT_W - 192 - 16,
             LV_TEXT_ALIGN_RIGHT);
     }
@@ -300,11 +328,11 @@ static void render_page_pollen(void)
     lv_label_set_text(s_head, "Pollen & Warnungen");
     lv_obj_align(s_head, LV_ALIGN_TOP_MID, 0, W_TOP);
     lv_obj_remove_flag(s_head, LV_OBJ_FLAG_HIDDEN);
-    int32_t y = W_TOP + lv_font_get_line_height(UI_FONT_SMALL) + 12;
-    const int32_t pitch = lv_font_get_line_height(&todoteck_watch_font_20) + 10;
+    int32_t y = W_TOP + lv_font_get_line_height(W_META) + 12;
+    const int32_t pitch = lv_font_get_line_height(W_BODY) + 10;
     int used = 0;
     for (int i = 0; i < s_w.pollen_count && i < W_POLLEN; i++) {
-        put(used++, s_w.pollen[i], &todoteck_watch_font_20, lv_color_hex(0xf2f2f2), 16, y,
+        put(used++, s_w.pollen[i], W_BODY, lv_color_hex(0xf2f2f2), 16, y,
             CONTENT_W - 32, LV_TEXT_ALIGN_LEFT);
         y += pitch;
     }
@@ -312,7 +340,7 @@ static void render_page_pollen(void)
         y += 10;
     }
     for (int i = 0; i < s_w.warning_count && i < W_WARNINGS; i++) {
-        put(used++, s_w.warnings[i], &todoteck_watch_font_20, lv_color_hex(0xe74c3c), 16, y,
+        put(used++, s_w.warnings[i], W_BODY, lv_color_hex(0xe74c3c), 16, y,
             CONTENT_W - 32, LV_TEXT_ALIGN_LEFT);
         y += pitch;
     }
@@ -328,6 +356,8 @@ void ui_weather_render_locked(uint8_t page, bool visible)
     for (int i = 0; i < W_LINES; i++) {
         lv_obj_add_flag(s_line[i], LV_OBJ_FLAG_HIDDEN);
     }
+    lv_obj_set_style_text_font(s_head, W_META, 0);
+    lv_obj_set_style_text_font(s_warn, W_BODY, 0);
     if (!visible || !s_w.now[0]) {
         return;
     }
