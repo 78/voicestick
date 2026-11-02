@@ -366,6 +366,12 @@ curl -LO https://github.com/Fauteck/todoteck-voicestick/releases/download/firmwa
 That is what `scripts/fetch-firmware.ps1` in the
 [Todoteck repository](https://github.com/Fauteck/todo) uses to drop both images
 into the shared Drive folder the phone flashes from — no credentials involved.
+Two paths start it: the APK build after a Todoteck release takes the firmware
+along, and since 11/2026 every green run on `main` also posts to a Home
+Assistant webhook (secret `HA_FIRMWARE_WEBHOOK_URL`, step „Home Assistant
+melden“). The automation „Todoteck · Firmware ins Drive“ then runs only
+`scripts/firmware-holen.ps1` on the office PC, so a new firmware reaches the
+Drive folder without a Todoteck release. Without the secret the step is skipped.
 
 The tag is deliberately not a `v*` one: `release.yml` triggers on `push: tags:
 ["v*"]` and would check the tag against `VERSION`, upload to Aliyun OSS and
