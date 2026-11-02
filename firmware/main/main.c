@@ -419,8 +419,10 @@ typedef enum {
     APP_EVENT_TOUCH,
     /* Langer Druck auf die Blaettertaste der Uhr: die frei belegte Aktion. */
     APP_EVENT_ACTION,
+#if CONFIG_VOICE_BOARD_WATCH206
     /* Uhr: Sprechtaste lange genug gehalten -- jetzt beginnt die Aufnahme. */
     APP_EVENT_TALK_LONG,
+#endif
     /* Transkript zuerst (nur die Uhr): Text in `text`, Frist in ms in `size`. */
     APP_EVENT_TRANSCRIPT,
     /* Rueckkehr-Zeitgeber der Uhr abgelaufen. */
