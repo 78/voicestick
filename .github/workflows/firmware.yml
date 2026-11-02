@@ -170,3 +170,32 @@ jobs:
             voice_stick.bin merged.bin voice_watch.bin merged_watch.bin firmware.json version.txt
 
           echo "Veroeffentlicht: https://github.com/${GITHUB_REPOSITORY}/releases/tag/firmware-latest" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Home Assistant melden: Firmware ins Drive (nur main) ----
+      #
+      # Bis 11/2026 kam neue Firmware nur mit einem Todoteck-Release ins
+      # Drive, weil nur der APK-Build auf dem Buero-PC sie mitnahm. Jetzt
+      # meldet dieser Lauf selbst: Die HA-Automation „Todoteck · Firmware ins
+      # Drive“ startet auf dem Buero-PC `scripts/firmware-holen.ps1` (Repo
+      # Fauteck/todo), das nur die Firmware abholt. Ohne Secret wird der
+      # Schritt uebersprungen; ein Fehler hier macht den Lauf nicht rot —
+      # die Abbilder sind schon veroeffentlicht.
+      - name: Home Assistant melden (Firmware ins Drive)
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          HA_WEBHOOK_URL: ${{ secrets.HA_FIRMWARE_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HA_WEBHOOK_URL:-}" ]; then
+            echo "::notice::Secret HA_FIRMWARE_WEBHOOK_URL ist nicht gesetzt — keine Meldung an Home Assistant."
+            exit 0
+          fi
+          version="$(tr -d '[:space:]' < firmware/version.txt)"
+          payload="$(printf '{"sha_short":"%s","version":"%s","run_url":"%s"}' \
+            "${GITHUB_SHA:0:7}" "$version" \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")"
+          curl --fail-with-body --silent --show-error --max-time 30 \
+               -X POST -H 'Content-Type: application/json' \
+               -d "$payload" "$HA_WEBHOOK_URL"
+          echo "Home Assistant gemeldet: Firmware ${version} (${GITHUB_SHA:0:7})" >> "$GITHUB_STEP_SUMMARY"
