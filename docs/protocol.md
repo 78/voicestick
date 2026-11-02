@@ -82,7 +82,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.5.1","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.5.2","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 
@@ -659,7 +659,7 @@ is — the new facts go out as separate events after it.
 {"event":"bridge_info","version":"2.14.0","server":"ok"}
 {"event":"locked"}
 {"event":"unlocked"}
-{"event":"update_available","version":"0.5.1"}
+{"event":"update_available","version":"0.5.2"}
 ```
 
 *Watch → bridge (`state_tx`):*
