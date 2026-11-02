@@ -117,8 +117,11 @@ static void layout_locked(void)
     }
 }
 
+/* Kacheltitel in der Meta-, Werte in der Titel-Stufe der Typo-Skala (Paket J). */
 static void tile_style(int i, bool on, const char *value)
 {
+    lv_obj_set_style_text_font(s_tile_title[i], UI_TYPO(UI_TYPO_META), 0);
+    lv_obj_set_style_text_font(s_tile_value[i], UI_TYPO(UI_TYPO_TITLE), 0);
     lv_obj_set_style_bg_color(s_tile[i], on ? lv_color_hex(0x2ecc71) : lv_color_hex(0x1b2430), 0);
     const lv_color_t text = on ? lv_color_hex(0x000000) : lv_color_hex(0xf2f2f2);
     lv_obj_set_style_text_color(s_tile_title[i], text, 0);
@@ -149,8 +152,10 @@ static void render_locked(const ui_control_state_t *st)
     if (st->battery_percent >= 0 && st->battery_percent <= 10 && !st->charging) {
         lv_obj_set_style_text_color(s_tile_value[UI_CONTROL_BATTERY], lv_color_hex(0xe74c3c), 0);
     }
-    lv_obj_set_style_text_font(s_tile_value[UI_CONTROL_BATTERY],
-                               remaining ? &todoteck_watch_font_20 : &todoteck_watch_font_26, 0);
+    if (remaining) {
+        /* "24 % · noch 9 h" passt in der Titel-Stufe nicht in die Kachel. */
+        lv_obj_set_style_text_font(s_tile_value[UI_CONTROL_BATTERY], UI_TYPO(UI_TYPO_META), 0);
+    }
 }
 #endif
 

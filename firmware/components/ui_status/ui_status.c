@@ -42,6 +42,7 @@
 #include "esp_heap_caps.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "ui_chrome.h"
 #include "ui_display_watch206.h"
 #include "ui_layout_watch206.h"
 #define LCD_BACKLIGHT_DEFAULT 128
@@ -400,6 +401,19 @@ static lv_obj_t *s_cancel_btn;
 static lv_obj_t *s_cancel_track;
 static lv_obj_t *s_cancel_fill;
 static ui_dots_t s_history_dots;
+static lv_obj_t *s_more_label;
+/*
+ * Lange Antwort in Ausschnitten (Paket J, Punkt 42): Passt die ganze Antwort
+ * nicht in die Textflaeche, steht sie dort zeilengenau in Ausschnitten
+ * (LONG_WRAP mit fester Hoehe, gescrollt um ganze Zeilen), darunter eine
+ * Punktreihe wie in den Listen -- ein Punkt je Ausschnitt. Oben/unten
+ * wischen blaettert (ui_status_answer_scroll). Bis 0.4.6 endete eine solche
+ * Antwort mit "..." und der Rest war nur in der App zu lesen.
+ */
+static ui_dots_t s_answer_dots;
+static uint8_t s_answer_page;
+static uint8_t s_answer_pages;
+static int32_t s_answer_page_h;
 /*
  * Der gezeigte Verlaufseintrag (Kopie, waehrend er auf dem Schirm steht):
  * Marker und Zeit in der Zeile ueber der Frage, darunter die Chips. Jede
@@ -881,6 +895,7 @@ typedef struct {
  * "Kurzform ja/nein" faellt erst dort, am gemessenen Text.
  */
 static bool s_render_dots;
+static bool s_render_answer_dots;
 static bool s_render_more;
 static bool s_render_meta;
 static bool s_transcript_active;
@@ -891,6 +906,9 @@ static int32_t text_bottom_y(void)
     int32_t y = s_choice_count > 0 ? TEXT_BOTTOM_Y - CHOICE_H - CHOICE_GAP : TEXT_BOTTOM_Y;
 #if UI_WATCH
     if (s_render_dots) {
+        y -= DOTS_ROW_H;
+    }
+    if (s_render_answer_dots) {
         y -= DOTS_ROW_H;
     }
     if (s_chip_count > 0) {
@@ -904,6 +922,7 @@ static int32_t text_bottom_y(void)
     }
 #else
     (void)s_render_dots;
+    (void)s_render_answer_dots;
     (void)s_render_more;
     (void)s_render_meta;
 #endif
@@ -1706,6 +1725,37 @@ static ui_status_icon_scene_t icon_scene_for(ui_status_icon_scene_t scene, bool 
     return scene;
 }
 
+#if UI_WATCH
+typedef struct {
+    int32_t pitch;     /* Zeilenhoehe plus Abstand */
+    int32_t per_page;  /* ganze Zeilen je Ausschnitt */
+    uint8_t pages;     /* Ausschnitte, hoechstens UI_DOTS_MAX */
+} step_lines_t;
+
+/* Wie viele Zeilen der Text in der geplanten Schrift braucht und wie viele in `room` passen. */
+static step_lines_t answer_lines(const char *text, const text_layout_t *plan, int32_t room)
+{
+    step_lines_t out;
+    const text_step_t step = { plan->font, plan->line_space };
+    out.pitch = lv_font_get_line_height(plan->font) + plan->line_space;
+    if (out.pitch < 1) {
+        out.pitch = 1;
+    }
+    /* n Zeilen brauchen n * Zeilenhoehe + (n - 1) * Abstand. */
+    out.per_page = (room + plan->line_space) / out.pitch;
+    if (out.per_page < 1) {
+        out.per_page = 1;
+    }
+    const int32_t total = (text_height(text, &step, plan->width) + plan->line_space) / out.pitch;
+    int32_t pages = (total + out.per_page - 1) / out.per_page;
+    if (pages < 1) {
+        pages = 1;
+    }
+    out.pages = (uint8_t)(pages > UI_DOTS_MAX ? UI_DOTS_MAX : pages);
+    return out;
+}
+#endif
+
 static void render_scene_locked(ui_status_icon_scene_t scene, const char *status,
                                 const char *question, const char *hint)
 {
@@ -1735,6 +1785,7 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
      * Antwortflaechen steht immer die ganze Frage da.
      */
     s_render_dots = UI_WATCH && !clock_only && s_position_text[0] != '\0';
+    s_render_answer_dots = false;
     s_render_more = false;
     s_render_meta = false;
 #if UI_WATCH
@@ -1786,7 +1837,22 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     }
 
     const char *question_text = (question && question[0] && !clock_only) ? question : "";
-    const text_layout_t plan = plan_text_layout(status, question_text, body_text, s_text_kind);
+    text_layout_t plan = plan_text_layout(status, question_text, body_text, s_text_kind);
+#if UI_WATCH
+    /*
+     * Passt der Text selbst in der kleinsten erlaubten Stufe nicht, kommen
+     * Ausschnitte mit Seitenpunkten (Punkt 42) -- deren Reihe nimmt dem Text
+     * eine Zeile Platz, also danach noch einmal planen.
+     */
+    if (!clock_only && !with_clock && !plan.tecki) {
+        const text_step_t step = { plan.font, plan.line_space };
+        const int32_t top = plan.status_y + meta_h() + plan.status_h + TEXT_GAP;
+        if (text_height(body_text, &step, plan.width) > text_bottom_y() - top) {
+            s_render_answer_dots = true;
+            plan = plan_text_layout(status, question_text, body_text, s_text_kind);
+        }
+    }
+#endif
 
     /*
      * Ohne Tecki traegt die Statuszeile allein, dass etwas schiefging — die
@@ -1893,11 +1959,46 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
          * punkten statt mitten im Wort abgeschnitten zu sein.
          */
         const int32_t top = plan.status_y + meta_h() + plan.status_h + TEXT_GAP;
-        lv_obj_set_height(s_hint_label, text_bottom_y() - top);
-        lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
-        lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
-        lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x, top);
+#if UI_WATCH
+        if (s_render_answer_dots) {
+            /*
+             * Ausschnitte zu ganzen Zeilen: Ein Ausschnitt ist so hoch, wie
+             * ganze Zeilen in die Flaeche passen, und das Blaettern rueckt um
+             * genau diese Hoehe -- keine Zeile steht halb da.
+             */
+            const step_lines_t lines = answer_lines(body_text, &plan, text_bottom_y() - top);
+            s_answer_page_h = lines.per_page * lines.pitch;
+            s_answer_pages = lines.pages;
+            if (s_answer_page >= s_answer_pages) {
+                s_answer_page = (uint8_t)(s_answer_pages - 1);
+            }
+            lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
+            lv_obj_set_height(s_hint_label, s_answer_page_h - plan.line_space);
+            lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
+            lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x, top);
+            lv_obj_scroll_to_y(s_hint_label, s_answer_page * s_answer_page_h, LV_ANIM_OFF);
+        } else
+#endif
+        {
+            lv_obj_set_height(s_hint_label, text_bottom_y() - top);
+            lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
+            lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_LEFT, 0);
+            lv_obj_align(s_hint_label, LV_ALIGN_TOP_LEFT, plan.x, top);
+        }
     }
+#if UI_WATCH
+    if (s_render_answer_dots) {
+        ui_dots_set(&s_answer_dots, s_answer_pages, s_answer_page);
+        lv_obj_align(s_answer_dots.box, LV_ALIGN_TOP_MID, 0,
+                     text_bottom_y() + (DOTS_ROW_H - UI_DOTS_SIZE) / 2);
+    } else {
+        s_answer_pages = 0;
+        ui_dots_set(&s_answer_dots, 0, 0);
+        if (lv_obj_get_scroll_y(s_hint_label) != 0) {
+            lv_obj_scroll_to_y(s_hint_label, 0, LV_ANIM_OFF);
+        }
+    }
+#endif
 
     if (!clock_only) {
         lv_obj_remove_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN);
@@ -1947,8 +2048,13 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     } else {
         ui_dots_set(&s_history_dots, 0, 0);
     }
+    /* Chips in der Inhalt-, Hinweise in der Meta-Stufe der Typo-Skala (Paket J). */
+    lv_obj_set_style_text_font(s_more_label, UI_TYPO(UI_TYPO_META), 0);
+    lv_obj_set_style_text_font(s_meta_label, UI_TYPO(UI_TYPO_META), 0);
+    lv_obj_set_height(s_meta_label, lv_font_get_line_height(UI_TYPO(UI_TYPO_META)));
     int32_t bottom = TEXT_BOTTOM_Y - (s_render_dots ? DOTS_ROW_H : 0);
     for (int i = 0; i < HISTORY_CHIPS; i++) {
+        lv_obj_set_style_text_font(s_chip_label[i], UI_TYPO(UI_TYPO_BODY), 0);
         if (i >= s_chip_count) {
             lv_obj_add_flag(s_chip_btn[i], LV_OBJ_FLAG_HIDDEN);
             continue;
@@ -2148,6 +2254,7 @@ void ui_status_header_refresh_locked(void)
     if (!s_header_clock) {
         return;
     }
+    ui_chrome_refresh_locked();
     const bool overlay = ui_cards_visible() || ui_control_visible();
     if (ui_torch_on() || (!overlay && s_main_clock_shown)) {
         lv_obj_add_flag(s_header_clock, LV_OBJ_FLAG_HIDDEN);
@@ -2268,11 +2375,11 @@ static void create_status_ui(void)
     lv_obj_set_style_radius(s_more_btn, MORE_H / 2, 0);
     lv_obj_set_style_border_width(s_more_btn, 2, 0);
     lv_obj_set_style_border_color(s_more_btn, lv_color_hex(0x3a4656), 0);
-    lv_obj_t *more_label = lv_label_create(s_more_btn);
-    lv_label_set_text(more_label, "Tippen für mehr");
-    lv_obj_set_style_text_font(more_label, UI_FONT_SMALL, 0);
-    lv_obj_set_style_text_color(more_label, lv_color_hex(0x9aa3ad), 0);
-    lv_obj_center(more_label);
+    s_more_label = lv_label_create(s_more_btn);
+    lv_label_set_text(s_more_label, "Tippen für mehr");
+    lv_obj_set_style_text_font(s_more_label, UI_FONT_SMALL, 0);
+    lv_obj_set_style_text_color(s_more_label, lv_color_hex(0x9aa3ad), 0);
+    lv_obj_center(s_more_label);
     lv_obj_add_flag(s_more_btn, LV_OBJ_FLAG_HIDDEN);
 
     /*
@@ -2318,6 +2425,7 @@ static void create_status_ui(void)
     /* Seitenpunkte des Verlaufs, ganz unten mittig. */
     ui_dots_create(&s_history_dots, s_screen);
     lv_obj_align(s_history_dots.box, LV_ALIGN_TOP_MID, 0, TEXT_BOTTOM_Y - DOT_SIZE - 4);
+    ui_dots_create(&s_answer_dots, s_screen);
 
     /* Verlauf: Marker-Zeile (Punkt + Wort + Zeit) und die zwei Chips; Lage setzt render_scene_locked(). */
     s_meta_dot = create_blob(s_screen, META_DOT, META_DOT, lv_color_hex(0x9aa3ad));
@@ -2372,6 +2480,8 @@ static void create_status_ui(void)
     lv_obj_set_style_text_color(s_header_clock, lv_color_hex(0xc9d1d9), 0);
     lv_obj_align(s_header_clock, LV_ALIGN_TOP_MID, 0, UI_SCREEN_PAD + UI_HEADER_LABEL_Y);
     lv_obj_add_flag(s_header_clock, LV_OBJ_FLAG_HIDDEN);
+    /* Lautlos-Zeichen, Mikrofon-Punkt und Renderzeit (Paket J, ui_chrome.c). */
+    ui_chrome_create_locked(s_display);
 #endif
 
     s_position_label = lv_label_create(s_screen);
@@ -2410,6 +2520,10 @@ static void create_status_ui(void)
 
     s_hint_label = lv_label_create(s_screen);
     lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
+#if UI_WATCH
+    /* Lange Antworten scrollen im Label selbst (Ausschnitte, Punkt 42) -- ohne Leiste. */
+    lv_obj_set_scrollbar_mode(s_hint_label, LV_SCROLLBAR_MODE_OFF);
+#endif
     lv_obj_set_style_text_line_space(s_hint_label, TEXT_STEP_SMALLEST.line_space, 0);
     lv_obj_set_width(s_hint_label, COL_W);
     lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -2606,6 +2720,9 @@ static void assign_scene_locked(ui_status_icon_scene_t scene, const char *status
     s_mood = UI_STATUS_MOOD_NONE;
     s_shortable = shortable;
     s_expanded = false;
+#if UI_WATCH
+    s_answer_page = 0;
+#endif
     end_transcript_locked();
     s_thinking_since_us = 0;
     if (s_thinking_timer) {
@@ -3463,6 +3580,9 @@ bool ui_status_toggle_more(void)
         consumed = true;
     }
     if (consumed) {
+        s_answer_page = 0;
+    }
+    if (consumed) {
         render_current_locked();
     }
     _lock_release(&s_lvgl_lock);
@@ -3908,4 +4028,27 @@ void ui_status_set_error(const char *message)
     ESP_LOGE(TAG, "%s", message ? message : "unknown error");
     set_scene(UI_STATUS_ICON_ERROR, "", message ? message : "Unbekannter Fehler",
               UI_TEXT_MESSAGE);
+}
+
+bool ui_status_answer_scroll(int dir)
+{
+#if UI_WATCH
+    bool moved = false;
+    _lock_acquire(&s_lvgl_lock);
+    if (s_answer_pages > 1) {
+        const int next = (int)s_answer_page + (dir > 0 ? 1 : -1);
+        if (next >= 0 && next < (int)s_answer_pages) {
+            s_answer_page = (uint8_t)next;
+            /* Mit Animation -- der "Schwung" einer Geste, die LVGL selbst nie sieht. */
+            lv_obj_scroll_to_y(s_hint_label, next * s_answer_page_h, LV_ANIM_ON);
+            ui_dots_set(&s_answer_dots, s_answer_pages, s_answer_page);
+            moved = true;
+        }
+    }
+    _lock_release(&s_lvgl_lock);
+    return moved;
+#else
+    (void)dir;
+    return false;
+#endif
 }

@@ -3,9 +3,10 @@
 /*
  * Die Karten der Uhr: Heute, Einkauf, Zuhause, Wetter.
  *
- * Erreichbar vom Ziffernblatt mit einem Wischen nach links (oder nach oben);
- * links/rechts wechselt die Karte, nach oben scrollt die Liste weiter, nach
- * unten zurueck -- am Anfang eine Ebene zurueck. Ein Tippen auf eine Zeile
+ * Erreichbar vom Ziffernblatt mit einem Wischen nach links; links/rechts
+ * wechselt die Karte (rechts von Heute aus: zurueck aufs Zifferblatt), nach
+ * oben scrollt die Liste weiter, nach unten zurueck -- und nur das (0.5.0,
+ * vorher am Anfang eine Ebene zurueck). Ein Tippen auf eine Zeile
  * hakt sie ab (Einkauf) oder schaltet sie um (Zuhause) -- ausgefuehrt von
  * der Bruecke, die Karte zeigt es sofort. Auf Heute (und bei Schaltern mit
  * Flag `c`) markiert das Tippen die Zeile nur; ausgefuehrt wird erst mit
@@ -76,7 +77,9 @@ void ui_cards_begin_part(ui_card_kind_t kind, uint16_t rev, uint8_t part);
  * Streifen in Kalender-Blau statt Projektfarbe; "s" = Auswahl (0.4.5, nur
  * `switches`, ein input_select): Tippen oeffnet die Liste der Optionen
  * (ui_options.h) statt weiterzuschalten, ohne OK-Schritt, auch neben `c`;
- * ""/NULL = direkt.
+ * "l"/"w"/"f"/"k" (0.5.0, nur `switches`): Art des Geraets -- light,
+ * switch/input_boolean, fan, lock -- fuer das Symbol links in der Zeile;
+ * `k` fragt immer nach wie `c`. ""/NULL = direkt.
  */
 void ui_cards_add_item(ui_card_kind_t kind, const char *text, const char *aux,
                        const char *colour, const char *group, const char *flags);

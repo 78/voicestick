@@ -1120,6 +1120,8 @@ static uint32_t start_recording(void)
     }
 
     s_recording = true;
+    /* Mikrofon offen: der rote Punkt oben (Paket J; auf dem StickS3 nichts). */
+    ui_status_set_mic_open(true);
 #if CONFIG_VOICE_BOARD_WATCH206
     s_recorded_since_sample = true;
 #endif
@@ -1143,6 +1145,7 @@ static uint32_t stop_recording(void)
 
     const uint32_t session_id = audio_pipeline_session_id();
     s_recording = false;
+    ui_status_set_mic_open(false);
     stop_recording_tick();
     audio_pipeline_stop();
     release_recording_pm_locks();
@@ -1588,6 +1591,8 @@ static void apply_watch_settings_ui(void)
     if (s_tile_count > 0) {
         ui_control_set_tiles(s_tiles, s_tile_count);
     }
+    /* Lautlos und "Dunkel & still" stehen im RTC-Speicher -- ihre Zeichen auch nach dem Tiefschlaf. */
+    ui_status_set_quiet_marks(s_silent, s_cinema);
 }
 #endif
 
@@ -2405,9 +2410,11 @@ static void handle_control_tile(int tile)
         break;
     case UI_CONTROL_SILENT:
         s_silent = !s_silent;
+        ui_status_set_quiet_marks(s_silent, s_cinema);
         break;
     case UI_CONTROL_CINEMA:
         s_cinema = !s_cinema;
+        ui_status_set_quiet_marks(s_silent, s_cinema);
         break;
     case UI_CONTROL_SAVER:
         s_saver = !s_saver;
@@ -2515,27 +2522,34 @@ static void handle_palm(void)
 
 /*
  * Die Gestensprache der Uhr -- ein Regelwerk fuer alle Szenen (10/2026,
- * Reihe seit 11/2026). Dieselbe Tabelle steht im README (Abschnitt der Uhr).
+ * Reihe seit 11/2026, eine Regel seit Paket J, 0.5.0). Dieselbe Tabelle
+ * steht im README (Abschnitt der Uhr).
+ *
+ * Die Regel: Nach rechts wischen ist zurueck -- ueberall. Nach oben/unten
+ * wischen scrollt -- nur das. Die einzige Kante ist der obere Rand: Von dort
+ * nach unten oeffnet das Kontrollzentrum, egal was zu sehen ist.
  *
  * Waagerecht liegt alles in einer Reihe: Verlauf | Zifferblatt | Heute |
- * Einkauf | Zuhause | Wetter. Nach links wischen holt, was rechts liegt.
+ * Einkauf | Zuhause | Wetter. Nach links wischen holt, was rechts liegt;
+ * nach rechts, was links liegt -- von den Karten aus also zurueck zum
+ * Zifferblatt, vom Zifferblatt aus in den Verlauf.
  *
  *   Geste             Zifferblatt      Antwort / Verlauf      Karten              Kontrollzentrum
  *   ----------------  ---------------  ---------------------  ------------------  ---------------
- *   vom oberen Rand   Kontrollzentrum  Kontrollzentrum        Kontrollzentrum     schliesst
+ *   vom oberen Rand   Kontrollzentrum  Kontrollzentrum        Kontrollzentrum     --
  *   nach unten
- *   vom linken Rand   Verlauf          Zifferblatt            Zifferblatt         Zifferblatt
+ *   vom linken Rand   Verlauf          Zifferblatt            wie rechts          wie rechts
  *   nach rechts
- *   nach unten        nichts           zurueck: Zifferblatt   Liste zurueck; am   schliesst
- *                                                             Anfang: Zifferblatt
- *   nach oben         Karten           Karten                 Liste weiter        schliesst
+ *   nach unten        nichts           voriger Ausschnitt     Liste zurueck; am   nichts
+ *                                      einer langen Antwort   Anfang nichts
+ *   nach oben         nichts           naechster Ausschnitt   Liste weiter        schliesst
  *   links             Heute            neuer; von der         naechste Karte;     --
  *                                      juengsten: Zifferbl.   am Ende nichts
- *   rechts            Verlauf (zuerst  aelter                 vorige Karte; von   --
+ *   rechts            Verlauf (zuerst  aelter                 vorige Karte; von   schliesst
  *                     die Bilanz)                             Heute: Zifferblatt
  *   Tippen            Verlauf oeffnen  Ja/Nein; Nochmal /     Zeile abhaken /     Kachel
- *                                      Rueckgaengig; Kurz-    schalten; Heute und
- *                                      form <-> ganz; sonst   Schalter mit `c`:
+ *                                      Rueckgaengig; Kurz-    schalten; Zeilen
+ *                                      form <-> ganz; sonst   mit "OK"-Pille:
  *                                      aelter                 markieren, dann
  *                                                             "OK"; Flag `s`:
  *                                                             Auswahl (0.4.5);
@@ -2545,40 +2559,46 @@ static void handle_palm(void)
  *                     Gross)
  *   Hand aufs Display alles still: Aufnahme verworfen, Ebenen zu, Schirm dunkel
  *
- * In der Layout-Auswahl: links/rechts blaettert, Tippen uebernimmt, nach
- * unten oder vom linken Rand bricht ab (auch nach 10 s ohne Eingabe). In der
- * Auswahl eines input_select (0.4.5, Kartenzeile mit Flag `s`): Tippen auf
- * eine Option waehlt sie (auf die aktive: nur zu), oben/unten scrollt, nach
- * unten am Anfang oder vom linken Rand bricht ab (auch nach 10 s). Bis
- * 0.4.3 war langer Druck auf dem Schirm frei -- eine Beruehrung bis 0,8 s
- * ohne Wischen war ein Tippen, darueber zaehlte sie als Aermel und tat
- * nichts. Der lange Druck auf die Blaettertaste (Aktion) ist davon
- * unberuehrt.
+ * Unterszenen (Layout-Auswahl, Auswahl eines input_select) tragen links oben
+ * ein sichtbares Zurueck "‹" (ui_chrome.h); Antippen oder nach rechts
+ * wischen schliesst sie ohne Senden, ebenso zehn Sekunden ohne Eingabe. In
+ * der Layout-Auswahl blaettern links und oben weiter, unten zurueck; Tippen
+ * daneben uebernimmt. In der Auswahl scrollt oben/unten eine lange Liste,
+ * Tippen auf eine Option waehlt sie (auf die aktive: nur zu).
  *
  * Sonderfaelle: Ein gedimmter Schirm wird von der ersten Beruehrung nur
  * geweckt; waehrend der Aufnahme tut der Schirm nichts (das Handgelenk
  * liegt oft am Aermel); in der Transkript-Szene zaehlt nur "Abbrechen"
  * (und die Hand, die ebenfalls abbricht); bei der Taschenlampe schaltet jede
- * Beruehrung sie aus.
+ * Beruehrung sie aus. Der lange Druck auf die Blaettertaste (Aktion) ist
+ * etwas anderes und unberuehrt.
  *
  * Abweichungen von vorher, mit Grund:
- *   - Karten, nach unten: schliesst sofort. Vorher blaetterte es erst eine
- *     Seite zurueck und schloss nur auf der ersten -- dieselbe Geste tat je
- *     nach Seite zweierlei. Die Seiten laufen mit "nach oben" im Kreis.
- *   - Karten zu fuehrt aufs Zifferblatt (11/2026: die Karten liegen jetzt
- *     rechts daneben in der Reihe, nicht mehr eine Ebene darueber -- Wunsch
- *     des Nutzers). Nach oben oeffnet sie weiterhin, als zweiter Weg.
- *   - Verlauf: Rechts ist jetzt aelter, links neuer (vorher umgekehrt),
- *     damit der Verlauf links und die Karten rechts vom Zifferblatt liegen.
- *   - Nach oben oeffnet die Karten nur, wenn gerade nichts laeuft (keine
- *     Aufnahme, kein Denken). Vorher ging das auch mitten im Nachdenken, und
- *     die Antwort kam hinter der Karte an.
+ *   - Paket J (0.5.0): Oben/unten oeffnet und schliesst nichts mehr.
+ *     Bis 0.4.6 ging "nach unten" vom Verlauf aufs Zifferblatt und am
+ *     Anfang einer Liste zurueck, "nach oben" oeffnete vom Zifferblatt die
+ *     Karten und "nach unten" schloss das Kontrollzentrum -- dieselbe Geste
+ *     scrollte an einer Stelle und navigierte an der naechsten. Zu den
+ *     Karten geht es nach links, zurueck nach rechts. Das Kontrollzentrum
+ *     schliesst nach oben (die Ebene wird zurueckgeschoben) oder rechts.
+ *   - Paket J: Der linke Rand ist nur noch im Verlauf eine eigene Geste (auf
+ *     einen Schlag zum Zifferblatt). Auf Karten und Unterszenen ist jedes
+ *     Wischen nach rechts zurueck; dort brauchte es den Rand nicht mehr.
+ *   - Karten zu fuehrt aufs Zifferblatt (11/2026: die Karten liegen rechts
+ *     daneben in der Reihe, nicht mehr eine Ebene darueber -- Wunsch des
+ *     Nutzers).
+ *   - Verlauf: Rechts ist aelter, links neuer (seit 11/2026), damit der
+ *     Verlauf links und die Karten rechts vom Zifferblatt liegen.
+ *   - Nach links oeffnet die Karten nur, wenn gerade nichts laeuft (keine
+ *     Aufnahme, kein Denken). Sonst kaeme die Antwort hinter der Karte an.
  *   - Tippen auf eine Antwort in Kurzform zeigt die ganze (und zurueck).
  *     Ohne Kurzform bleibt Tippen, was es war: die Blaettertaste.
  *   - Karte Heute, Tippen (11/2026): markiert die Zeile nur; abgehakt wird
  *     erst mit "OK - erledigt" in der Zeile. Ein Fehltipp am Handgelenk
  *     hakte vorher sofort ab. Einkauf und Zuhause bleiben beim direkten
- *     Tippen (Wunsch des Nutzers).
+ *     Tippen (Wunsch des Nutzers) -- ausser Schaltern mit `c` und
+ *     Schloessern; welche Zeilen nachfragen, zeigt seit 0.5.0 die graue
+ *     "OK"-Pille vor dem Tippen.
  *   - Kontrollzentrum und Karten oeffnen nicht in der Transkript-Szene:
  *     Sie verdeckten genau die zwei Sekunden, in denen "Abbrechen" gilt.
  */
@@ -2750,16 +2770,13 @@ static void handle_touch(const app_event_t *event)
         return;
     }
     /*
-     * Zurueck-Geste vom linken Rand (Paket G): Ein Wischen nach rechts, das
-     * am linken Rand beginnt, geht ueberall eine Ebene zurueck -- Karten,
-     * Wetter und Kontrollzentrum aufs Zifferblatt, der Verlauf ebenso. Auf
-     * dem Zifferblatt selbst gibt es nichts, wohin; dort bleibt es das
-     * normale Wischen nach rechts (in den Verlauf).
+     * Vom linken Rand nach rechts im Verlauf (Paket G): auf einen Schlag
+     * zurueck aufs Zifferblatt, statt Eintrag fuer Eintrag nach links. Seit
+     * Paket J (0.5.0) nur noch dort -- auf Karten und im Kontrollzentrum ist
+     * jedes Wischen nach rechts ohnehin "zurueck".
      */
     if (gesture == VOICE_BOARD_SWIPE_RIGHT && event->touch_x < BACK_EDGE_PX &&
-        (ui_control_visible() || ui_cards_visible() || ui_status_in_history())) {
-        ui_control_hide();
-        ui_cards_hide();
+        !ui_control_visible() && !ui_cards_visible() && ui_status_in_history()) {
         ui_status_show_home();
         return;
     }
@@ -2770,7 +2787,8 @@ static void handle_touch(const app_event_t *event)
                 handle_control_tile(tile);
             }
         } else if (gesture == VOICE_BOARD_SWIPE_UP ||
-                   gesture == VOICE_BOARD_SWIPE_DOWN) {
+                   gesture == VOICE_BOARD_SWIPE_RIGHT) {
+            /* Nach oben schiebt die Ebene zurueck, nach rechts ist zurueck (0.5.0). */
             ui_control_hide();
         }
         return;
@@ -2819,7 +2837,7 @@ static void handle_touch(const app_event_t *event)
                 play_tone(AUDIO_TONE_CANCEL);
             }
         } else if (action == UI_CARDS_CLOSE) {
-            /* Von Heute nach rechts oder nach unten: zurueck aufs Zifferblatt. */
+            /* Von Heute nach rechts: zurueck aufs Zifferblatt. */
             ui_status_show_home();
         } else if (action == UI_CARDS_OPTIONS) {
             /*
@@ -2894,21 +2912,17 @@ static void handle_touch(const app_event_t *event)
         ui_status_browse_history();
         ui_status_set_mood(UI_STATUS_MOOD_LOOK_LEFT, 1200);
         break;
+    /*
+     * Oben/unten scrollt nur (Paket J, 0.5.0): eine lange Antwort Ausschnitt
+     * fuer Ausschnitt; wo es nichts zu scrollen gibt, tut die Geste nichts.
+     * Bis 0.4.6 ging "nach unten" aufs Zifferblatt und "nach oben" zu den
+     * Karten -- dieselben Gesten scrollten auf den Karten.
+     */
     case VOICE_BOARD_SWIPE_DOWN:
-        ui_status_show_home();
+        (void)ui_status_answer_scroll(-1);
         break;
     case VOICE_BOARD_SWIPE_UP:
-        if (!cards_allowed()) {
-            break;
-        }
-        /*
-         * Hoch zu den Karten (Heute, Einkauf, Zuhause). Was dort steht, kam
-         * mit dem letzten Abgleich; die Bitte um einen frischen kostet
-         * nichts und zieht die Karte nach, sobald er da ist.
-         */
-        ui_cards_show(UI_CARD_TODAY);
-        note_ble_transfer();
-        (void)voice_ble_send_glance_request();
+        (void)ui_status_answer_scroll(1);
         break;
     default:
         break;
@@ -3187,6 +3201,7 @@ static void app_event_task(void *arg)
             break;
         case APP_EVENT_BLE_DISCONNECTED:
             s_recording = false;
+            ui_status_set_mic_open(false);
             s_ota_updating = false;
             s_app_ui_state = APP_UI_STATE_READY;
             stop_host_response_timer();

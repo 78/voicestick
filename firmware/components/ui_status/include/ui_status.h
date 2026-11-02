@@ -218,3 +218,35 @@ void ui_status_set_partial_text(const char *text);
 void ui_status_set_ota_progress(uint32_t written, uint32_t size);
 void ui_status_set_ota_rebooting(void);
 void ui_status_set_error(const char *message);
+
+/*
+ * Paket J (0.5.0), nur die Uhr -- auf dem StickS3 tun die Funktionen nichts.
+ *
+ * Lautlos und "Dunkel & still" sichtbar: je ein kleines Zeichen in der
+ * Kopfzeile jeder Szene (auch auf dem Zifferblatt), solange es an ist.
+ */
+void ui_status_set_quiet_marks(bool silent, bool still);
+/* Roter Punkt oben mittig, solange das Mikrofon offen ist -- in jeder Szene. */
+void ui_status_set_mic_open(bool open);
+
+/*
+ * Renderzeit (Punkt 47): zusammengefasst ueber rund zehn Sekunden, in denen
+ * gezeichnet wurde -- fuer die Diagnose-Seite. `false`, solange noch kein
+ * Fenster voll ist (oder auf dem StickS3).
+ */
+typedef struct {
+    uint32_t frames;     /* Bilder im Fenster */
+    uint16_t window_s;   /* Laenge des Fensters in Sekunden */
+    uint16_t fps_x10;    /* Bilder je Sekunde mal zehn */
+    uint16_t avg_ms_x10; /* mittlere Zeit je Bild in ms mal zehn */
+    uint16_t max_ms;     /* laengstes Bild im Fenster */
+} ui_render_stats_t;
+bool ui_status_render_stats(ui_render_stats_t *out);
+
+/*
+ * Lange Antwort (Punkt 42): Passt die ganze Antwort nicht auf den Schirm,
+ * steht sie in Ausschnitten mit Seitenpunkten darunter. Einen Ausschnitt
+ * weiter (+1) oder zurueck (-1); `false`, wenn es in der Richtung keinen
+ * gibt -- dann tut die Geste nichts.
+ */
+bool ui_status_answer_scroll(int dir);

@@ -112,6 +112,54 @@ LV_FONT_DECLARE(todoteck_clock_64);
 #define UI_FONT_CLOCK_LARGE (&todoteck_watch_clock_180)
 #define UI_FONT_CLOCK_SMALL (&todoteck_clock_64)
 
+/*
+ * Die Typo-Skala (Paket J, 0.5.0): drei Stufen fuer alles, was keine
+ * Uhrzeit-Ziffer und keine Antwort ist.
+ *
+ *   Titel   Ueberschrift einer Szene oder Karte ("Heute", Titel der Auswahl)
+ *   Inhalt  Zeilen, Optionen, Kachelwerte -- was man liest
+ *   Meta    Nebentext: Gruppen, Uhrzeit rechts in der Zeile, Kacheltitel,
+ *           Hinweise (die kleine Uhr der Kopfzeile bleibt fest bei 18 --
+ *           die Kopfzeile ist auf sie ausgelegt)
+ *
+ * Jede Stufe folgt der Schriftgroesse aus `watch_settings.font`:
+ *
+ *            klein  normal  gross
+ *   Titel    23     26      26
+ *   Inhalt   20     23      26
+ *   Meta     18     18      20
+ *
+ * Der Titel waechst bei "gross" nicht weiter: In der Kopfzeile steht er links
+ * neben der kleinen Uhrzeit, und "Zuhause" misst in der 30er 134 px -- es
+ * liefe in die Uhrzeit (die beginnt bei x 163 im Inhalt). Meta bleibt bis
+ * "normal" bei 18, weil darauf die Zusatzangabe rechts in der Kartenzeile
+ * ausgelegt ist (rund 78 px fuer "Morgen", "31.10.").
+ *
+ * Bis 0.4.6 suchte sich jede Szene ihre Groessen selbst (Karten, Auswahl,
+ * Wetter, Kontrollzentrum), und dieselbe Rolle war hier 26, dort 23 px gross.
+ * Ausgenommen bleiben die Ziffern der Uhrzeit (eigene Schriften) und der
+ * Antworttext: Er sucht sich seine Groesse am gemessenen Text aus
+ * UI_TEXT_STEPS_INIT, mit der Fragezeile darueber.
+ */
+typedef enum {
+    UI_TYPO_TITLE,
+    UI_TYPO_BODY,
+    UI_TYPO_META,
+} ui_typo_t;
+
+static inline const lv_font_t *ui_typo_font(ui_typo_t typo, uint8_t level)
+{
+    static const lv_font_t *const fonts[3][3] = {
+        /* klein */ { &todoteck_watch_font_23, &todoteck_watch_font_20, &todoteck_watch_font_18 },
+        /* normal */ { &todoteck_watch_font_26, &todoteck_watch_font_23, &todoteck_watch_font_18 },
+        /* gross */ { &todoteck_watch_font_26, &todoteck_watch_font_26, &todoteck_watch_font_20 },
+    };
+    return fonts[level % 3][(unsigned)typo % 3];
+}
+
+/* Mit der eingestellten Groesse -- nur, wo ui_status_internal.h eingebunden ist. */
+#define UI_TYPO(typo) ui_typo_font((typo), ui_status_font_level())
+
 /* Zeilenabstand je Stufe auf rund das 1,35-fache der Schriftgroesse. */
 #define UI_TEXT_STEPS_INIT                 \
     {                                      \
@@ -163,6 +211,9 @@ LV_FONT_DECLARE(todoteck_clock_64);
  *   Ziffernblatt: lange    main.c handle_touch            ganzer Schirm     --               --
  *   druecken (0.4.4)
  *   Layout-Auswahl: Tippen ui_face_picker.c               ganzer Schirm     --               --
+ *                          (ausser dem Zurueck)
+ *   Zurueck "‹" (0.5.0,    ui_chrome.c ui_back_hit        56 x 48           (62, 40)         6
+ *   Auswahl, Layout-Wahl)
  *   Option (input_select,  ui_options.c ui_options_touch  378 x 56..59      x 205            6
  *   0.4.5, bis 8 Zeilen)
  *   Wetterkarte            ui_weather.c                   keine (reine Anzeige)

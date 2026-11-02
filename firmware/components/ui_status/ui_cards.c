@@ -24,6 +24,20 @@ static const char *TAG = "ui_cards";
 #define CARD_EVENT_COLOUR 0x3b82f6u
 #define CARD_GROUP_LEN 24
 
+/*
+ * Welche Art Geraet hinter einer Schalterzeile steht (Paket J, 0.5.0): die
+ * Flags `l` light, `w` switch/input_boolean, `f` fan, `k` lock im `list`.
+ * Die Uhr zeichnet daraus ein Symbol; ohne Flag (aeltere Bruecke) bleibt es
+ * beim Wort "An"/"Aus".
+ */
+typedef enum {
+    CARD_DOMAIN_NONE,
+    CARD_DOMAIN_LIGHT,
+    CARD_DOMAIN_SWITCH,
+    CARD_DOMAIN_FAN,
+    CARD_DOMAIN_LOCK,
+} card_domain_t;
+
 typedef struct {
     char text[UI_CARD_TEXT_LEN];
     char aux[UI_CARD_AUX_LEN];
@@ -32,6 +46,7 @@ typedef struct {
     bool confirm;     /* Schalter: erst markieren, dann "OK - schalten" (Flag `c`) */
     bool event;       /* Termin (Flag `e`): nicht antippbar, nur zum Lesen */
     bool select;      /* input_select (Flag `s`, 0.4.5): Tippen oeffnet die Auswahl */
+    uint8_t domain;   /* card_domain_t aus `l`/`w`/`f`/`k` (0.5.0), nur `switches` */
     bool done;        /* angetippt; die Bruecke hat es noch nicht bestaetigt */
 } card_item_t;
 
@@ -88,6 +103,7 @@ static uint32_t parse_colour(const char *text)
 }
 
 #if CONFIG_VOICE_BOARD_WATCH206
+#include "ui_glyph.h"
 #include "ui_layout_watch206.h"
 #include "ui_status_icons.h"
 #include "ui_weather.h"
@@ -155,7 +171,7 @@ static const ui_status_icon_scene_t EMPTY_POSES[UI_CARD_COUNT] = {
  * Eingabegeraet; der Schwung ist die Animation des Sprungs.
  *
  * Zwischen zwei Gruppen (`group` je Eintrag, nur Heute) steht eine
- * Trennzeile: duenner Text in UI_FONT_SMALL, 28 px hoch, kein Trefferziel.
+ * Trennzeile: duenner Text in der Meta-Stufe, 28 px hoch, kein Trefferziel.
  */
 #define ROWS_MAX UI_CARD_ITEMS_MAX
 #define ROWS_TOP (HEADER_H + 22)
@@ -166,9 +182,13 @@ static const ui_status_icon_scene_t EMPTY_POSES[UI_CARD_COUNT] = {
 #define STRIPE_W 6
 #define SEP_H 28
 #define SEPS_MAX CARD_GROUPS_MAX
-static const lv_font_t *const LEVEL_ROW_FONT[3] = {
-    &todoteck_watch_font_20, &todoteck_watch_font_23, &todoteck_watch_font_26,
-};
+/* Symbol links in einer Schalterzeile (Flags `l`/`w`/`f`/`k`/`s`, 0.5.0). */
+#define ROW_ICON 28
+#define ROW_ICON_X 14
+/* Kopfzeile: "‹" vor dem Titel, "›" rechts (Paket J); gezeichnet, die Schriften kennen sie nicht. */
+#define HEAD_ARROW 20
+#define HEAD_ARROW_X 22
+#define HEAD_TITLE_X (HEAD_ARROW_X + HEAD_ARROW - 2)
 
 /* Rueckgaengig: 5 s nach einem Tippen auf eine Zeile, unten in der Karte. */
 #define UNDO_W 240
@@ -188,13 +208,16 @@ static const lv_font_t *const LEVEL_ROW_FONT[3] = {
  */
 #define OK_W 150
 #define OK_MS 5000
+/* Innenabstand links/rechts der "OK"-Pille in der Zeile. */
+#define PILL_PAD 8
 /* Teckis Flaeche auf der leeren Karte. */
 #define EMPTY_TECKI_BOX 96
 #define EMPTY_TECKI_Y 110
 
 static lv_obj_t *s_root;
 static lv_obj_t *s_title;
-static ui_dots_t s_card_dots;
+static lv_obj_t *s_head_prev;
+static lv_obj_t *s_head_next;
 /* Seiten der Wetterkarte: Punkte unten (wie bis 0.3.6 bei allen Karten) und die gezeigte Seite. */
 static ui_dots_t s_page_dots;
 static uint8_t s_wpage;
@@ -205,8 +228,11 @@ static lv_obj_t *s_row[ROWS_MAX];
 static lv_obj_t *s_row_stripe[ROWS_MAX];
 static lv_obj_t *s_row_text[ROWS_MAX];
 static lv_obj_t *s_row_aux[ROWS_MAX];
+static lv_obj_t *s_row_icon[ROWS_MAX];
+static lv_obj_t *s_row_pill[ROWS_MAX];
 static lv_obj_t *s_sep[SEPS_MAX];
 static lv_obj_t *s_undo;
+static lv_obj_t *s_undo_label;
 static lv_timer_t *s_undo_timer;
 static lv_obj_t *s_ok;
 static lv_obj_t *s_ok_label;
@@ -233,9 +259,10 @@ static struct {
     uint8_t index;
 } s_sel;
 
+/* Zeilen in der Inhalt-Stufe der Typo-Skala (klein 20, normal 23, gross 26). */
 static const lv_font_t *row_font(void)
 {
-    return LEVEL_ROW_FONT[ui_status_font_level() % 3];
+    return UI_TYPO(UI_TYPO_BODY);
 }
 
 static int32_t view_h(void)
@@ -287,27 +314,27 @@ static void create_locked(void)
     lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
 
     /*
-     * 26 statt 30 px: Seit die Uhrzeit mittig in der Kopfzeile steht, muss
-     * "Zuhause" links davor enden (rund 115 statt 135 px breit).
+     * Kopfzeile (Paket J): "‹ Heute" links, "›" rechts -- der Pfeil steht
+     * nur, wo es weitergeht; links von Heute liegt das Zifferblatt, dort
+     * steht er also immer. Bis 0.4.6 sagten Punkte oben rechts, welche Karte
+     * es ist, und unten stand eine zweite Punktreihe fuer die Lage in der
+     * Liste -- zwei gleiche Zeichen fuer zwei verschiedene Dinge. Punkte
+     * gibt es jetzt nur noch unten.
      *
-     * Ueberschrift und Kartenpunkte stehen auf derselben waagerechten Mitte
-     * wie die kleine Uhrzeit der Kopfzeile: Die liegt auf lv_layer_top() bei
-     * UI_SCREEN_PAD + UI_HEADER_LABEL_Y in der 18er; diese Karte liegt im
-     * Inhalt (also schon um UI_SCREEN_PAD eingerueckt), und die 26er ist um
-     * 9 px hoeher -- der Unterschied der Zeilenhoehen wird halbiert und
-     * abgezogen. Bis 0.3.5 stand "Heute" rund 10 px tiefer als die Uhrzeit.
+     * Der Titel steht in der Titel-Stufe (hoechstens 26 px): Die kleine
+     * Uhrzeit in der Kopfzeile beginnt bei x 163 im Inhalt, "Zuhause" in der
+     * 26er endet bei 40 + 114 = 154. Titel und Pfeile stehen auf derselben
+     * waagerechten Mitte wie die Uhrzeit (UI_SCREEN_PAD + UI_HEADER_LABEL_Y
+     * in der 18er auf lv_layer_top(); die Karte liegt schon im Inhalt);
+     * render_locked() setzt die Lage nach der Schriftgroesse.
      */
     const int32_t header_mid = UI_HEADER_LABEL_Y + lv_font_get_line_height(UI_FONT_SMALL) / 2;
     s_title = lv_label_create(s_root);
-    lv_obj_set_style_text_font(s_title, &todoteck_watch_font_26, 0);
     lv_obj_set_style_text_color(s_title, lv_color_hex(0x2ecc71), 0);
-    lv_obj_align(s_title, LV_ALIGN_TOP_LEFT, UI_HEADER_INSET_X,
-                 header_mid - lv_font_get_line_height(&todoteck_watch_font_26) / 2);
-
-    /* Welche Karte: Punkte oben rechts (statt "1/3"), auf derselben Mitte. */
-    ui_dots_create(&s_card_dots, s_root);
-    lv_obj_align(s_card_dots.box, LV_ALIGN_TOP_RIGHT, -UI_HEADER_INSET_X,
-                 header_mid - UI_DOTS_SIZE / 2);
+    s_head_prev = ui_glyph_create(s_root, HEAD_ARROW);
+    lv_obj_set_pos(s_head_prev, HEAD_ARROW_X, header_mid - HEAD_ARROW / 2);
+    s_head_next = ui_glyph_create(s_root, HEAD_ARROW);
+    lv_obj_align(s_head_next, LV_ALIGN_TOP_RIGHT, -UI_HEADER_INSET_X, header_mid - HEAD_ARROW / 2);
 
     ui_dots_create(&s_page_dots, s_root);
     lv_obj_align(s_page_dots.box, LV_ALIGN_TOP_MID, 0, CONTENT_H - 16);
@@ -317,7 +344,6 @@ static void create_locked(void)
     ui_weather_create_locked(s_root);
 
     s_empty = lv_label_create(s_root);
-    lv_obj_set_style_text_font(s_empty, UI_FONT_QUESTION, 0);
     lv_obj_set_style_text_color(s_empty, lv_color_hex(0x9aa3ad), 0);
     lv_label_set_long_mode(s_empty, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_empty, CONTENT_W - 2 * UI_HEADER_INSET_X);
@@ -342,7 +368,6 @@ static void create_locked(void)
 
     for (int i = 0; i < SEPS_MAX; i++) {
         s_sep[i] = lv_label_create(s_list);
-        lv_obj_set_style_text_font(s_sep[i], UI_FONT_SMALL, 0);
         lv_obj_set_style_text_color(s_sep[i], lv_color_hex(0x9aa3ad), 0);
         lv_label_set_long_mode(s_sep[i], LV_LABEL_LONG_CLIP);
         lv_obj_set_width(s_sep[i], CONTENT_W - 16);
@@ -374,8 +399,25 @@ static void create_locked(void)
         lv_label_set_long_mode(s_row_text[i], LV_LABEL_LONG_DOT);
 
         s_row_aux[i] = lv_label_create(s_row[i]);
-        lv_obj_set_style_text_font(s_row_aux[i], UI_FONT_SMALL, 0);
         lv_obj_align(s_row_aux[i], LV_ALIGN_RIGHT_MID, -16, 0);
+
+        /* Geraete-Symbol links (nur Zuhause, mit Flag), sonst versteckt. */
+        s_row_icon[i] = ui_glyph_create(s_row[i], ROW_ICON);
+        lv_obj_align(s_row_icon[i], LV_ALIGN_LEFT_MID, ROW_ICON_X, 0);
+
+        /*
+         * "OK"-Pille (Paket J): sagt vor dem Tippen, dass ein zweiter
+         * Schritt kommt. Grau, eine Zeile hoch, rechts vor der Zusatzangabe.
+         */
+        s_row_pill[i] = lv_label_create(s_row[i]);
+        lv_label_set_text(s_row_pill[i], "OK");
+        lv_obj_set_style_bg_opa(s_row_pill[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(s_row_pill[i], lv_color_hex(0x3a4656), 0);
+        lv_obj_set_style_text_color(s_row_pill[i], lv_color_hex(0xc9d1d9), 0);
+        lv_obj_set_style_radius(s_row_pill[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_pad_hor(s_row_pill[i], PILL_PAD, 0);
+        lv_obj_set_style_pad_ver(s_row_pill[i], 1, 0);
+        lv_obj_add_flag(s_row_pill[i], LV_OBJ_FLAG_HIDDEN);
     }
 
     /* Rueckgaengig-Chip: hell gefuellt, damit er ueber den dunklen Zeilen steht. */
@@ -390,6 +432,7 @@ static void create_locked(void)
     lv_obj_t *undo_label = lv_label_create(s_undo);
     lv_label_set_text(undo_label, "Rückgängig");
     lv_obj_set_style_text_font(undo_label, &todoteck_watch_font_23, 0);
+    s_undo_label = undo_label;
     lv_obj_set_style_text_color(undo_label, lv_color_hex(0x000000), 0);
     lv_obj_center(undo_label);
     lv_obj_add_flag(s_undo, LV_OBJ_FLAG_HIDDEN);
@@ -403,7 +446,6 @@ static void create_locked(void)
     lv_obj_set_style_bg_color(s_ok, lv_color_hex(0x2ecc71), 0);
     s_ok_label = lv_label_create(s_ok);
     lv_label_set_text(s_ok_label, "OK");
-    lv_obj_set_style_text_font(s_ok_label, &todoteck_watch_font_20, 0);
     lv_obj_set_style_text_color(s_ok_label, lv_color_hex(0x000000), 0);
     lv_obj_center(s_ok_label);
     lv_obj_add_flag(s_ok, LV_OBJ_FLAG_HIDDEN);
@@ -517,13 +559,86 @@ static void render_weather_locked(void)
     }
 }
 
+/*
+ * Kopfzeile und die Schriften, die der Typo-Skala folgen -- vor jedem
+ * Zeichnen, weil `watch_settings.font` sich jederzeit aendern kann.
+ */
+static void render_head_locked(void)
+{
+    const lv_font_t *title = UI_TYPO(UI_TYPO_TITLE);
+    const int32_t header_mid = UI_HEADER_LABEL_Y + lv_font_get_line_height(UI_FONT_SMALL) / 2;
+    lv_label_set_text(s_title, TITLES[s_kind]);
+    lv_obj_set_style_text_font(s_title, title, 0);
+    lv_obj_align(s_title, LV_ALIGN_TOP_LEFT, HEAD_TITLE_X,
+                 header_mid - lv_font_get_line_height(title) / 2);
+    ui_glyph_set(s_head_prev, UI_GLYPH_BACK, true, 0x9aa3ad);
+    ui_glyph_set(s_head_next, s_kind + 1 < UI_CARD_COUNT ? UI_GLYPH_FORWARD : UI_GLYPH_NONE, true,
+                 0x9aa3ad);
+
+    const lv_font_t *meta = UI_TYPO(UI_TYPO_META);
+    lv_obj_set_style_text_font(s_empty, UI_TYPO(UI_TYPO_BODY), 0);
+    lv_obj_set_style_text_font(s_undo_label, UI_TYPO(UI_TYPO_BODY), 0);
+    lv_obj_set_style_text_font(s_ok_label, meta, 0);
+    for (int i = 0; i < SEPS_MAX; i++) {
+        lv_obj_set_style_text_font(s_sep[i], meta, 0);
+    }
+    for (int i = 0; i < ROWS_MAX; i++) {
+        lv_obj_set_style_text_font(s_row_aux[i], meta, 0);
+        lv_obj_set_style_text_font(s_row_pill[i], meta, 0);
+    }
+}
+
+/* Lock: offen? Die Bruecke schickt "Offen"/"Zu" (0.4.3) -- oder "1"/"0". */
+static bool aux_is_open(const char *aux)
+{
+    return strcmp(aux, "1") == 0 || strncmp(aux, "Offen", 5) == 0 || strncmp(aux, "offen", 5) == 0;
+}
+
+/* Symbol einer Schalterzeile aus Flag und Zustand; UI_GLYPH_NONE ohne Flag. */
+static ui_glyph_t row_glyph(const card_item_t *item, bool *on, uint32_t *colour)
+{
+    *on = false;
+    *colour = 0x2ecc71;
+    if (s_kind != UI_CARD_SWITCHES) {
+        return UI_GLYPH_NONE;
+    }
+    if (item->select) {
+        *on = true;
+        *colour = 0xc9d1d9;
+        return UI_GLYPH_LIST;
+    }
+    const bool binary = aux_is_binary(item->aux);
+    /* Angetippt zeigt eine An/Aus-Zeile den Zielzustand, wie vorher das Wort. */
+    const bool state = binary ? (strcmp(item->aux, "1") == 0) != item->done : false;
+    switch ((card_domain_t)item->domain) {
+    case CARD_DOMAIN_LIGHT:
+        *on = state;
+        *colour = 0xf2b23c;
+        return UI_GLYPH_LIGHT;
+    case CARD_DOMAIN_SWITCH:
+        *on = state;
+        return UI_GLYPH_SWITCH;
+    case CARD_DOMAIN_FAN:
+        *on = state;
+        *colour = 0x5ec4ff;
+        return UI_GLYPH_FAN;
+    case CARD_DOMAIN_LOCK:
+        /* Angetippt kennt die Uhr den Zielstand nicht: grau, bis die neue Karte kommt. */
+        *on = !item->done && aux_is_open(item->aux);
+        *colour = 0xf2b23c;
+        return UI_GLYPH_LOCK;
+    case CARD_DOMAIN_NONE:
+        break;
+    }
+    return UI_GLYPH_NONE;
+}
+
 static void render_locked(void)
 {
     if (!s_root) {
         return;
     }
-    lv_label_set_text(s_title, TITLES[s_kind]);
-    ui_dots_set(&s_card_dots, UI_CARD_COUNT, (uint8_t)s_kind);
+    render_head_locked();
     if (s_kind == UI_CARD_WEATHER) {
         render_weather_locked();
         return;
@@ -568,7 +683,7 @@ static void render_locked(void)
             item->group <= list->group_count) {
             lv_label_set_text(s_sep[sep_used], list->groups[item->group - 1]);
             lv_obj_align(s_sep[sep_used], LV_ALIGN_TOP_LEFT, 16,
-                         y + (SEP_H - lv_font_get_line_height(UI_FONT_SMALL)) / 2);
+                         y + (SEP_H - lv_font_get_line_height(UI_TYPO(UI_TYPO_META))) / 2);
             lv_obj_remove_flag(s_sep[sep_used], LV_OBJ_FLAG_HIDDEN);
             sep_used++;
             y += SEP_H;
@@ -584,7 +699,11 @@ static void render_locked(void)
         lv_obj_set_style_border_color(s_row[i], lv_color_hex(0x2ecc71), 0);
 
         const bool striped = (item->colour & CARD_COLOUR_SET) != 0;
-        const int32_t text_x = striped ? 16 + STRIPE_W + 8 : 16;
+        bool glyph_on = false;
+        uint32_t glyph_colour = 0;
+        const ui_glyph_t glyph = row_glyph(item, &glyph_on, &glyph_colour);
+        const int32_t text_x = glyph != UI_GLYPH_NONE ? ROW_ICON_X + ROW_ICON + 10 :
+                               striped ? 16 + STRIPE_W + 8 : 16;
         if (striped) {
             lv_obj_set_size(s_row_stripe[i], STRIPE_W, h - 16);
             lv_obj_align(s_row_stripe[i], LV_ALIGN_LEFT_MID, 12, 0);
@@ -595,17 +714,82 @@ static void render_locked(void)
         } else {
             lv_obj_add_flag(s_row_stripe[i], LV_OBJ_FLAG_HIDDEN);
         }
+        ui_glyph_set(s_row_icon[i], glyph, glyph_on, glyph_colour);
+
+        /*
+         * Die Zusatzangabe rechts. Mit Geraete-Symbol (Flags `l`/`w`/`f`/`k`,
+         * 0.5.0) traegt das Symbol den Zustand, das Wort entfaellt -- ausser
+         * "..." nach dem Tippen auf ein Schloss, dessen Zielstand die Uhr
+         * nicht kennt. Die Auswahl (`s`) zeigt ihre Option weiter als Wort.
+         */
+        const char *aux_text = item->aux;
+        uint32_t aux_colour = 0x9aa3ad;
+        bool aux_shown = true;
+        if (s_kind == UI_CARD_SWITCHES && glyph != UI_GLYPH_NONE && glyph != UI_GLYPH_LIST) {
+            aux_shown = item->domain == CARD_DOMAIN_LOCK && item->done;
+            aux_text = "...";
+        } else if (s_kind == UI_CARD_SWITCHES && aux_is_binary(item->aux)) {
+            /* Schalter ohne Flag: An/Aus als farbiges Wort; angetippt zeigt es den Zielzustand. */
+            bool on = strcmp(item->aux, "1") == 0;
+            if (item->done) {
+                on = !on;
+            }
+            aux_text = on ? "An" : "Aus";
+            aux_colour = on ? 0x2ecc71 : 0x9aa3ad;
+        } else if (s_kind == UI_CARD_SWITCHES) {
+            /*
+             * Ein Wort statt An/Aus (0.4.3): die Option eines input_select
+             * oder "Offen"/"Zu" eines Schlosses. Den Zielstand kennt die Uhr
+             * nicht -- angetippt steht "..." bis die Bruecke die Karte neu
+             * schickt (sie tut das nach jeder Aktion).
+             */
+            aux_text = item->done ? "..." : item->aux;
+            aux_colour = item->done ? 0x9aa3ad : 0x2ecc71;
+        } else {
+            /* Ueberfaellig (Datum statt Uhrzeit): rot. */
+            aux_colour = is_date_aux(item->aux) ? 0xe74c3c : 0x9aa3ad;
+            aux_shown = item->aux[0] != '\0';
+        }
+        /* Unter dem OK-Chip laege die Zusatzangabe nur verdeckt. */
+        aux_shown = aux_shown && !selected;
+        lv_label_set_text(s_row_aux[i], aux_text);
+        lv_obj_set_style_text_color(s_row_aux[i], lv_color_hex(aux_colour), 0);
+        const lv_font_t *meta = UI_TYPO(UI_TYPO_META);
+        const int32_t aux_w = aux_shown ? lv_text_get_width(aux_text, (uint32_t)strlen(aux_text),
+                                                            meta, 0) : 0;
+        if (aux_shown) {
+            lv_obj_remove_flag(s_row_aux[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_row_aux[i], LV_OBJ_FLAG_HIDDEN);
+        }
+
+        /*
+         * Die "OK"-Pille (Paket J): Folgenreiches braucht OK, alles andere
+         * wirkt sofort -- und das soll man vor dem Tippen sehen. Sie steht
+         * an jeder Zeile, die markiert statt ausgefuehrt wird (Heute,
+         * Schalter mit `c`, Schloesser), solange sie nicht schon abgehakt
+         * oder gerade markiert ist (dann steht dort der gruene Chip).
+         */
+        const bool pill = !selected && !item->event && !item->select &&
+                          needs_confirm(list, i) &&
+                          (s_kind == UI_CARD_SWITCHES || !item->done);
+        int32_t right = 16 + (aux_shown ? aux_w + 8 : 0);
+        if (pill) {
+            lv_obj_align(s_row_pill[i], LV_ALIGN_RIGHT_MID, -right, 0);
+            lv_obj_remove_flag(s_row_pill[i], LV_OBJ_FLAG_HIDDEN);
+            right += lv_text_get_width("OK", 2, meta, 0) + 2 * PILL_PAD + 8;
+        } else {
+            lv_obj_add_flag(s_row_pill[i], LV_OBJ_FLAG_HIDDEN);
+        }
 
         /*
          * Breite des Titels: bis zum OK-Chip, wenn die Zeile markiert ist;
-         * bis zur Zusatzangabe rechts (Uhrzeit, An/Aus), wenn es eine gibt;
-         * sonst die volle Zeile. Hoehe: eine Textzeile, wenn der Titel in
-         * eine passt (dann steht er mittig), sonst zwei -- LONG_DOT kuerzt
-         * nach der zweiten mit "...".
+         * sonst bis zu Pille und Zusatzangabe rechts (gemessen, seit 0.5.0
+         * nicht mehr pauschal 78 px). Hoehe: eine Textzeile, wenn der Titel
+         * in eine passt (dann steht er mittig), sonst zwei -- LONG_DOT
+         * kuerzt nach der zweiten mit "...".
          */
-        const bool has_aux = s_kind == UI_CARD_SWITCHES || item->aux[0] != '\0';
-        const int32_t text_w = (selected ? CONTENT_W - OK_W - 8 : has_aux ? CONTENT_W - 94 :
-                                CONTENT_W - 16) - text_x;
+        const int32_t text_w = (selected ? CONTENT_W - OK_W - 8 : CONTENT_W - right) - text_x;
         const bool one_line = lv_text_get_width(item->text, (uint32_t)strlen(item->text), font,
                                                 0) <= text_w;
         lv_obj_set_style_text_font(s_row_text[i], font, 0);
@@ -618,39 +802,6 @@ static void render_locked(void)
         lv_obj_set_style_text_color(s_row_text[i],
                                     item->done ? lv_color_hex(0x6f7f95) : lv_color_hex(0xf2f2f2),
                                     0);
-        if (s_kind == UI_CARD_SWITCHES && aux_is_binary(item->aux)) {
-            /* Schalter: An/Aus als farbiges Wort; angetippt zeigt es den Zielzustand. */
-            bool on = strcmp(item->aux, "1") == 0;
-            if (item->done) {
-                on = !on;
-            }
-            lv_label_set_text(s_row_aux[i], on ? "An" : "Aus");
-            lv_obj_set_style_text_color(s_row_aux[i],
-                                        on ? lv_color_hex(0x2ecc71) : lv_color_hex(0x9aa3ad), 0);
-        } else if (s_kind == UI_CARD_SWITCHES) {
-            /*
-             * Ein Wort statt An/Aus (0.4.3): die Option eines input_select
-             * oder "Offen"/"Zu" eines Schlosses. Den Zielstand kennt die Uhr
-             * nicht -- angetippt steht "..." bis die Bruecke die Karte neu
-             * schickt (sie tut das nach jeder Aktion).
-             */
-            lv_label_set_text(s_row_aux[i], item->done ? "..." : item->aux);
-            lv_obj_set_style_text_color(s_row_aux[i],
-                                        item->done ? lv_color_hex(0x9aa3ad) : lv_color_hex(0x2ecc71),
-                                        0);
-        } else {
-            /* Ueberfaellig (Datum statt Uhrzeit): rot. */
-            lv_label_set_text(s_row_aux[i], item->aux);
-            lv_obj_set_style_text_color(s_row_aux[i],
-                                        is_date_aux(item->aux) ? lv_color_hex(0xe74c3c) :
-                                        lv_color_hex(0x9aa3ad), 0);
-        }
-        /* Unter dem OK-Chip laege die Zusatzangabe nur verdeckt. */
-        if (selected) {
-            lv_obj_add_flag(s_row_aux[i], LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(s_row_aux[i], LV_OBJ_FLAG_HIDDEN);
-        }
         lv_obj_remove_flag(s_row[i], LV_OBJ_FLAG_HIDDEN);
         y += h + ROW_GAP;
     }
@@ -860,9 +1011,23 @@ void ui_cards_add_item(ui_card_kind_t kind, const char *text, const char *aux,
         ui_status_copy_display_text(item->aux, aux ? aux : "", sizeof(item->aux));
         item->event = flags && strchr(flags, 'e') != NULL;
         item->colour = item->event ? (CARD_EVENT_COLOUR | CARD_COLOUR_SET) : parse_colour(colour);
-        item->confirm = !item->event && flags && strchr(flags, 'c') != NULL;
+        /*
+         * Schloesser (`k`) fragen immer nach -- auch wenn eine Bruecke das
+         * `c` vergisst: Eine offene Haustuer ist kein Fehltipp, den man mit
+         * "Rueckgaengig" wieder einfaengt (Paket J).
+         */
+        item->confirm = !item->event && flags &&
+                        (strchr(flags, 'c') != NULL ||
+                         (kind == UI_CARD_SWITCHES && strchr(flags, 'k') != NULL));
         item->select = kind == UI_CARD_SWITCHES && !item->event && flags &&
                        strchr(flags, 's') != NULL;
+        item->domain = CARD_DOMAIN_NONE;
+        if (kind == UI_CARD_SWITCHES && flags) {
+            item->domain = strchr(flags, 'k') ? CARD_DOMAIN_LOCK :
+                           strchr(flags, 'l') ? CARD_DOMAIN_LIGHT :
+                           strchr(flags, 'f') ? CARD_DOMAIN_FAN :
+                           strchr(flags, 'w') ? CARD_DOMAIN_SWITCH : CARD_DOMAIN_NONE;
+        }
         item->done = false;
         item->group = 0;
         if (group && group[0]) {
@@ -950,9 +1115,10 @@ bool ui_cards_visible(void)
  * Gesten auf den Karten -- Teil der einen Gestensprache der Uhr (Tabelle in
  * main.c, handle_touch):
  *
- *   links / rechts   naechste / vorige Karte (Rueckgaengig-Chip verschwindet)
+ *   links / rechts   naechste / vorige Karte (Rueckgaengig-Chip verschwindet);
+ *                    rechts von Heute aus: Karten zu, aufs Zifferblatt
  *   nach oben        naechster Ausschnitt der Liste; am Ende nichts
- *   nach unten       voriger Ausschnitt; am Anfang eine Ebene zurueck: Karten zu
+ *   nach unten       voriger Ausschnitt; am Anfang nichts (0.5.0)
  *   Tippen           Chip "Rueckgaengig" vor Zeile; Zeile abhaken/schalten --
  *                    auf Heute (und bei Schaltern mit Flag `c`) erst
  *                    markieren, dann "OK" (11/2026)
@@ -968,8 +1134,10 @@ bool ui_cards_visible(void)
  * stellt die App ein (`voice_switches[].confirm`, Flag `c` im `list`).
  *
  * Bis 0.3.6 waren die Listen in Seiten geteilt, "nach oben" lief im Kreis
- * und "nach unten" schloss von jeder Seite. Jetzt scrollt die Liste; am
- * oberen Ende bleibt "nach unten" die eine Ebene zurueck.
+ * und "nach unten" schloss von jeder Seite. Von 0.4.0 bis 0.4.6 scrollte
+ * die Liste, und am oberen Ende war "nach unten" die eine Ebene zurueck --
+ * dieselbe Geste tat also je nach Lage zweierlei. Seit Paket J (0.5.0)
+ * gilt eine Regel: rechts ist zurueck, oben/unten scrollt nur.
  */
 ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit_t *hit)
 {
@@ -987,8 +1155,9 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
     if (s_kind == UI_CARD_WEATHER) {
         /*
          * Die Wetterkarte: nach oben die naechste Seite, nach unten die
-         * vorige -- auf der ersten zurueck aufs Zifferblatt. Links und
-         * rechts wie bei den anderen Karten, Tippen tut nichts.
+         * vorige -- auf der ersten nichts (seit 0.5.0; vorher zurueck aufs
+         * Zifferblatt). Links und rechts wie bei den anderen Karten, Tippen
+         * tut nichts.
          */
         switch ((voice_board_gesture_t)gesture) {
         case VOICE_BOARD_SWIPE_LEFT:
@@ -1006,9 +1175,7 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
             }
             break;
         case VOICE_BOARD_SWIPE_DOWN:
-            if (s_wpage == 0) {
-                action = UI_CARDS_CLOSE;
-            } else {
+            if (s_wpage > 0) {
                 s_wpage--;
                 render_locked();
             }
@@ -1056,9 +1223,8 @@ ui_cards_action_t ui_cards_touch(int gesture, int16_t x, int16_t y, ui_cards_hit
         (void)scroll_page_locked(1);
         break;
     case VOICE_BOARD_SWIPE_DOWN:
-        if (!scroll_page_locked(-1)) {
-            action = UI_CARDS_CLOSE;
-        }
+        /* Am Anfang der Liste: nichts (Paket J) -- zurueck geht es nach rechts. */
+        (void)scroll_page_locked(-1);
         break;
     case VOICE_BOARD_TAP: {
         /*

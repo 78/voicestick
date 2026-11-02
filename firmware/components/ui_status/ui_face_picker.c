@@ -7,8 +7,13 @@
  * "Gross" kaum zu unterscheiden. Links/rechts wischen blaettert, die Punkte
  * darunter sagen, wo man steht, der Name steht unter der Vorschau. Tippen
  * uebernimmt (die ganze Flaeche -- am Handgelenk trifft man sonst daneben),
- * nach unten wischen oder vom linken Rand zurueck bricht ab, ebenso zehn
- * Sekunden ohne Eingabe.
+ * ausser auf das Zurueck "‹" links oben (0.5.0), das abbricht.
+ *
+ * Gesten nach der einen Regel (Paket J, 0.5.0): rechts wischen bricht ab --
+ * ueberall, bis 0.4.6 nur vom linken Rand, sonst blaetterte es zurueck.
+ * Geblaettert wird mit links (naechstes, im Kreis) und mit oben/unten
+ * (naechstes/voriges) -- "scrollen" durch die drei Layouts; nach unten brach
+ * bis 0.4.6 ab. Zehn Sekunden ohne Eingabe brechen ebenfalls ab.
  *
  * Die Vorschau zeigt die echte Uhrzeit und das echte Datum, aber die Zeilen
  * nur als Balken: Es geht um die Anordnung, nicht um den Inhalt.
@@ -42,6 +47,7 @@ const char *ui_face_layout_name(ui_face_layout_t layout)
 }
 
 #if CONFIG_VOICE_BOARD_WATCH206
+#include "ui_chrome.h"
 #include "ui_layout_watch206.h"
 #include "ui_status_icons.h"
 
@@ -49,8 +55,6 @@ const char *ui_face_layout_name(ui_face_layout_t layout)
 static const char *const FACE_LAYOUT_TITLES[UI_FACE_COUNT] = { "Info", "Minimal", "Groß" };
 
 #define PICKER_TIMEOUT_MS 10000
-/* Bis hierher zaehlt ein Wischen nach rechts als "vom linken Rand": zurueck (wie main.c). */
-#define PICKER_BACK_EDGE_PX 30
 
 #define PREVIEW_W 240
 #define PREVIEW_H 290
@@ -62,6 +66,9 @@ static const char *const FACE_LAYOUT_TITLES[UI_FACE_COUNT] = { "Info", "Minimal"
 #define HINT_Y (DOTS_Y + UI_DOTS_SIZE + 12)
 
 static lv_obj_t *s_root;
+static lv_obj_t *s_back;
+static lv_obj_t *s_title;
+static lv_obj_t *s_hint;
 static lv_obj_t *s_frame;
 static lv_obj_t *s_clock;
 static lv_obj_t *s_large[2];
@@ -109,9 +116,10 @@ static void create_locked(void)
     lv_obj_set_style_bg_color(s_root, lv_color_hex(0x000000), 0);
     lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
 
-    lv_obj_t *title = create_text(s_root, UI_FONT_SMALL, 0x9aa3ad);
-    lv_label_set_text(title, "Zifferblatt");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, UI_HEADER_LABEL_Y);
+    s_back = ui_back_create(s_root);
+    s_title = create_text(s_root, UI_FONT_SMALL, 0x9aa3ad);
+    lv_label_set_text(s_title, "Zifferblatt");
+    lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, UI_HEADER_LABEL_Y);
 
     /* Der Rahmen steht fuer das Glas der Uhr: abgerundet, schwarz, grau umrandet. */
     s_frame = lv_obj_create(s_root);
@@ -143,9 +151,9 @@ static void create_locked(void)
     ui_dots_create(&s_dots, s_root);
     lv_obj_align(s_dots.box, LV_ALIGN_TOP_MID, 0, DOTS_Y);
 
-    lv_obj_t *hint = create_text(s_root, UI_FONT_SMALL, 0x9aa3ad);
-    lv_label_set_text(hint, "Tippen übernimmt");
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, HINT_Y);
+    s_hint = create_text(s_root, UI_FONT_SMALL, 0x9aa3ad);
+    lv_label_set_text(s_hint, "Tippen übernimmt");
+    lv_obj_align(s_hint, LV_ALIGN_TOP_MID, 0, HINT_Y);
 }
 
 static void show_obj(lv_obj_t *o, bool on)
@@ -204,6 +212,10 @@ static void render_locked(void)
     }
     ui_status_icons_show(&s_tecki, info);
 
+    /* Titel, Name und Hinweis in der Typo-Skala (die Vorschau selbst ist ein Bild, keine Schrift). */
+    lv_obj_set_style_text_font(s_title, UI_TYPO(UI_TYPO_META), 0);
+    lv_obj_set_style_text_font(s_hint, UI_TYPO(UI_TYPO_META), 0);
+    lv_obj_set_style_text_font(s_name, UI_TYPO(UI_TYPO_TITLE), 0);
     lv_label_set_text(s_name, FACE_LAYOUT_TITLES[s_page]);
     ui_dots_set(&s_dots, UI_FACE_COUNT, (uint8_t)s_page);
 }
@@ -279,7 +291,6 @@ ui_face_picker_action_t ui_face_picker_touch(int gesture, int16_t x, int16_t y,
                                              ui_face_layout_t *chosen)
 {
 #if CONFIG_VOICE_BOARD_WATCH206
-    (void)y;
     ui_face_picker_action_t action = UI_FACE_PICKER_NONE;
     ui_status_lock();
     if (!s_visible) {
@@ -289,6 +300,11 @@ ui_face_picker_action_t ui_face_picker_touch(int gesture, int16_t x, int16_t y,
     switch (gesture) {
     case VOICE_BOARD_TAP:
     case VOICE_BOARD_LONG_PRESS:
+        if (ui_back_hit(s_back, x, y)) {
+            hide_locked();
+            action = UI_FACE_PICKER_CANCELLED;
+            break;
+        }
         if (chosen) {
             *chosen = s_page;
         }
@@ -296,21 +312,18 @@ ui_face_picker_action_t ui_face_picker_touch(int gesture, int16_t x, int16_t y,
         action = UI_FACE_PICKER_CHOSEN;
         break;
     case VOICE_BOARD_SWIPE_LEFT:
+    case VOICE_BOARD_SWIPE_UP:
         s_page = (ui_face_layout_t)((s_page + 1) % UI_FACE_COUNT);
         render_locked();
         restart_timeout_locked();
         break;
-    case VOICE_BOARD_SWIPE_RIGHT:
-        if (x < PICKER_BACK_EDGE_PX) {
-            hide_locked();
-            action = UI_FACE_PICKER_CANCELLED;
-            break;
-        }
+    case VOICE_BOARD_SWIPE_DOWN:
         s_page = (ui_face_layout_t)((s_page + UI_FACE_COUNT - 1) % UI_FACE_COUNT);
         render_locked();
         restart_timeout_locked();
         break;
-    case VOICE_BOARD_SWIPE_DOWN:
+    case VOICE_BOARD_SWIPE_RIGHT:
+        /* Rechts ist zurueck -- ueberall (0.5.0). */
         hide_locked();
         action = UI_FACE_PICKER_CANCELLED;
         break;
