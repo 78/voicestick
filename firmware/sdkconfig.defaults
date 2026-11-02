@@ -58,3 +58,7 @@ CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
 # Bootloader einmal per USB (merged*.bin) neu geschrieben wurde -- OTA tauscht
 # nur die App, nie den Bootloader.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# 0.5.1: NimBLE-Host-Task groesser (Verdacht Stack-Ueberlauf beim Verbinden in 0.5.0,
+# ble_control_cb zeichnet im Host-Task, der Zeichenpfad ist mit Paket J tiefer geworden).
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=7168

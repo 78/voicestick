@@ -1278,7 +1278,10 @@ static void queue_app_event_with_ota(app_event_type_t type, uint32_t written, ui
             .written = written,
             .size = size,
         };
-        (void)xQueueSend(s_app_event_queue, &event, 0);
+        if (xQueueSend(s_app_event_queue, &event, 0) != pdTRUE) {
+            /* Bisher still verworfen -- dann fehlte z. B. BLE_CONNECTED unerklaert. */
+            ESP_LOGW(TAG, "drop event %d: app queue full", (int)type);
+        }
     }
 }
 
@@ -1556,9 +1559,14 @@ static void apply_face_command(const cJSON *root)
     }
     s_last_glance_us = esp_timer_get_time();
     if (s_watch_locked) {
-        /* Ein neues Zifferblatt heisst: Der Server nimmt das Token wieder. */
-        app_event_t ev = { .type = APP_EVENT_LOCK_STATE, .size = 0 };
-        (void)xQueueSend(s_app_event_queue, &ev, 0);
+        /*
+         * Ein neues Zifferblatt heisst: Der Server nimmt das Token wieder.
+         * Ueber queue_app_event statt eines app_event_t hier: Diese Funktion
+         * laeuft im NimBLE-Host-Task, und ein lokales app_event_t (~460 Byte)
+         * belegte den Stack fuer den ganzen tiefen Zeichenpfad danach
+         * (Verdacht Stack-Ueberlauf beim Verbinden, 0.5.0 -> 0.5.1).
+         */
+        queue_app_event(APP_EVENT_LOCK_STATE);
     }
 #endif
     ui_status_set_face((const char (*)[UI_STATUS_FACE_LEN])lines, count,
@@ -4285,7 +4293,7 @@ static esp_err_t init_buttons(void)
     }
 #endif
 
-    BaseType_t ok = xTaskCreate(app_event_task, "app_event_task", 4096,
+    BaseType_t ok = xTaskCreate(app_event_task, "app_event_task", 6144,
                                 NULL, 6, NULL);
     return ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
@@ -4658,6 +4666,34 @@ static void prepare_crash_report(esp_reset_reason_t reason)
 }
 #endif
 
+/* Bestaetigt die laufende OTA-Fassung nach OTA_VALID_AFTER_US (siehe app_main). */
+#define OTA_VALID_AFTER_US (60LL * 1000 * 1000)
+static esp_timer_handle_t s_ota_valid_timer;
+
+static void ota_valid_cb(void *arg)
+{
+    (void)arg;
+    const esp_err_t valid_err = esp_ota_mark_app_valid_cancel_rollback();
+    if (valid_err != ESP_OK && valid_err != ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGW(TAG, "OTA-Fassung nicht bestaetigt: %s", esp_err_to_name(valid_err));
+    } else {
+        ESP_LOGI(TAG, "OTA-Fassung nach 60 s bestaetigt");
+    }
+}
+
+static void start_ota_valid_timer(void)
+{
+    const esp_timer_create_args_t args = {
+        .callback = ota_valid_cb,
+        .name = "ota_valid",
+    };
+    if (esp_timer_create(&args, &s_ota_valid_timer) != ESP_OK ||
+        esp_timer_start_once(s_ota_valid_timer, OTA_VALID_AFTER_US) != ESP_OK) {
+        /* Ohne Zeitgeber lieber sofort bestaetigen als gar nicht. */
+        ota_valid_cb(NULL);
+    }
+}
+
 void app_main(void)
 {
     const esp_reset_reason_t reset_reason = esp_reset_reason();
@@ -4749,10 +4785,14 @@ void app_main(void)
          * Neustart auf die vorige Fassung zurueck. Ein Abbild, das vorher
          * abstuerzt, erreicht diese Zeile nie -- genau dann soll er das.
          */
-        const esp_err_t valid_err = esp_ota_mark_app_valid_cancel_rollback();
-        if (valid_err != ESP_OK && valid_err != ESP_ERR_NOT_SUPPORTED) {
-            ESP_LOGW(TAG, "OTA-Fassung nicht bestaetigt: %s", esp_err_to_name(valid_err));
-        }
+        /*
+         * Seit 0.5.1 erst nach 60 s Laufzeit: 0.5.0 lief bis hierher, stuerzte
+         * aber beim ersten Verbinden der Bruecke ab -- bestaetigt war die
+         * Fassung da schon, der Rueckfall griff nie. Wer in der ersten Minute
+         * abstuerzt (typisch: Bruecke verbindet nach wenigen Sekunden), faellt
+         * jetzt beim Neustart auf die vorige Fassung zurueck.
+         */
+        start_ota_valid_timer();
     }
 
     esp_err_t audio_err = audio_pipeline_init();
