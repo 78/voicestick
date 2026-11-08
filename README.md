@@ -365,7 +365,7 @@ curl -LO https://github.com/Fauteck/todoteck-voicestick/releases/download/firmwa
 
 That is what `scripts/fetch-firmware.ps1` in the
 [Todoteck repository](https://github.com/Fauteck/todo) uses to drop both images
-into the shared Drive folder the phone flashes from — no credentials involved.
+into the shared folder on NAS1 the phone flashes from — no credentials involved.
 Two paths start it: the APK build after a Todoteck release takes the firmware
 along, and since 11/2026 every green run on `main` also posts to a Home
 Assistant webhook (secret `HA_FIRMWARE_WEBHOOK_URL`, step „Home Assistant

@@ -28,7 +28,7 @@
 #
 # Daran haengt die Abholung auf dem Bueral-PC (`scripts/fetch-firmware.ps1` im
 # Todoteck-Repo), die die beiden Abbilder neben die APK in den geteilten
-# Google-Drive-Ordner legt. Ohne Token, weil dieser Fork oeffentlich ist — ein
+# Ablageordner auf NAS1 legt (Netzlaufwerk Z: des Buero-PCs). Ohne Token, weil dieser Fork oeffentlich ist — ein
 # Fork eines oeffentlichen Repos kann gar nicht privat sein.
 
 name: Firmware bauen
@@ -171,7 +171,7 @@ jobs:
 
           echo "Veroeffentlicht: https://github.com/${GITHUB_REPOSITORY}/releases/tag/firmware-latest" >> "$GITHUB_STEP_SUMMARY"
 
-      # ---- Home Assistant melden: Firmware ins Drive (nur main) ----
+      # ---- Home Assistant melden: Firmware in den Ablageordner (nur main) ----
       #
       # Bis 11/2026 kam neue Firmware nur mit einem Todoteck-Release ins
       # Drive, weil nur der APK-Build auf dem Buero-PC sie mitnahm. Jetzt
@@ -180,7 +180,7 @@ jobs:
       # Fauteck/todo), das nur die Firmware abholt. Ohne Secret wird der
       # Schritt uebersprungen; ein Fehler hier macht den Lauf nicht rot —
       # die Abbilder sind schon veroeffentlicht.
-      - name: Home Assistant melden (Firmware ins Drive)
+      - name: Home Assistant melden (Firmware in den Ablageordner)
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         env:
