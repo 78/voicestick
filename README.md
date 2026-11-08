@@ -369,9 +369,9 @@ into the shared folder on NAS1 the phone flashes from — no credentials involve
 Two paths start it: the APK build after a Todoteck release takes the firmware
 along, and since 11/2026 every green run on `main` also posts to a Home
 Assistant webhook (secret `HA_FIRMWARE_WEBHOOK_URL`, step „Home Assistant
-melden“). The automation „Todoteck · Firmware ins Drive“ then runs only
+melden“). The automation „Todoteck · Firmware auf das NAS“ then runs only
 `scripts/firmware-holen.ps1` on the office PC, so a new firmware reaches the
-Drive folder without a Todoteck release. Without the secret the step is skipped.
+folder on NAS1 without a Todoteck release. Without the secret the step is skipped.
 
 The tag is deliberately not a `v*` one: `release.yml` triggers on `push: tags:
 ["v*"]` and would check the tag against `VERSION`, upload to Aliyun OSS and
