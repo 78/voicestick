@@ -175,8 +175,8 @@ jobs:
       #
       # Bis 11/2026 kam neue Firmware nur mit einem Todoteck-Release ins
       # Drive, weil nur der APK-Build auf dem Buero-PC sie mitnahm. Jetzt
-      # meldet dieser Lauf selbst: Die HA-Automation „Todoteck · Firmware ins
-      # Drive“ startet auf dem Buero-PC `scripts/firmware-holen.ps1` (Repo
+      # meldet dieser Lauf selbst: Die HA-Automation „Todoteck · Firmware auf
+      # das NAS“ startet auf dem Buero-PC `scripts/firmware-holen.ps1` (Repo
       # Fauteck/todo), das nur die Firmware abholt. Ohne Secret wird der
       # Schritt uebersprungen; ein Fehler hier macht den Lauf nicht rot —
       # die Abbilder sind schon veroeffentlicht.
