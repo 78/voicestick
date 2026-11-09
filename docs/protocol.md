@@ -82,7 +82,7 @@ Currently emitted state events:
 
 <!-- doku-vertrag:device-info -->
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.5.2","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.5.3","ui_states":["ready","recording","thinking","pending_confirmation","error","no_speech"]}
 ```
 <!-- /doku-vertrag -->
 
@@ -896,6 +896,8 @@ boot -> advertising -> connected -> idle -> recording -> idle
 ```
 
 The firmware also dims the display after 30 seconds of idle time. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes the device from deep sleep.
+
+Before deep sleep the device closes the connection itself (0.5.3), so the bridge sees a regular disconnect at once instead of a supervision timeout seconds later, and a bridge that reconnects automatically (Android `autoConnect`) is armed immediately. After a connection it did not close and the bridge did not close either — a supervision timeout, a radio shadow — it advertises fast (60–120 ms) for 120 s instead of the usual 30 s, because the bridge is most likely still within reach and scanning. The diagnostics page counts these losses since boot (`Abrisse`) with the NimBLE reason of the last one.
 
 macOS:
 
