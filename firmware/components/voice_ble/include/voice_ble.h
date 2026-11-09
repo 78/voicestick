@@ -50,9 +50,24 @@ esp_err_t voice_ble_request_fast_interval(void);
 esp_err_t voice_ble_request_slow_interval(void);
 /*
  * Unverbunden: die schnellen 30 Sekunden Werbung (60-120 ms) neu starten,
- * etwa nach einem Tastendruck. Verbunden oder schon schnell: tut nichts.
+ * etwa nach einem Tastendruck. Verbunden oder schon schnell: tut nichts --
+ * auch die laengere schnelle Phase nach einem Abriss (120 s) kuerzt es nicht.
  */
 void voice_ble_advertise_fast(void);
+/*
+ * Die Verbindung von unserer Seite beenden, bevor die Uhr in den Tiefschlaf
+ * geht. Die Bruecke erfaehrt es dann sofort statt erst nach dem Supervision-
+ * Timeout und stellt ihre automatische Wiederverbindung gleich scharf.
+ * ESP_OK: der Abbau laeuft, voice_ble_is_connected() wird false, sobald er
+ * durch ist. ESP_ERR_INVALID_STATE ohne Verbindung.
+ */
+esp_err_t voice_ble_disconnect(void);
+/*
+ * Abrisse seit dem Start (Verbindungen, die weder wir noch die Bruecke
+ * beendet haben) und der NimBLE-Grund des letzten fremden Endes, 0 = keiner.
+ * Fuer die Diagnose-Seite; NULL-Zeiger sind erlaubt.
+ */
+void voice_ble_link_stats(uint16_t *drops, int *last_reason);
 esp_err_t voice_ble_send_device_info(void);
 esp_err_t voice_ble_send_button_down(const char *button, uint32_t session_id);
 esp_err_t voice_ble_send_button_up(const char *button, uint32_t duration_ms,

@@ -96,7 +96,7 @@ static const ble_uuid128_t s_speaker_uuid =
 static voice_ble_speaker_cb_t s_speaker_cb;
 
 static void start_advertising(void);
-static void start_advertising_mode(bool fast);
+static void start_advertising_mode(bool fast, uint32_t fast_ms);
 static void stop_advertising(void);
 static struct ble_npl_callout s_adv_retry_callout;
 #define ADV_RETRY_DELAY_MS 1000
@@ -108,11 +108,25 @@ static struct ble_npl_callout s_adv_retry_callout;
  * startet die schnellen 30 Sekunden neu (voice_ble_advertise_fast).
  */
 #define ADV_FAST_MS 30000
+/*
+ * Nach einem Abriss (Supervision-Timeout, nicht ein gewolltes Trennen) ist
+ * das Handy mit grosser Wahrscheinlichkeit noch in Reichweite und sucht --
+ * Android im Hintergrund aber nur mit kurzen Fenstern alle ein bis zwei
+ * Sekunden. Bei 500-1000 ms Werbung trifft es die Uhr erst nach Minuten,
+ * bei 60-120 ms binnen Sekunden. Darum nach einem Abriss zwei Minuten
+ * schnell statt dreissig Sekunden (0.5.3).
+ */
+#define ADV_FAST_AFTER_LOSS_MS 120000
 #define ADV_FAST_ITVL_MIN_MS 60
 #define ADV_FAST_ITVL_MAX_MS 120
 #define ADV_SLOW_ITVL_MIN_MS 500
 #define ADV_SLOW_ITVL_MAX_MS 1000
 static bool s_adv_fast;
+/* Ein Abbau, den voice_ble_disconnect() angestossen hat (Tiefschlaf). */
+static bool s_local_terminate;
+/* Abrisse seit dem Start und der Grund des letzten fremden Endes (Diagnose). */
+static uint16_t s_link_drops;
+static int s_last_disconnect_reason;
 
 static void adv_retry_callout_cb(struct ble_npl_event *ev)
 {
@@ -579,8 +593,28 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         }
         return 0;
 
-    case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "disconnected reason=%d", event->disconnect.reason);
+    case BLE_GAP_EVENT_DISCONNECT: {
+        /*
+         * Wer hat beendet? Wir selbst (Tiefschlaf), die Bruecke (Geraete-
+         * wechsel, Bluetooth aus) oder niemand -- dann ist es ein Abriss:
+         * Supervision-Timeout, Funkloch, abgestuerztes Handy. Nur der
+         * Abriss zaehlt fuer die Diagnose und bekommt die lange schnelle
+         * Werbung; nach einem gewollten Ende reichen die ueblichen 30 s.
+         */
+        const int reason = event->disconnect.reason;
+        const bool ours = s_local_terminate ||
+                          reason == BLE_HS_HCI_ERR(BLE_ERR_CONN_TERM_LOCAL);
+        const bool remote = reason == BLE_HS_HCI_ERR(BLE_ERR_REM_USER_CONN_TERM);
+        const bool lost = !ours && !remote;
+        s_local_terminate = false;
+        if (!ours) {
+            s_last_disconnect_reason = reason;
+        }
+        if (lost) {
+            s_link_drops++;
+        }
+        ESP_LOGI(TAG, "disconnected reason=%d (%s)", reason,
+                 ours ? "wir" : remote ? "Bruecke" : "Abriss");
         if (s_ota.active) {
             (void)esp_ota_abort(s_ota.handle);
             ota_clear_state();
@@ -595,11 +629,16 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_itvl_target = CONN_ITVL_NONE;
         s_itvl_update_pending = false;
-        start_advertising();
+        if (lost) {
+            start_advertising_mode(true, ADV_FAST_AFTER_LOSS_MS);
+        } else {
+            start_advertising();
+        }
         if (s_connection_cb) {
             s_connection_cb(false);
         }
         return 0;
+    }
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
         /*
@@ -608,7 +647,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
          * beendet -- darum kuemmert sich BLE_GAP_EVENT_CONNECT.
          */
         if (event->adv_complete.reason == BLE_HS_ETIMEOUT && !s_connected) {
-            start_advertising_mode(false);
+            start_advertising_mode(false, 0);
         }
         return 0;
 
@@ -673,10 +712,11 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 
 static void start_advertising(void)
 {
-    start_advertising_mode(true);
+    start_advertising_mode(true, ADV_FAST_MS);
 }
 
-static void start_advertising_mode(bool fast)
+/* fast_ms: wie lange die schnelle Phase laeuft; bei langsamer Werbung ohne Belang. */
+static void start_advertising_mode(bool fast, uint32_t fast_ms)
 {
     if (s_connected) {
         ESP_LOGD(TAG, "skip advertising while connected");
@@ -719,8 +759,8 @@ static void start_advertising_mode(bool fast)
     params.itvl_min = BLE_GAP_ADV_ITVL_MS(fast ? ADV_FAST_ITVL_MIN_MS : ADV_SLOW_ITVL_MIN_MS);
     params.itvl_max = BLE_GAP_ADV_ITVL_MS(fast ? ADV_FAST_ITVL_MAX_MS : ADV_SLOW_ITVL_MAX_MS);
 
-    /* Schnell nur fuer eine Weile: nach ADV_FAST_MS meldet sich ADV_COMPLETE und schaltet auf langsam. */
-    rc = ble_gap_adv_start(s_own_addr_type, NULL, fast ? ADV_FAST_MS : BLE_HS_FOREVER, &params,
+    /* Schnell nur fuer eine Weile: nach fast_ms meldet sich ADV_COMPLETE und schaltet auf langsam. */
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, fast ? (int32_t)fast_ms : BLE_HS_FOREVER, &params,
                            gap_event_cb, NULL);
     if (rc != 0) {
         ESP_LOGW(TAG, "start advertising failed rc=%d, will retry in %d ms",
@@ -731,7 +771,12 @@ static void start_advertising_mode(bool fast)
     }
 
     s_adv_fast = fast;
-    ESP_LOGI(TAG, "advertising as %s (%s)", s_device_name, fast ? "schnell" : "langsam");
+    if (fast) {
+        ESP_LOGI(TAG, "advertising as %s (schnell, %lu s)", s_device_name,
+                 (unsigned long)(fast_ms / 1000));
+    } else {
+        ESP_LOGI(TAG, "advertising as %s (langsam)", s_device_name);
+    }
 }
 
 void voice_ble_advertise_fast(void)
@@ -740,7 +785,33 @@ void voice_ble_advertise_fast(void)
         return;
     }
     stop_advertising();
-    start_advertising_mode(true);
+    start_advertising_mode(true, ADV_FAST_MS);
+}
+
+esp_err_t voice_ble_disconnect(void)
+{
+    if (!s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_local_terminate = true;
+    int rc = ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        s_local_terminate = false;
+        ESP_LOGW(TAG, "terminate failed rc=%d", rc);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "closing link on our side");
+    return ESP_OK;
+}
+
+void voice_ble_link_stats(uint16_t *drops, int *last_reason)
+{
+    if (drops) {
+        *drops = s_link_drops;
+    }
+    if (last_reason) {
+        *last_reason = s_last_disconnect_reason;
+    }
 }
 
 static void stop_advertising(void)
@@ -964,16 +1035,22 @@ esp_err_t voice_ble_request_slow_interval(void)
     /*
      * Langsam heisst seit Paket H: 400-500 ms Intervall (Einheit 1,25 ms)
      * mit Slave Latency 4 -- die Uhr darf vier Ereignisse ueberspringen und
-     * hoert also hoechstens alle 2,5 s hin. Supervision 8 s (Einheit 10 ms),
-     * mehr als das Doppelte von (1 + Latency) * Intervall, wie die
-     * Spezifikation es verlangt. Bis 0.4.0 waren es 50-200 ms bei 5 s.
+     * hoert also hoechstens alle 2,5 s hin. Supervision 20 s (Einheit 10 ms;
+     * die Spezifikation verlangt mehr als das Doppelte von
+     * (1 + Latency) * Intervall, also ueber 5 s, Android nimmt bis 32 s).
+     * Bis 0.5.2 waren es 8 s: Am Handgelenk liegt der Koerper oft zwischen
+     * Uhr und Hosentasche, und ein paar Sekunden Funkschatten rissen die
+     * Verbindung ab, obwohl das Handy nie weg war. Dass eine schlafende Uhr
+     * dem Handy jetzt 20 statt 8 s lang verbunden erscheint, spielt keine
+     * Rolle mehr: Vor dem Tiefschlaf meldet sie sich ab
+     * (voice_ble_disconnect). Bis 0.4.0 waren es 50-200 ms bei 5 s.
      * Schnell (15-30 ms) bleibt fuers Aufnehmen, OTA und die Listen.
      */
     struct ble_gap_upd_params params = {
         .itvl_min = 320,  // 400ms
         .itvl_max = 400,  // 500ms
         .latency = 4,
-        .supervision_timeout = 800,  // 8s
+        .supervision_timeout = 2000,  // 20s
         .min_ce_len = 0,
         .max_ce_len = 0,
     };

@@ -324,7 +324,7 @@ static bool s_bridge_known;
 static volatile int64_t s_last_glance_us;
 static char s_last_error[64];
 static esp_reset_reason_t s_reset_reason;
-static char s_diag_text[480];
+static char s_diag_text[512];
 /*
  * Absturz-Bericht (Punkt 35): die Laufzeit des vorigen Starts. Im
  * RTC-Speicher ohne Initialisierung -- er ueberlebt Panic und Watchdog,
@@ -1050,6 +1050,24 @@ static void enter_deep_sleep(void)
         ESP_LOGW(TAG, "wake pin still low after %d ms, abort deep sleep", wait_ms);
         restart_deep_sleep_timer();
         return;
+    }
+
+    /*
+     * Erst abmelden, dann schlafen (0.5.3). Bis 0.5.2 verschwand die Uhr
+     * einfach aus der Verbindung: Die Bruecke merkte es erst nach dem
+     * Supervision-Timeout, hielt bis dahin eine tote Verbindung fuer
+     * lebendig, und Androids automatische Wiederverbindung wurde ebenso
+     * spaet scharf. Ein sauberer Abbau sagt es dem Handy sofort. Bewusst als
+     * letzter Schritt, hinter allen Abbruchgruenden -- ein abgesagter Schlaf
+     * soll die Verbindung behalten.
+     */
+    if (voice_ble_disconnect() == ESP_OK) {
+        int link_ms = 0;
+        while (voice_ble_is_connected() && link_ms < 500) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            link_ms += 20;
+        }
+        ESP_LOGI(TAG, "link closed before deep sleep (%d ms)", link_ms);
     }
 
     ESP_LOGI(TAG, "deep sleep go (wait_ms=%d)", wait_ms);
@@ -3452,6 +3470,15 @@ static const char *build_diag_text(void)
         DIAG_LINE("Funk %d dBm\n", (int)rssi);
     } else {
         DIAG_LINE("Funk -\n");
+    }
+    /* Abrisse seit dem Start: die Zahl, nach der man bei "verliert die Verbindung" zuerst fragt. */
+    uint16_t drops = 0;
+    int drop_reason = 0;
+    voice_ble_link_stats(&drops, &drop_reason);
+    if (drops > 0) {
+        DIAG_LINE("Abrisse %u, zuletzt 0x%x\n", (unsigned)drops, (unsigned)drop_reason);
+    } else {
+        DIAG_LINE("Abrisse keine\n");
     }
     const int64_t glance = s_last_glance_us;
     if (glance > 0) {
