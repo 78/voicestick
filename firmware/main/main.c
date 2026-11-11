@@ -84,18 +84,17 @@ static const char *TAG = "voice_stick";
  * uebrigen Aufrufe (watch(false), prepare_deep_sleep) laufen ohne Sensor
  * folgenlos ins Leere.
  */
-#if CONFIG_VOICE_BOARD_WATCH206
 /*
- * Auf der Waveshare-Uhr ist sie an (10/2026, ausdruecklich gewuenscht): Eine
- * Uhr, die man zum Ablesen erst antippen muss, ist keine. Der Sensor ist dort
- * ein QMI8658; die Komponente waehlt ihn selbst. Seit Paket H weckt er die
- * Task per Interrupt (Wake on Motion, GPIO21) statt alle 100 ms abgefragt zu
- * werden -- siehe wrist_wake.c.
+ * Auch auf der Waveshare-Uhr aus (0.5.4, 11/2026, ausdruecklich gewuenscht).
+ * 10/2026 war sie dort an: Eine Uhr, die man zum Ablesen erst antippen muss,
+ * ist keine. Das Akku-Protokoll zeigte mit 0.5.3 aber 18,6 %/h und keinen
+ * einzigen Tiefschlaf zwischen Laden und leer: Jede Armbewegung machte den
+ * Schirm hell und setzte die 5 Minuten bis zum Tiefschlaf zurueck. Jetzt
+ * wecken nur Tippen und Tasten. Der QMI8658 wird nicht aufgesetzt und bleibt
+ * im Ruhezustand nach dem Einschalten. Zurueck: hier fuer
+ * CONFIG_VOICE_BOARD_WATCH206 wieder 1 setzen.
  */
-#define WRIST_WAKE_ENABLED 1
-#else
 #define WRIST_WAKE_ENABLED 0
-#endif
 /*
  * Dieselbe Grenze, die der Server zieht (MAX_AUDIO_SECONDS in
  * voiceTurnService.ts). Sie hier zu kennen heisst: der Balken kann sie
