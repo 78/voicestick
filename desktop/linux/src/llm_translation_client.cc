@@ -3,10 +3,28 @@
 #include "cJSON.h"
 #include "http_client_linux.h"
 
+#define LLM_JSON_IMPLEMENTATION
+#include "llm_json.hpp"
+#define LLM_RETRY_IMPLEMENTATION
+#include "llm_retry.hpp"
+
 #include <memory>
 #include <thread>
 
 namespace voicestick {
+
+namespace {
+
+// Live translation is latency sensitive: one quick retry for dropped
+// connections, 408/429 and 5xx, and none for auth or bad request errors.
+llm::RetryConfig TranslationRetryConfig() {
+    llm::RetryConfig config;
+    config.max_attempts = 2;
+    config.base_delay_ms = 300.0;
+    return config;
+}
+
+} // namespace
 
 LLMTranslationClient::LLMTranslationClient(AppConfig config) : config_(std::move(config)) {}
 
@@ -42,17 +60,32 @@ std::string LLMTranslationClient::TranslateSync(const std::string& text,
     const auto url = ChatCompletionsUrl(error);
     if (!error->empty()) return {};
 
-    const auto payload =
-        "{\"model\":\"" + JsonEscape(config_.llm_model) + "\","
-        "\"temperature\":0,"
-        "\"messages\":["
-        "{\"role\":\"system\",\"content\":\"" + JsonEscape(SystemPrompt(target_language, hotwords)) + "\"},"
-        "{\"role\":\"user\",\"content\":\"" + JsonEscape(text) + "\"}"
-        "]}";
+    llm::json::Value messages = llm::json::array();
+    messages.push_back(llm::json::make_object({
+        {"role", "system"},
+        {"content", SystemPrompt(target_language, hotwords)},
+    }));
+    messages.push_back(llm::json::make_object({
+        {"role", "user"},
+        {"content", text},
+    }));
+    const auto payload = llm::json::make_object({
+        {"model", config_.llm_model},
+        {"temperature", 0},
+        {"messages", messages},
+    }).dump();
 
-    auto response = HttpPostJson(url, payload, {{"Authorization", "Bearer " + api_key}});
-    if (!response.ok()) {
-        *error = "LLM request failed: " + response.error;
+    HttpResponse response;
+    try {
+        response = llm::with_retry<HttpResponse>([&] {
+            auto attempt = HttpPostJson(url, payload, {{"Authorization", "Bearer " + api_key}});
+            if (!attempt.ok()) {
+                throw llm::LLMError{attempt.status, "LLM request failed: " + attempt.error, true};
+            }
+            return attempt;
+        }, TranslationRetryConfig()).value;
+    } catch (const llm::LLMError& failure) {
+        *error = failure.message;
         return {};
     }
 

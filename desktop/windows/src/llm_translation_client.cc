@@ -2,6 +2,14 @@
 
 #include "cJSON.h"
 
+#define LLM_JSON_IMPLEMENTATION
+#pragma warning(push)
+#pragma warning(disable : 4005) // llm_json.hpp defines NOMINMAX, which CMake already sets.
+#include "llm_json.hpp"
+#pragma warning(pop)
+#define LLM_RETRY_IMPLEMENTATION
+#include "llm_retry.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <memory>
@@ -31,6 +39,22 @@ void AddHeader(HINTERNET request, const std::string& header) {
     const auto wide = LLMTranslationClient::Utf16FromUtf8(header + "\r\n");
     WinHttpAddRequestHeaders(request, wide.c_str(), static_cast<DWORD>(wide.size()),
                              WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+}
+
+struct WinHttpHandle {
+    HINTERNET handle = nullptr;
+    ~WinHttpHandle() {
+        if (handle) WinHttpCloseHandle(handle);
+    }
+};
+
+// Live translation is latency sensitive: one quick retry for dropped
+// connections, 408/429 and 5xx, and none for auth or bad request errors.
+llm::RetryConfig TranslationRetryConfig() {
+    llm::RetryConfig config;
+    config.max_attempts = 2;
+    config.base_delay_ms = 300.0;
+    return config;
 }
 
 } // namespace
@@ -73,74 +97,30 @@ std::string LLMTranslationClient::TranslateSync(const std::string& text,
     const auto path = ChatCompletionsPathAndQuery(&host, &port, &secure, error);
     if (!error->empty()) return {};
 
-    HINTERNET session = WinHttpOpen(L"VoiceStick/Windows",
-                                   WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                   WINHTTP_NO_PROXY_NAME,
-                                   WINHTTP_NO_PROXY_BYPASS,
-                                   0);
-    if (!session) {
-        *error = "Failed to start LLM network session: " + LastErrorText();
-        return {};
-    }
-    WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
-
-    HINTERNET connect = WinHttpConnect(session, host.c_str(), port, 0);
-    if (!connect) {
-        WinHttpCloseHandle(session);
-        *error = "Failed to connect LLM host: " + LastErrorText();
-        return {};
-    }
-
-    const DWORD flags = secure ? WINHTTP_FLAG_SECURE : 0;
-    const auto path_w = Utf16FromUtf8(path);
-    HINTERNET request = WinHttpOpenRequest(connect, L"POST", path_w.c_str(), nullptr,
-                                           WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
-    if (!request) {
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        *error = "Failed to create LLM request: " + LastErrorText();
-        return {};
-    }
-    WinHttpSetTimeouts(request, 5000, 5000, 5000, 10000);
-    AddHeader(request, "Authorization: Bearer " + api_key);
-    AddHeader(request, "Content-Type: application/json");
-
-    const auto payload =
-        "{\"model\":\"" + JsonEscape(config_.llm_model) + "\","
-        "\"temperature\":0,"
-        "\"messages\":["
-        "{\"role\":\"system\",\"content\":\"" + JsonEscape(SystemPrompt(target_language, hotwords)) + "\"},"
-        "{\"role\":\"user\",\"content\":\"" + JsonEscape(text) + "\"}"
-        "]}";
-
-    const BOOL sent = WinHttpSendRequest(
-        request,
-        WINHTTP_NO_ADDITIONAL_HEADERS,
-        0,
-        const_cast<char*>(payload.data()),
-        static_cast<DWORD>(payload.size()),
-        static_cast<DWORD>(payload.size()),
-        0);
-    if (!sent || !WinHttpReceiveResponse(request, nullptr)) {
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        *error = "LLM request failed: " + LastErrorText();
-        return {};
-    }
+    llm::json::Value messages = llm::json::array();
+    messages.push_back(llm::json::make_object({
+        {"role", "system"},
+        {"content", SystemPrompt(target_language, hotwords)},
+    }));
+    messages.push_back(llm::json::make_object({
+        {"role", "user"},
+        {"content", text},
+    }));
+    const auto payload = llm::json::make_object({
+        {"model", config_.llm_model},
+        {"temperature", 0},
+        {"messages", messages},
+    }).dump();
 
     std::string body;
-    DWORD available = 0;
-    while (WinHttpQueryDataAvailable(request, &available) && available > 0) {
-        std::string chunk(available, '\0');
-        DWORD read = 0;
-        if (!WinHttpReadData(request, chunk.data(), available, &read)) break;
-        chunk.resize(read);
-        body += chunk;
+    try {
+        body = llm::with_retry<std::string>([&] {
+            return PostOnce(host, port, secure, path, api_key, payload);
+        }, TranslationRetryConfig()).value;
+    } catch (const llm::LLMError& failure) {
+        *error = failure.message;
+        return {};
     }
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connect);
-    WinHttpCloseHandle(session);
 
     auto* root = cJSON_ParseWithLength(body.data(), body.size());
     if (!root) {
@@ -157,6 +137,71 @@ std::string LLMTranslationClient::TranslateSync(const std::string& text,
         return {};
     }
     return Trim(content->valuestring);
+}
+
+std::string LLMTranslationClient::PostOnce(const std::wstring& host,
+                                           INTERNET_PORT port,
+                                           bool secure,
+                                           const std::string& path,
+                                           const std::string& api_key,
+                                           const std::string& payload) {
+    WinHttpHandle session{WinHttpOpen(L"VoiceStick/Windows",
+                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                      WINHTTP_NO_PROXY_NAME,
+                                      WINHTTP_NO_PROXY_BYPASS,
+                                      0)};
+    if (!session.handle) {
+        throw llm::LLMError{0, "Failed to start LLM network session: " + LastErrorText(), false};
+    }
+    WinHttpSetTimeouts(session.handle, 5000, 5000, 5000, 10000);
+
+    WinHttpHandle connect{WinHttpConnect(session.handle, host.c_str(), port, 0)};
+    if (!connect.handle) {
+        throw llm::LLMError{0, "Failed to connect LLM host: " + LastErrorText(), true};
+    }
+
+    const DWORD flags = secure ? WINHTTP_FLAG_SECURE : 0;
+    const auto path_w = Utf16FromUtf8(path);
+    WinHttpHandle request{WinHttpOpenRequest(connect.handle, L"POST", path_w.c_str(), nullptr,
+                                             WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags)};
+    if (!request.handle) {
+        throw llm::LLMError{0, "Failed to create LLM request: " + LastErrorText(), false};
+    }
+    WinHttpSetTimeouts(request.handle, 5000, 5000, 5000, 10000);
+    AddHeader(request.handle, "Authorization: Bearer " + api_key);
+    AddHeader(request.handle, "Content-Type: application/json");
+
+    const BOOL sent = WinHttpSendRequest(
+        request.handle,
+        WINHTTP_NO_ADDITIONAL_HEADERS,
+        0,
+        const_cast<char*>(payload.data()),
+        static_cast<DWORD>(payload.size()),
+        static_cast<DWORD>(payload.size()),
+        0);
+    if (!sent || !WinHttpReceiveResponse(request.handle, nullptr)) {
+        throw llm::LLMError{0, "LLM request failed: " + LastErrorText(), true};
+    }
+
+    DWORD status = 0;
+    DWORD status_size = sizeof(status);
+    WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size, WINHTTP_NO_HEADER_INDEX);
+    if (status != 0 && (status < 200 || status >= 300)) {
+        throw llm::LLMError{static_cast<int>(status),
+                            "LLM request failed: HTTP " + std::to_string(status), true};
+    }
+
+    std::string body;
+    DWORD available = 0;
+    while (WinHttpQueryDataAvailable(request.handle, &available) && available > 0) {
+        std::string chunk(available, '\0');
+        DWORD read = 0;
+        if (!WinHttpReadData(request.handle, chunk.data(), available, &read)) break;
+        chunk.resize(read);
+        body += chunk;
+    }
+    return body;
 }
 
 std::string LLMTranslationClient::ChatCompletionsPathAndQuery(std::wstring* host,
@@ -218,22 +263,6 @@ std::string LLMTranslationClient::SystemPrompt(const std::string& target_languag
         }
     }
     return prompt;
-}
-
-std::string LLMTranslationClient::JsonEscape(std::string_view text) {
-    std::string out;
-    out.reserve(text.size() + 8);
-    for (char ch : text) {
-        switch (ch) {
-        case '\\': out += "\\\\"; break;
-        case '"': out += "\\\""; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out.push_back(ch); break;
-        }
-    }
-    return out;
 }
 
 std::wstring LLMTranslationClient::Utf16FromUtf8(std::string_view text) {

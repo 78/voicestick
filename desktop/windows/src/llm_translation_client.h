@@ -32,7 +32,12 @@ private:
                                             std::string* error) const;
     static std::string SystemPrompt(const std::string& target_language,
                                     const std::vector<std::string>& hotwords);
-    static std::string JsonEscape(std::string_view text);
+    static std::string PostOnce(const std::wstring& host,
+                                INTERNET_PORT port,
+                                bool secure,
+                                const std::string& path,
+                                const std::string& api_key,
+                                const std::string& payload);
     static std::string LastErrorText();
 
     AppConfig config_;

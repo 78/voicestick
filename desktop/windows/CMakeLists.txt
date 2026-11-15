@@ -42,7 +42,7 @@ add_library(voicestick_core
     src/voice_stick_coordinator.cc
 )
 
-target_include_directories(voicestick_core PUBLIC src third_party/cjson third_party/tomlplusplus)
+target_include_directories(voicestick_core PUBLIC src third_party/cjson third_party/llm-json third_party/llm-retry third_party/tomlplusplus)
 target_compile_definitions(voicestick_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(voicestick_core PUBLIC winhttp)
 target_link_libraries(voicestick_core PUBLIC bcrypt)
