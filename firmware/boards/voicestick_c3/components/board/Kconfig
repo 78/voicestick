@@ -1,0 +1,47 @@
+menu "VoiceStick C3 microphone"
+
+    choice VOICE_STICK_PDM_CLOCK
+        prompt "PDM clock"
+        default VOICE_STICK_PDM_CLOCK_1536K
+        help
+            The SD18OB371 only accepts clocks inside 1.38-1.7, 2.1-2.6 or
+            2.9-4.8 MHz. The decimation ratio follows from the 16 kHz output.
+
+        config VOICE_STICK_PDM_CLOCK_1536K
+            bool "1.536 MHz (decimation 96)"
+        config VOICE_STICK_PDM_CLOCK_3072K
+            bool "3.072 MHz (decimation 192, about twice the CPU and DMA RAM)"
+    endchoice
+
+    config VOICE_STICK_PDM_DECIMATION
+        int
+        default 96 if VOICE_STICK_PDM_CLOCK_1536K
+        default 192 if VOICE_STICK_PDM_CLOCK_3072K
+
+    config VOICE_STICK_PDM_RIGHT_SLOT
+        bool "Take the right I2S slot"
+        default n
+        help
+            The mic's L/R pin is tied low, which is the left slot. Only for
+            bring-up if the left slot turns out silent.
+
+    config VOICE_STICK_PDM_INVERT_CLK
+        bool "Invert the PDM clock"
+        default n
+
+    config VOICE_STICK_PDM_CAPTURE
+        bool "Raw PDM capture on the prev key (bring-up)"
+        default n
+        help
+            While the prev key is held, record the raw bitstream and print it
+            as base64 between "PDMRAW BEGIN" and "PDMRAW END" on the console.
+
+    config VOICE_STICK_MIC_GAIN
+        int "Digital gain after decimation (x)"
+        range 1 64
+        default 32
+        help
+            -37 dBFS sensitivity puts speech near -55 dBFS; x32 is +30 dB,
+            which clips at about 101 dB SPL.
+
+endmenu

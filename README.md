@@ -1,12 +1,15 @@
 # Voice Stick
 
-Voice Stick turns an M5Stack StickS3 into a Bluetooth push-to-talk input device for macOS, Windows, and Linux.
+English · [简体中文](README_ZH.md)
+
+Voice Stick is a Bluetooth push-to-talk input device for macOS, Windows, and Linux. Build the VoiceStick C3 v1 from the published hardware files or use an M5Stack StickS3.
 
 Hold the front button on the StickS3 to record. When you release it, the macOS menu bar app sends the audio to ASR, shows the recognized text, and pastes the final result into the currently focused input field after a short confirmation countdown. By default it pastes text and presses Return; `auto_enter` can be disabled in settings.
 
 ## Project Layout
 
-- `firmware/`: ESP-IDF firmware for M5Stack StickS3 / ESP32-S3.
+- `firmware/`: ESP-IDF firmware, one tree for every board under `firmware/boards/` (M5Stack StickS3 / ESP32-S3 and VoiceStick C3 v1 / ESP32-C3).
+- [Build a VoiceStick C3 v1](hardware/README.md) — KiCad project, PCB fabrication files, printable enclosure and ESP32-C3 flashing instructions.
 - `desktop/macos/`: Swift Package for the native macOS menu bar app.
 - `desktop/windows/`: Windows desktop app workspace.
 - `desktop/linux/`: GTK4 / libadwaita Linux desktop app.
@@ -40,7 +43,17 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - Display: 135 x 240 ST7789P3 portrait screen
 - LCD backlight: GPIO38 PWM
 
-Main pin definitions live in `firmware/components/stick_s3_board/include/stick_s3_board.h`.
+Main pin definitions live in `firmware/boards/m5stick_s3/components/stick_s3_board/include/stick_s3_board.h`.
+
+VoiceStick C3 v1 (`hardware/voicestick_c3`, board `voicestick_c3`):
+
+- ESP32-C3 + 8 MB flash, 32.768 kHz crystal for the RTC and BLE sleep clock
+- Keys: main GPIO4 `primary` (deep-sleep wake), cancel GPIO9 `secondary`, prev GPIO8 `prev`, next GPIO21 `next`
+- Audio: SD18OB371 PDM mic, raw I2S PDM at 1.536 MHz, CIC3 decimation in software to 16 kHz
+- Status: one WS2812B LED on GPIO20 instead of a screen
+- Power: TP4054 charger (CHRG on GPIO10), USB sense GPIO5 (deep-sleep wake), battery ADC GPIO3, LED and mic rail switched by GPIO2
+
+Pin definitions live in `firmware/boards/voicestick_c3/components/board/voicestick_c3.h`.
 
 ## Interaction Model
 
@@ -87,26 +100,28 @@ See `docs/protocol.md` for the full frame format.
 
 ## Firmware Build
 
-Prepare ESP-IDF. The commands below use the local path `~/esp/v5.5.1/esp-idf`; replace it if your ESP-IDF checkout lives elsewhere.
+The firmware targets ESP-IDF release-v6.1. Activate it first, for example with the EIM-installed script:
+
+```sh
+source ~/.espressif/tools/activate_idf_release-v6.1.sh
+```
+
+Each board is a directory under `firmware/boards/<board>/` with `board.cmake` (chip), `sdkconfig.defaults` (applied on top of `firmware/sdkconfig.defaults`) and a `board` component implementing `firmware/components/board_api`. The board selects the chip, so `idf.py set-target` is not used. Give every board its own build directory:
 
 ```sh
 cd firmware
-. "$HOME/esp/v5.5.1/esp-idf/export.sh"
-idf.py set-target esp32s3
-idf.py build
-```
-
-If `export.sh` reports that the ESP-IDF Python virtual environment is missing, run the matching installer once:
-
-```sh
-"$HOME/esp/v5.5.1/esp-idf/install.sh" esp32s3
+idf.py build                                         # M5Stack StickS3 (default)
+idf.py -B build-c3 -DBOARD=voicestick_c3 build       # VoiceStick C3 v1
 ```
 
 Flash and monitor:
 
 ```sh
 idf.py -p /dev/cu.usbmodemXXXX flash monitor
+idf.py -B build-c3 -p /dev/cu.usbmodemXXXX flash monitor
 ```
+
+Board-specific options (for example the C3 microphone clock, slot and gain) are under `idf.py -B build-c3 menuconfig`.
 
 The firmware uses an OTA partition table with two 3 MB app slots plus a reserved 1984 KB `storage` partition. Devices flashed with the old single-app table need one USB flash to install the new partition table before BLE OTA updates can be used:
 
@@ -117,9 +132,10 @@ idf.py -p /dev/cu.usbmodemXXXX erase-flash flash monitor
 Firmware dependencies are declared through the ESP-IDF component manager:
 
 - `espressif/button`
-- `espressif/esp_codec_dev`
+- `espressif/cjson`
 - `78/esp-opus`
-- `lvgl/lvgl`
+- StickS3: `espressif/esp_codec_dev`, `lvgl/lvgl`
+- VoiceStick C3: `espressif/led_strip`
 
 ## macOS Desktop Build
 
@@ -173,7 +189,7 @@ Config is `~/.config/voicestick/config.toml`. Text is copied with GTK, then Voic
 
 GitHub Actions can do the macOS and firmware release path automatically when a `v<version>` tag is pushed. The tag must match `VERSION`, for example `VERSION=0.2.1` pairs with `v0.2.1`. The release workflow publishes the macOS DMG/ZIP/signature and firmware assets to GitHub Releases, then deploys the website/appcast to GitHub Pages. The Windows MSI is uploaded afterward from the local signing machine. See `docs/release.md` for the full release process, including the Windows-first and Windows-afterward flows.
 
-The same release workflow also builds the StickS3 firmware with ESP-IDF v5.5.1 and uploads firmware artifacts to Aliyun OSS:
+The same release workflow also builds the StickS3 firmware with ESP-IDF release-v6.1 and uploads firmware artifacts to Aliyun OSS:
 
 | File | Use |
 | --- | --- |

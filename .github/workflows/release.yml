@@ -49,15 +49,15 @@ jobs:
       - name: Build firmware and merged image
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.5.1
+          esp_idf_version: release-v6.1
           target: esp32s3
           path: firmware
           command: |
-            idf.py build
+            idf.py -DBOARD=m5stick_s3 build
             mkdir -p ../dist
             cp build/voice_stick.bin "../dist/voicestick-firmware-sticks3-ota-${{ steps.ver.outputs.version }}.bin"
             cd build
-            esptool.py --chip esp32s3 merge_bin -o "../../dist/voicestick-firmware-sticks3-merged-${{ steps.ver.outputs.version }}.bin" @flash_args
+            python -m esptool --chip esp32s3 merge-bin -o "../../dist/voicestick-firmware-sticks3-merged-${{ steps.ver.outputs.version }}.bin" @flash_args
 
       - name: Stage firmware checksums and manifest
         run: |

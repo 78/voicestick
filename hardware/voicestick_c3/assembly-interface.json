@@ -1,0 +1,342 @@
+{
+  "revision": "v1",
+  "units": "mm",
+  "coordinate_system": {
+    "origin": "Board centre in XY; Z = 0 at the table (bottom of the rubber feet)",
+    "handedness": "right-handed, Z up",
+    "x": "+X points to the USB end",
+    "y": "Top view, main-key end up and USB end down: -Y is LEFT (page keys), +Y is RIGHT (cancel/BOOT)",
+    "kicad_mapping": "kicad_x = 100 + X, kicad_y = 100 - Y (KiCad top view shows the USB end on the right and +Y at the top)"
+  },
+  "board": {
+    "outline_xy": [
+      50,
+      30
+    ],
+    "corner_radius": 1.0,
+    "thickness": 1.0,
+    "layers": 4,
+    "stackup": "L1 signal/RF, L2 solid GND, L3 power + few signals, L4 signal; JLC stackup JLC04101H-3313",
+    "bottom_z": 2.5,
+    "top_z": 3.5,
+    "single_sided_assembly": true
+  },
+  "z_stack": {
+    "foot_height": 1.0,
+    "shell_bottom_z": 1.0,
+    "floor_thickness": 1.2,
+    "floor_top_z": 2.2,
+    "pcb_support_top_z": 2.5,
+    "split_z": 8.4,
+    "roof_inner_z": 13.7,
+    "body_top_z": 14.9,
+    "note": "Feet are 1.0 mm instead of the planned 0.6 mm so the main-switch tail (2.85 mm + 0.3 mm below the PCB top) stays 0.35 mm above the table"
+  },
+  "case": {
+    "outer_xy": [
+      54,
+      34
+    ],
+    "outer_corner_radius": 3.0,
+    "wall": 1.6,
+    "usb_end_wall": 1.0,
+    "pcb_to_wall_gap": 0.4
+  },
+  "main_key": {
+    "ref": "SW1",
+    "part": "CPG151101D05",
+    "center_xy": [
+      -15.5,
+      0
+    ],
+    "kicad_rotation": 0,
+    "body_xy": [
+      15.2,
+      15.7
+    ],
+    "housing_top_above_pcb": 11.15,
+    "stem_above_housing": 4.1,
+    "tail_below_pcb_top": 2.85,
+    "tail_allowance": 0.3,
+    "travel": 4.0,
+    "cap_xy": [
+      17.4,
+      18.0
+    ],
+    "cap_roof_opening_xy": [
+      18.0,
+      18.6
+    ],
+    "cap_wall": 1.2,
+    "cap_top_thickness": 1.2,
+    "stem_socket": {
+      "cross_long": 4.1,
+      "cross_width": 1.3,
+      "fit_offsets": [
+        -0.05,
+        0.0,
+        0.05
+      ],
+      "socket_depth": 3.6
+    }
+  },
+  "side_keys": {
+    "part": "Alps SKRTLBE010",
+    "actuation_above_pcb": 1.7,
+    "plunger_tip_abs_y": 15.0,
+    "footprint_origin_abs_y": 12.96,
+    "cap_face_xy": [
+      6.0,
+      3.0
+    ],
+    "cap_flange_extra": 0.8,
+    "cap_clearance": 0.25,
+    "pusher_gap": 0.15,
+    "keys": [
+      {
+        "ref": "SW2",
+        "role": "previous",
+        "x": -16.0,
+        "side": -1,
+        "kicad_rotation": 0
+      },
+      {
+        "ref": "SW3",
+        "role": "next",
+        "x": -6.0,
+        "side": -1,
+        "kicad_rotation": 0
+      },
+      {
+        "ref": "SW4",
+        "role": "cancel_boot",
+        "x": -11.0,
+        "side": 1,
+        "kicad_rotation": 180
+      }
+    ]
+  },
+  "microphone": {
+    "ref": "U5",
+    "part": "Goertek SD18OB371-041 bottom port",
+    "port_xy": [
+      -23.4,
+      11.3
+    ],
+    "kicad_rotation": 270,
+    "pcb_hole_diameter": 0.6,
+    "body_xy": [
+      3.5,
+      2.65
+    ],
+    "duct": {
+      "type": "open groove in the floor top, lidded by self-adhesive foam; tunnel through the end wall",
+      "groove_width": 1.2,
+      "groove_depth": 0.6,
+      "groove_from_x": -22.6,
+      "exit_face": "-X end face",
+      "exit_slot_wz": [
+        1.2,
+        0.6
+      ],
+      "exit_center_z": 1.9
+    },
+    "foam": {
+      "material": "PORON / EVA closed-cell, adhesive one side (adhesive down onto the floor)",
+      "free_thickness": 0.5,
+      "compressed_thickness": 0.3,
+      "rect_x": [
+        -25.6,
+        -21.4
+      ],
+      "rect_y": [
+        9.8,
+        12.8
+      ],
+      "hole_diameter": 1.2
+    }
+  },
+  "fasteners": {
+    "screw": "M2 x 10 self-tapping (PT thread), pan head, inserted from the bottom",
+    "pcb_hole_diameter": 2.2,
+    "pcb_keepout_diameter": 5.0,
+    "lower_boss_outer_diameter": 5.0,
+    "lower_clearance_hole": 2.4,
+    "head_counterbore": [
+      4.2,
+      1.2
+    ],
+    "upper_post_outer_diameter": 4.6,
+    "upper_pilot_hole": 1.6,
+    "pilot_coupon": [
+      1.5,
+      1.6,
+      1.7
+    ],
+    "holes": [
+      {
+        "ref": "H2",
+        "xy": [
+          -18.0,
+          11.8
+        ],
+        "note": "main-key end, right; clamps the PCB onto the microphone foam"
+      },
+      {
+        "ref": "H3",
+        "xy": [
+          22.5,
+          -12.0
+        ],
+        "note": "USB end, left"
+      }
+    ],
+    "deviation": "Plan asked for 4 screws. The USB-end right corner is the antenna corner, and a metal screw there detunes it; a plastic support rib replaces the fourth screw. The main-key -Y corner holds the WS2812 window instead of a screw (H1 removed); a PCB support and a foot replace it, and that corner of the shell is held by the lip."
+  },
+  "pcb_supports": [
+    {
+      "xy": [
+        21.5,
+        12.5
+      ],
+      "diameter": 3.0,
+      "note": "plastic only, antenna corner",
+      "foot": true
+    },
+    {
+      "xy": [
+        -21.8,
+        -11.8
+      ],
+      "diameter": 3.0,
+      "foot": true,
+      "note": "main-key -Y corner, replaces H1; carries the main-key press load"
+    },
+    {
+      "xy": [
+        4.0,
+        -13.5
+      ],
+      "diameter": 2.5
+    },
+    {
+      "xy": [
+        4.0,
+        13.5
+      ],
+      "diameter": 2.5
+    }
+  ],
+  "usb": {
+    "ref": "J1",
+    "part": "HRO TYPE-C-31-M-12",
+    "origin_xy": [
+      22.85,
+      0
+    ],
+    "kicad_rotation": 90,
+    "front_x": 26.5,
+    "body_y": [
+      -4.47,
+      4.47
+    ],
+    "height_above_pcb": 3.26,
+    "opening_wz": [
+      9.74,
+      4.06
+    ],
+    "opening_corner_radius": 1.6
+  },
+  "antenna": {
+    "ref": "AE1",
+    "center_xy": [
+      21.0,
+      13.6
+    ],
+    "kicad_rotation": 0,
+    "copper_keepout_x": [
+      17.5,
+      25.0
+    ],
+    "copper_keepout_y": [
+      10.5,
+      15.0
+    ],
+    "note": "No copper on any layer inside the keepout except the 50 ohm feed; no screws or battery above it"
+  },
+  "battery": {
+    "ref": "J2",
+    "pack": "602025 250 mAh with protection board",
+    "measured_xyz": [
+      20,
+      28,
+      5.8
+    ],
+    "envelope_xyz": [
+      20.5,
+      29.0,
+      6.5
+    ],
+    "center_xy": [
+      3.95,
+      0
+    ],
+    "mount": "Double-sided tape into a rib frame on the roof; hangs from the upper shell",
+    "bottom_z": 7.2,
+    "connector_xy": [
+      -0.3,
+      -11.6
+    ],
+    "connector_kicad_rotation": 180,
+    "connector_note": "JST SH mating face points +Y (into the board) so the plug inserts and the leads bend under the pack; the -Y side has only 0.4 mm to the wall"
+  },
+  "light_window": {
+    "leds": [
+      {
+        "ref": "D2",
+        "xy": [
+          -23.2,
+          -11.8
+        ],
+        "kicad_rotation": 0,
+        "tube_inner_xy": [
+          2.4,
+          2.4
+        ],
+        "note": "WS2812, main-key -Y corner, mirrors the microphone across X"
+      },
+      {
+        "ref": "D3",
+        "xy": [
+          24.1,
+          -7.2
+        ],
+        "kicad_rotation": 270,
+        "end_window_wh": [
+          1.6,
+          1.4
+        ],
+        "lens_above_pcb": 0.6,
+        "note": "red charge LED, side-looking, lens at the board edge facing the USB end wall"
+      }
+    ],
+    "tube_wall": 0.8,
+    "tube_bottom_gap": 0.3,
+    "window_wall": 0.6,
+    "note": "D2 shines up a light tube to a window in the roof; D3 shines sideways into a window in the USB end wall. Each window is the wall thinned from the inside to window_wall; light-coloured filament transmits through it"
+  },
+  "fdm": {
+    "nozzle": 0.4,
+    "layer": 0.2,
+    "material": "PETG recommended; PLA acceptable for prototypes",
+    "wall": 1.6,
+    "min_feature": 0.8,
+    "slide_clearance": 0.25,
+    "locate_clearance": 0.15,
+    "hole_oversize": 0.2,
+    "first_layer_chamfer": 0.4,
+    "lip_height": 0.8,
+    "lip_width": 0.8,
+    "lip_clearance": 0.2
+  }
+}

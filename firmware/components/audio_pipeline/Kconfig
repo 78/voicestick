@@ -1,0 +1,11 @@
+menu "Voice Stick audio"
+
+    config VOICE_STICK_OPUS_COMPLEXITY
+        int "Opus encoder complexity"
+        range 0 10
+        default 1
+        help
+            Higher values cost more CPU for slightly better quality at the
+            same bitrate. Single-core chips should stay at 0.
+
+endmenu

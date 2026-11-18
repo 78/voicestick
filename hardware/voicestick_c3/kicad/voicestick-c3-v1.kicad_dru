@@ -1,0 +1,23 @@
+(version 1)
+
+# JLC standard 4-layer vias with no surcharge; nothing smaller is allowed.
+(rule "via size"
+	(condition "A.Type == 'Via'")
+	(constraint via_diameter (min 0.45mm))
+	(constraint hole_size (min 0.3mm)))
+
+# High-current nets only (design.HIGH_CURRENT_NETS, net classes PWR_*).
+(rule "power via size"
+	(condition "A.Type == 'Via' && A.NetClass == 'PWR_*'")
+	(constraint via_diameter (min 0.6mm))
+	(constraint hole_size (min 0.3mm)))
+
+# The 50 ohm feed keeps its coplanar gap against every pour.
+(rule "rf gap to pour"
+	(condition "A.NetClass == 'RF' && B.Type == 'Zone'")
+	(constraint clearance (min 0.25mm)))
+
+# QFN pads at 0.5 mm pitch: allow the neck-down clearance at the pads only.
+(rule "qfn fanout"
+	(condition "A.Type == 'Pad' && A.Parent == 'U1'")
+	(constraint clearance (min 0.1mm)))

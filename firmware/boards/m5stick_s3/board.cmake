@@ -1,0 +1,1 @@
+set(BOARD_TARGET esp32s3)

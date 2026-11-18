@@ -1,0 +1,24 @@
+# VoiceStick C3 v1 (hardware/voicestick_c3): ESP32-C3 QFN32 + GD25Q64E 8 MB flash.
+CONFIG_IDF_TARGET="esp32c3"
+# DIO until QIO has been verified on the first boards (HD/WP are wired).
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Y2 32.768 kHz crystal on GPIO0/1: RTC slow clock and BLE sleep clock, so
+# the 40 MHz crystal can power down in light sleep.
+CONFIG_RTC_CLK_SRC_EXT_CRYS=y
+CONFIG_BT_CTRL_LPCLK_SEL_EXT_32K_XTAL=y
+
+# Deep-sleep wake pins have external resistors (R16 pull-up, R8/R9 divider).
+# CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS is not set
+# GPIO20/21 (U0RXD/U0TXD) are the LED and the next key.
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# The C3 USB Serial/JTAG drops off the bus in light sleep; stay awake while a
+# host is attached so flashing and the console keep working.
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
+# Bring-up: no automatic light sleep until audio works on the first boards.
+# CONFIG_FREERTOS_USE_TICKLESS_IDLE is not set
+
+CONFIG_VOICE_STICK_OPUS_COMPLEXITY=0
+CONFIG_VOICE_STICK_DEEP_SLEEP_TIMEOUT_S=3600

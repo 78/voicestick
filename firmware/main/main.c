@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -13,13 +14,11 @@
 #include "esp_pm.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
-#include "driver/rtc_io.h"
 #include "esp_timer.h"
-#include "hal/gpio_types.h"
 #include "iot_button.h"
 
 #include "audio_pipeline.h"
-#include "stick_s3_board.h"
+#include "board.h"
 #include "ui_status.h"
 #include "voice_ble.h"
 
@@ -31,8 +30,8 @@ static const char *TAG = "voice_stick";
 #define DISPLAY_DIM_BRIGHTNESS 32
 #define DISPLAY_DIM_TIMEOUT_US (DISPLAY_DIM_TIMEOUT_MS * 1000ULL)
 #define BATTERY_REFRESH_FALLBACK_US (BATTERY_REFRESH_FALLBACK_MS * 1000ULL)
-#define DEEP_SLEEP_TIMEOUT_MS (5 * 60 * 1000)
-#define DEEP_SLEEP_TIMEOUT_US (DEEP_SLEEP_TIMEOUT_MS * 1000ULL)
+#define DEEP_SLEEP_TIMEOUT_US (CONFIG_VOICE_STICK_DEEP_SLEEP_TIMEOUT_S * 1000000ULL)
+#define MAX_BUTTONS 4
 
 static bool s_recording;
 static bool s_ota_updating;
@@ -48,10 +47,11 @@ static esp_timer_handle_t s_battery_refresh_timer;
 static esp_timer_handle_t s_host_response_timer;
 static uint32_t s_session_id = 1;
 static QueueHandle_t s_app_event_queue;
-static button_handle_t s_front_button;
-static button_handle_t s_side_button;
+static const board_button_t *s_buttons;
+static size_t s_button_count;
+static button_handle_t s_button_handles[MAX_BUTTONS];
+static int64_t s_button_down_us[MAX_BUTTONS];
 static int64_t s_primary_down_us;
-static int64_t s_secondary_down_us;
 static uint32_t s_primary_session_id;
 
 typedef enum {
@@ -89,10 +89,10 @@ static const char *app_ui_state_name(app_ui_state_t state)
 }
 
 typedef enum {
-    APP_EVENT_FRONT_DOWN,
-    APP_EVENT_FRONT_UP,
-    APP_EVENT_SIDE_DOWN,
-    APP_EVENT_SIDE_UP,
+    APP_EVENT_PRIMARY_DOWN,
+    APP_EVENT_PRIMARY_UP,
+    APP_EVENT_BUTTON_DOWN,
+    APP_EVENT_BUTTON_UP,
     APP_EVENT_UI_STATE,
     APP_EVENT_BLE_CONNECTED,
     APP_EVENT_BLE_DISCONNECTED,
@@ -108,6 +108,7 @@ typedef enum {
 
 typedef struct {
     app_event_type_t type;
+    uint32_t button;
     uint32_t written;
     uint32_t size;
     char state[32];
@@ -115,6 +116,7 @@ typedef struct {
 } app_event_t;
 
 static void update_battery_status(void);
+static uint32_t stop_recording(void);
 static void queue_app_event(app_event_type_t type);
 static void queue_app_event_with_ota(app_event_type_t type, uint32_t written, uint32_t size);
 static void queue_ui_state_event(const char *state, const char *text);
@@ -247,11 +249,32 @@ static void stop_host_response_timer(void)
     }
 }
 
-static void enter_deep_sleep(void)
+static uint32_t elapsed_button_ms(int64_t down_us)
 {
-    if (s_recording || s_ota_updating || voice_ble_ota_is_active()) {
+    if (down_us <= 0) {
+        return 0;
+    }
+    int64_t elapsed_us = esp_timer_get_time() - down_us;
+    if (elapsed_us < 0) {
+        elapsed_us = 0;
+    }
+    return (uint32_t)(elapsed_us / 1000);
+}
+
+static void enter_deep_sleep(bool low_battery)
+{
+    if (s_ota_updating || voice_ble_ota_is_active()) {
         restart_deep_sleep_timer();
         return;
+    }
+    if (s_recording) {
+        if (!low_battery) {
+            restart_deep_sleep_timer();
+            return;
+        }
+        const uint32_t session_id = stop_recording();
+        (void)voice_ble_send_button_up(s_buttons[0].name, elapsed_button_ms(s_primary_down_us),
+                                       session_id);
     }
 
     if (is_external_powered()) {
@@ -262,9 +285,9 @@ static void enter_deep_sleep(void)
 
     bool charging = false;
     bool usb_powered = false;
-    esp_err_t power_err = stick_s3_board_battery_charging(&charging);
+    esp_err_t power_err = board_battery_charging(&charging);
     if (power_err == ESP_OK) {
-        power_err = stick_s3_board_usb_powered(&usb_powered);
+        power_err = board_usb_powered(&usb_powered);
     }
     if (power_err == ESP_OK && (charging || usb_powered)) {
         s_battery_charging = charging;
@@ -275,62 +298,24 @@ static void enter_deep_sleep(void)
         return;
     }
 
-    const gpio_num_t wake_gpio = STICK_S3_PIN_BUTTON_FRONT;
-    if (!esp_sleep_is_valid_wakeup_gpio(wake_gpio)) {
-        ESP_LOGE(TAG, "GPIO%d cannot wake from deep sleep", wake_gpio);
+    if (!low_battery && gpio_get_level(s_buttons[0].gpio) == 0) {
+        ESP_LOGI(TAG, "skip deep sleep: talk button is pressed");
         restart_deep_sleep_timer();
         return;
     }
 
-    if (gpio_get_level(wake_gpio) == 0) {
-        ESP_LOGI(TAG, "skip deep sleep: front button is pressed");
-        restart_deep_sleep_timer();
-        return;
-    }
-
-    ESP_LOGI(TAG, "entering deep sleep, wake on front button GPIO%d low (level=%d)",
-             wake_gpio, gpio_get_level(wake_gpio));
+    ESP_LOGI(TAG, "entering deep sleep low_battery=%d", low_battery);
     release_recording_pm_locks();
     ESP_ERROR_CHECK_WITHOUT_ABORT(ui_status_set_brightness(0));
     ui_status_prepare_deep_sleep();
-    stick_s3_board_prepare_deep_sleep();
-
-    /* Clear any stale wakeup source bits left over from light sleep / esp_pm
-       configuration (e.g. gpio_wakeup_enable on the PMIC IRQ line). Without
-       this the chip can wake immediately from an unrelated trigger. */
-    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-
-    /* Keep RTC peripherals powered so the internal pull-up on the wake pin
-       remains effective in deep sleep; combined with the explicit RTC pull-up
-       below this prevents GPIO%d from floating low and self-waking. */
-    (void)esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
-    (void)rtc_gpio_pulldown_dis(wake_gpio);
-    (void)rtc_gpio_pullup_en(wake_gpio);
-
-    esp_err_t err = esp_sleep_enable_ext1_wakeup_io(1ULL << wake_gpio,
-                                                    ESP_EXT1_WAKEUP_ANY_LOW);
+    esp_err_t err = board_prepare_deep_sleep(low_battery);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "enable deep sleep wake failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "deep sleep aborted: %s", esp_err_to_name(err));
         restart_deep_sleep_timer();
         return;
     }
 
-    /* Wait for the wake pin to settle high (button release bounce, parasitic
-       capacitance, etc.). If it stays low we would just wake up immediately
-       after esp_deep_sleep_start(), so abort and retry later. */
-    int wait_ms = 0;
-    while (gpio_get_level(wake_gpio) == 0 && wait_ms < 200) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        wait_ms += 10;
-    }
-    if (gpio_get_level(wake_gpio) == 0) {
-        ESP_LOGW(TAG, "front button still low after %d ms, abort deep sleep", wait_ms);
-        restart_deep_sleep_timer();
-        return;
-    }
-
-    ESP_LOGI(TAG, "deep sleep go (wait_ms=%d level=%d)", wait_ms,
-             gpio_get_level(wake_gpio));
+    ESP_LOGI(TAG, "deep sleep go");
     esp_deep_sleep_start();
 }
 
@@ -448,32 +433,29 @@ static void queue_ui_state_event(const char *state, const char *text)
     }
 }
 
-static void front_button_down_cb(void *button_handle, void *usr_data)
+static void queue_button_event(app_event_type_t type, uint32_t button)
 {
-    (void)button_handle;
-    (void)usr_data;
-    queue_app_event(APP_EVENT_FRONT_DOWN);
+    if (s_app_event_queue) {
+        app_event_t event = {
+            .type = type,
+            .button = button,
+        };
+        (void)xQueueSend(s_app_event_queue, &event, 0);
+    }
 }
 
-static void front_button_up_cb(void *button_handle, void *usr_data)
+static void button_down_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
-    (void)usr_data;
-    queue_app_event(APP_EVENT_FRONT_UP);
+    const uint32_t button = (uint32_t)(uintptr_t)usr_data;
+    queue_button_event(button == 0 ? APP_EVENT_PRIMARY_DOWN : APP_EVENT_BUTTON_DOWN, button);
 }
 
-static void side_button_down_cb(void *button_handle, void *usr_data)
+static void button_up_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
-    (void)usr_data;
-    queue_app_event(APP_EVENT_SIDE_DOWN);
-}
-
-static void side_button_up_cb(void *button_handle, void *usr_data)
-{
-    (void)button_handle;
-    (void)usr_data;
-    queue_app_event(APP_EVENT_SIDE_UP);
+    const uint32_t button = (uint32_t)(uintptr_t)usr_data;
+    queue_button_event(button == 0 ? APP_EVENT_PRIMARY_UP : APP_EVENT_BUTTON_UP, button);
 }
 
 static void ble_connection_cb(bool connected)
@@ -507,18 +489,6 @@ static void ble_control_cb(const char *json)
         }
     }
     cJSON_Delete(root);
-}
-
-static uint32_t elapsed_button_ms(int64_t down_us)
-{
-    if (down_us <= 0) {
-        return 0;
-    }
-    int64_t elapsed_us = esp_timer_get_time() - down_us;
-    if (elapsed_us < 0) {
-        elapsed_us = 0;
-    }
-    return (uint32_t)(elapsed_us / 1000);
 }
 
 static void apply_app_ui_state(const char *state, const char *text)
@@ -600,8 +570,8 @@ static void app_event_task(void *arg)
         }
 
         switch (event.type) {
-        case APP_EVENT_FRONT_DOWN:
-            ESP_LOGI(TAG, "button front down");
+        case APP_EVENT_PRIMARY_DOWN:
+            ESP_LOGI(TAG, "button %s down", s_buttons[0].name);
             note_activity();
             if (s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK && s_recording) {
                 const uint32_t primary_duration_ms = elapsed_button_ms(s_primary_down_us);
@@ -616,7 +586,7 @@ static void app_event_task(void *arg)
             } else {
                 s_primary_down_us = esp_timer_get_time();
                 if (s_app_ui_state == APP_UI_STATE_PENDING_CONFIRMATION) {
-                    ESP_LOGI(TAG, "button front down as pending confirmation control");
+                    ESP_LOGI(TAG, "button primary down as pending confirmation control");
                     s_primary_session_id = 0;
                     (void)voice_ble_send_button_click("primary", 0, 0);
                     break;
@@ -636,8 +606,8 @@ static void app_event_task(void *arg)
                 }
             }
             break;
-        case APP_EVENT_FRONT_UP:
-            ESP_LOGI(TAG, "button front up");
+        case APP_EVENT_PRIMARY_UP:
+            ESP_LOGI(TAG, "button %s up", s_buttons[0].name);
             note_activity();
             if (s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK) {
                 break;
@@ -657,16 +627,17 @@ static void app_event_task(void *arg)
             s_primary_down_us = 0;
             s_primary_session_id = 0;
             break;
-        case APP_EVENT_SIDE_DOWN:
-            ESP_LOGI(TAG, "button side down");
+        case APP_EVENT_BUTTON_DOWN:
+            ESP_LOGI(TAG, "button %s down", s_buttons[event.button].name);
             note_activity();
-            s_secondary_down_us = esp_timer_get_time();
+            s_button_down_us[event.button] = esp_timer_get_time();
             break;
-        case APP_EVENT_SIDE_UP:
-            ESP_LOGI(TAG, "button side up");
+        case APP_EVENT_BUTTON_UP:
+            ESP_LOGI(TAG, "button %s up", s_buttons[event.button].name);
             note_activity();
-            voice_ble_send_button_click("secondary", elapsed_button_ms(s_secondary_down_us), 0);
-            s_secondary_down_us = 0;
+            voice_ble_send_button_click(s_buttons[event.button].name,
+                                        elapsed_button_ms(s_button_down_us[event.button]), 0);
+            s_button_down_us[event.button] = 0;
             break;
         case APP_EVENT_UI_STATE:
             apply_app_ui_state(event.state, event.text);
@@ -687,13 +658,13 @@ static void app_event_task(void *arg)
             ui_status_set_pairing(voice_ble_device_name());
             break;
         case APP_EVENT_POWER_IRQ:
-            gpio_intr_enable(STICK_S3_PIN_PMIC_IRQ);
+            board_power_events_rearm();
             /* fall through */
         case APP_EVENT_BATTERY_REFRESH:
             update_battery_status();
             break;
         case APP_EVENT_ENTER_DEEP_SLEEP:
-            enter_deep_sleep();
+            enter_deep_sleep(false);
             break;
         case APP_EVENT_OTA_BEGIN:
             s_ota_updating = true;
@@ -754,34 +725,27 @@ static esp_err_t init_buttons(void)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t err = init_gpio_button(STICK_S3_PIN_BUTTON_FRONT, &s_front_button);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = init_gpio_button(STICK_S3_PIN_BUTTON_SIDE, &s_side_button);
-    if (err != ESP_OK) {
-        return err;
+    s_button_count = board_buttons(&s_buttons);
+    if (s_button_count == 0 || s_button_count > MAX_BUTTONS) {
+        return ESP_ERR_INVALID_SIZE;
     }
 
-    err = iot_button_register_cb(s_front_button, BUTTON_PRESS_DOWN, NULL,
-                                 front_button_down_cb, NULL);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = iot_button_register_cb(s_front_button, BUTTON_PRESS_UP, NULL,
-                                 front_button_up_cb, NULL);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = iot_button_register_cb(s_side_button, BUTTON_PRESS_DOWN, NULL,
-                                 side_button_down_cb, NULL);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = iot_button_register_cb(s_side_button, BUTTON_PRESS_UP, NULL,
-                                 side_button_up_cb, NULL);
-    if (err != ESP_OK) {
-        return err;
+    for (size_t i = 0; i < s_button_count; ++i) {
+        esp_err_t err = init_gpio_button(s_buttons[i].gpio, &s_button_handles[i]);
+        if (err != ESP_OK) {
+            return err;
+        }
+        void *index = (void *)(uintptr_t)i;
+        err = iot_button_register_cb(s_button_handles[i], BUTTON_PRESS_DOWN, NULL,
+                                     button_down_cb, index);
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = iot_button_register_cb(s_button_handles[i], BUTTON_PRESS_UP, NULL,
+                                     button_up_cb, index);
+        if (err != ESP_OK) {
+            return err;
+        }
     }
 
     BaseType_t ok = xTaskCreate(app_event_task, "app_event_task", 4096,
@@ -864,11 +828,8 @@ static esp_err_t init_battery_refresh_timer(void)
     return esp_timer_start_periodic(s_battery_refresh_timer, BATTERY_REFRESH_FALLBACK_US);
 }
 
-static void IRAM_ATTR pmic_irq_isr(void *arg)
+static void IRAM_ATTR power_event_isr_cb(void)
 {
-    (void)arg;
-    gpio_intr_disable(STICK_S3_PIN_PMIC_IRQ);
-
     BaseType_t high_task_woken = pdFALSE;
     queue_app_event_from_isr(APP_EVENT_POWER_IRQ, &high_task_woken);
     if (high_task_woken) {
@@ -876,64 +837,17 @@ static void IRAM_ATTR pmic_irq_isr(void *arg)
     }
 }
 
-static esp_err_t init_pmic_irq(void)
-{
-    gpio_config_t irq_config = {
-        .pin_bit_mask = 1ULL << STICK_S3_PIN_PMIC_IRQ,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    esp_err_t err = gpio_config(&irq_config);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = gpio_wakeup_enable(STICK_S3_PIN_PMIC_IRQ, GPIO_INTR_LOW_LEVEL);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    err = gpio_isr_handler_add(STICK_S3_PIN_PMIC_IRQ, pmic_irq_isr, NULL);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = gpio_set_intr_type(STICK_S3_PIN_PMIC_IRQ, GPIO_INTR_LOW_LEVEL);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = gpio_intr_enable(STICK_S3_PIN_PMIC_IRQ);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    return ESP_OK;
-}
-
 static void update_battery_status(void)
 {
-    uint8_t sys_status = 0;
-    esp_err_t irq_err = stick_s3_board_clear_power_irqs(&sys_status);
-    if (irq_err == ESP_OK && sys_status) {
-        ESP_LOGI(TAG, "PMIC sys irq=0x%02x", sys_status);
-    }
-
     int level = 0;
     bool charging = false;
     bool usb_powered = false;
-    esp_err_t err = stick_s3_board_battery_level(&level);
+    esp_err_t err = board_battery_level(&level);
     if (err == ESP_OK) {
-        err = stick_s3_board_battery_charging(&charging);
+        err = board_battery_charging(&charging);
     }
     if (err == ESP_OK) {
-        err = stick_s3_board_usb_powered(&usb_powered);
+        err = board_usb_powered(&usb_powered);
     }
     if (err == ESP_OK) {
         const bool external_power_changed = (charging != s_battery_charging) ||
@@ -949,16 +863,21 @@ static void update_battery_status(void)
     } else {
         ESP_LOGW(TAG, "battery read failed: %s", esp_err_to_name(err));
     }
+
+    if (!is_external_powered() && board_battery_critical()) {
+        ESP_LOGW(TAG, "battery critical, sleeping until USB is connected");
+        ui_status_set_error("Battery low");
+        enter_deep_sleep(true);
+    }
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "boot reset_reason=%d wakeup_cause=%d ext1_status=0x%llx",
-             esp_reset_reason(), esp_sleep_get_wakeup_cause(),
-             (unsigned long long)esp_sleep_get_ext1_wakeup_status());
+    ESP_LOGI(TAG, "boot reset_reason=%d wakeup_causes=0x%" PRIx32,
+             esp_reset_reason(), esp_sleep_get_wakeup_causes());
 
     ESP_ERROR_CHECK(init_power_management());
-    ESP_ERROR_CHECK(stick_s3_board_init());
+    ESP_ERROR_CHECK(board_init());
     ESP_ERROR_CHECK(ui_status_init());
     ESP_ERROR_CHECK(init_display_dim_timer());
     ESP_ERROR_CHECK(init_deep_sleep_timer());
@@ -990,9 +909,8 @@ void app_main(void)
 
     update_battery_status();
     ESP_ERROR_CHECK(init_battery_refresh_timer());
-    ESP_ERROR_CHECK(init_pmic_irq());
+    ESP_ERROR_CHECK(board_power_events_init(power_event_isr_cb));
 
-    ESP_LOGI(TAG, "configuring PMIC");
     esp_pm_config_t pm_config = {
         .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
         .min_freq_mhz = CONFIG_XTAL_FREQ,

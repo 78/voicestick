@@ -1,0 +1,4 @@
+# Preserve CAD exports byte-for-byte and keep generated model data out of diffs.
+*.step binary
+*.stl binary
+*.csv text eol=crlf

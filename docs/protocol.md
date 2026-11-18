@@ -83,6 +83,11 @@ Buttons are named by role instead of physical placement. On StickS3, the front
 button maps to `primary` and the side button maps to `secondary`. `session_id` is
 included when a `primary` press starts or stops a local audio recording.
 
+`hardware` and `buttons` come from the board. VoiceStick C3 v1 reports
+`"hardware":"voicestick_c3"` and `"buttons":["primary","secondary","prev","next"]`.
+The firmware drops trailing buttons if `device_info` would not fit one
+notification.
+
 Deprecated firmware-to-app events:
 
 | Event | Replacement | Reason |

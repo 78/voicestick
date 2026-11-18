@@ -1,0 +1,253 @@
+{
+ "source": "assembly-interface.json rev v1",
+ "parts": {
+  "LowerShell": {
+   "volume_mm3": 3647.4,
+   "print_size_mm": [
+    54.0,
+    34.0,
+    8.2
+   ],
+   "orientation": "bottom face on the bed",
+   "settings": "0.2 mm layers, 4 walls, 20 % gyroid, no supports",
+   "stl": {
+    "facets": 16496,
+    "solid": true,
+    "non_manifold": false
+   }
+  },
+  "UpperShell": {
+   "volume_mm3": 3483.8,
+   "print_size_mm": [
+    54.0,
+    34.0,
+    11.4
+   ],
+   "orientation": "roof on the bed (flipped)",
+   "settings": "0.2 mm layers, 4 walls, 20 % gyroid, no supports; light-coloured filament for the LED window",
+   "stl": {
+    "facets": 5104,
+    "solid": true,
+    "non_manifold": false
+   }
+  },
+  "MainCap": {
+   "volume_mm3": 581.7,
+   "print_size_mm": [
+    17.4,
+    18.0,
+    4.8
+   ],
+   "orientation": "top face on the bed (flipped)",
+   "settings": "0.12 mm layers, 100 % infill, no supports",
+   "stl": {
+    "facets": 1604,
+    "solid": true,
+    "non_manifold": false
+   }
+  },
+  "SideCap_SW2": {
+   "volume_mm3": 58.0,
+   "print_size_mm": [
+    7.6,
+    4.6,
+    2.45
+   ],
+   "orientation": "flange inner face on the bed",
+   "settings": "0.12 mm layers, 100 % infill, no supports",
+   "stl": {
+    "facets": 1092,
+    "solid": true,
+    "non_manifold": false
+   }
+  },
+  "SideCap_SW3": {
+   "volume_mm3": 58.0,
+   "print_size_mm": [
+    7.6,
+    4.6,
+    2.45
+   ],
+   "orientation": "flange inner face on the bed",
+   "settings": "0.12 mm layers, 100 % infill, no supports",
+   "stl": {
+    "facets": 1092,
+    "solid": true,
+    "non_manifold": false
+   }
+  },
+  "SideCap_SW4": {
+   "volume_mm3": 58.0,
+   "print_size_mm": [
+    7.6,
+    4.6,
+    2.45
+   ],
+   "orientation": "flange inner face on the bed",
+   "settings": "0.12 mm layers, 100 % infill, no supports",
+   "stl": {
+    "facets": 1092,
+    "solid": true,
+    "non_manifold": false
+   }
+  },
+  "ToleranceCoupon": {
+   "volume_mm3": 1669.1,
+   "print_size_mm": [
+    40.0,
+    20.0,
+    8.0
+   ],
+   "orientation": "as modelled",
+   "settings": "same settings as the shells; print first",
+   "stl": {
+    "facets": 7312,
+    "solid": true,
+    "non_manifold": false
+   }
+  },
+  "AcousticTestBox": {
+   "volume_mm3": 1001.2,
+   "print_size_mm": [
+    12.5,
+    34.0,
+    8.2
+   ],
+   "orientation": "as modelled",
+   "settings": "same settings as the lower shell",
+   "stl": {
+    "facets": 4956,
+    "solid": true,
+    "non_manifold": false
+   }
+  },
+  "LowerShell_OpenDuct": {
+   "volume_mm3": 3648.1,
+   "print_size_mm": [
+    54.0,
+    34.0,
+    8.2
+   ],
+   "orientation": "bottom face on the bed",
+   "settings": "A/B sound test only, same settings as the lower shell",
+   "stl": {
+    "facets": 18064,
+    "solid": true,
+    "non_manifold": false
+   }
+  }
+ },
+ "feet_xy": [
+  [
+   -18.0,
+   11.8
+  ],
+  [
+   22.5,
+   -12.0
+  ],
+  [
+   21.5,
+   12.5
+  ],
+  [
+   -21.8,
+   -11.8
+  ]
+ ],
+ "interference": {
+  "rest": [],
+  "main_key_pressed": [],
+  "SW2_pressed": [],
+  "SW3_pressed": [],
+  "SW4_pressed": []
+ },
+ "interference_free": true,
+ "clearances": [
+  {
+   "check": "battery envelope (6.5 mm, swelling margin) to PCB parts",
+   "gap_mm": 0.4,
+   "required_mm": 0.3,
+   "ok": true
+  },
+  {
+   "check": "measured battery (5.8 mm) to PCB parts",
+   "gap_mm": 1.1,
+   "required_mm": 0.5,
+   "ok": true
+  },
+  {
+   "check": "battery envelope to main switch",
+   "gap_mm": 1.6,
+   "required_mm": 0.5,
+   "ok": true
+  },
+  {
+   "check": "upper shell (posts, light tube) to PCB parts",
+   "gap_mm": 0.2,
+   "required_mm": 0.2,
+   "ok": true
+  },
+  {
+   "check": "lower shell to PCB parts and leads",
+   "gap_mm": 0.35,
+   "required_mm": 0.3,
+   "ok": true
+  },
+  {
+   "check": "USB receptacle to case",
+   "gap_mm": 0.4,
+   "required_mm": 0.3,
+   "ok": true
+  },
+  {
+   "check": "main cap pressed to switch housing (plate stop)",
+   "gap_mm": 0.1,
+   "required_mm": 0.1,
+   "ok": true
+  },
+  {
+   "check": "main cap pressed to upper shell",
+   "gap_mm": 0.217,
+   "required_mm": 0.2,
+   "ok": true
+  },
+  {
+   "check": "SW2 cap at rest to switch",
+   "gap_mm": 0.1,
+   "required_mm": 0.1,
+   "ok": true
+  },
+  {
+   "check": "SW2 cap pressed to PCB",
+   "gap_mm": 0.1,
+   "required_mm": 0.1,
+   "ok": true
+  },
+  {
+   "check": "SW3 cap at rest to switch",
+   "gap_mm": 0.1,
+   "required_mm": 0.1,
+   "ok": true
+  },
+  {
+   "check": "SW3 cap pressed to PCB",
+   "gap_mm": 0.1,
+   "required_mm": 0.1,
+   "ok": true
+  },
+  {
+   "check": "SW4 cap at rest to switch",
+   "gap_mm": 0.1,
+   "required_mm": 0.1,
+   "ok": true
+  },
+  {
+   "check": "SW4 cap pressed to PCB",
+   "gap_mm": 0.1,
+   "required_mm": 0.1,
+   "ok": true
+  }
+ ],
+ "pcb_step_in_assembly": true
+}

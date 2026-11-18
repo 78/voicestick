@@ -26,6 +26,8 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
+#include "board.h"
+
 static const char *TAG = "voice_ble";
 
 #define OTA_PROGRESS_NOTIFY_BYTES (32 * 1024)
@@ -905,15 +907,33 @@ esp_err_t voice_ble_send_device_info(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
     const char *version = app_desc ? app_desc->version : "unknown";
-    char json[280];
-    snprintf(json, sizeof(json),
-             "{\"event\":\"device_info\",\"hardware\":\"stick_s3\","
-             "\"firmware_version\":\"%s\","
-             "\"buttons\":[\"primary\",\"secondary\"],"
-             "\"interaction_modes\":[\"hold_to_talk\",\"click_to_talk\"],"
-             "\"ui_states\":[\"ready\",\"recording\",\"thinking\","
-             "\"pending_confirmation\",\"error\"]}",
-             version);
+
+    const board_button_t *buttons = NULL;
+    size_t button_count = board_buttons(&buttons);
+    /* The host reads device_info from a single notification: drop trailing
+     * buttons until the frame (4-byte header + JSON) fits the ATT payload. */
+    const size_t max_json = ble_att_mtu(s_conn_handle) - 3 - 4;
+    char json[320];
+    while (true) {
+        char button_list[96] = "";
+        size_t used = 0;
+        for (size_t i = 0; i < button_count && used < sizeof(button_list); ++i) {
+            used += snprintf(button_list + used, sizeof(button_list) - used, "%s\"%s\"",
+                             i ? "," : "", buttons[i].name);
+        }
+        const int len = snprintf(json, sizeof(json),
+                                 "{\"event\":\"device_info\",\"hardware\":\"%s\","
+                                 "\"firmware_version\":\"%s\","
+                                 "\"buttons\":[%s],"
+                                 "\"interaction_modes\":[\"hold_to_talk\",\"click_to_talk\"],"
+                                 "\"ui_states\":[\"ready\",\"recording\",\"thinking\","
+                                 "\"pending_confirmation\",\"error\"]}",
+                                 board_hardware_name(), version, button_list);
+        if ((size_t)len <= max_json || button_count == 0) {
+            break;
+        }
+        button_count--;
+    }
     return send_state_json(json);
 }
 

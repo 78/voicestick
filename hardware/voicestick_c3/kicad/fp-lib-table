@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "VoiceStickC3V1") (type "KiCad") (uri "${KIPRJMOD}/VoiceStickC3V1.pretty") (options "") (descr "VoiceStick C3 v1 parts"))
+)

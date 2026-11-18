@@ -1,0 +1,11 @@
+menu "Voice Stick"
+
+    config VOICE_STICK_DEEP_SLEEP_TIMEOUT_S
+        int "Idle time on battery before deep sleep (seconds)"
+        range 30 86400
+        default 300
+        help
+            Deep sleep drops the BLE connection; the talk button or USB wakes
+            the device again.
+
+endmenu
