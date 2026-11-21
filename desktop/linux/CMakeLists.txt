@@ -38,7 +38,7 @@ add_library(voicestick_core
     src/voice_stick_coordinator.cc
 )
 
-target_include_directories(voicestick_core PUBLIC src third_party/cjson third_party/tomlplusplus)
+target_include_directories(voicestick_core PUBLIC src third_party/cjson third_party/llm-json third_party/llm-retry third_party/tomlplusplus)
 target_link_libraries(voicestick_core PUBLIC PkgConfig::SOUP OpenSSL::Crypto)
 
 add_executable(VoiceStickApp
