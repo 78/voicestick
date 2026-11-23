@@ -380,7 +380,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusController?.setPairedDeviceIDs(config.pairedDeviceIDs)
             statusController?.setDeviceThemeColors(config.deviceThemeColors)
             statusController?.setDeviceOverlayPositions(config.deviceOverlayPositions)
-            statusController?.setConnectedDevices([])
             coordinator?.updatePairedDeviceIDs(config.pairedDeviceIDs)
         } catch {
             statusController?.setStatus("Forget device failed")

@@ -102,17 +102,24 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func updatePairedDeviceIDs(_ deviceIDs: [String]) {
-        pairedDeviceIDs = Set(deviceIDs)
-        for peripheral in peripherals.values {
-            central.cancelPeripheralConnection(peripheral)
+        let updatedIDs = Set(deviceIDs)
+        guard pairedDeviceIDs != updatedIDs else { return }
+        pairedDeviceIDs = updatedIDs
+
+        let removedPeripherals = peripherals.values.filter { peripheral in
+            guard let deviceID = deviceID(for: peripheral.identifier) else { return true }
+            return !updatedIDs.contains(deviceID)
         }
-        peripherals.removeAll()
-        discoveredDevices.removeAll()
-        connectedDevices.removeAll()
-        controlCharacteristics.removeAll()
-        otaCharacteristics.removeAll()
-        failFirmwareUpdate(FirmwareUpdateError.noConnectedDevice)
-        onConnectionChange?([])
+        let connectedCount = connectedDevices.count
+        for peripheral in removedPeripherals {
+            removePeripheral(peripheral)
+            central?.cancelPeripheralConnection(peripheral)
+        }
+        if connectedDevices.count != connectedCount {
+            onConnectionChange?(currentConnectedDevices)
+        }
+
+        central?.stopScan()
         scanIfReady()
     }
 
@@ -235,6 +242,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         guard !isWorkspaceSleeping else { return }
         guard shouldConnect(localName: localName, peripheralName: peripheral.name) else { return }
+        guard peripheral.state != .disconnecting else { return }
         if let existingPeripheral = peripherals[peripheral.identifier] {
             if existingPeripheral.state == .disconnected {
                 removePeripheral(existingPeripheral)
@@ -251,6 +259,10 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        guard peripherals[peripheral.identifier] != nil else {
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
         connectedDevices[peripheral.identifier] = discoveredDevices[peripheral.identifier]
             ?? connectedDevice(localName: nil, peripheralName: peripheral.name)
         onConnectionChange?(currentConnectedDevices)
@@ -258,15 +270,18 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        removePeripheral(peripheral)
-        onConnectionChange?(currentConnectedDevices)
-        guard !isWorkspaceSleeping else { return }
-        scanIfReady()
+        handleConnectionClosed(peripheral)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        removePeripheral(peripheral)
-        onConnectionChange?(currentConnectedDevices)
+        handleConnectionClosed(peripheral)
+    }
+
+    private func handleConnectionClosed(_ peripheral: CBPeripheral) {
+        if peripherals[peripheral.identifier] != nil {
+            removePeripheral(peripheral)
+            onConnectionChange?(currentConnectedDevices)
+        }
         guard !isWorkspaceSleeping else { return }
         scanIfReady()
     }
@@ -492,11 +507,9 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     private func knownDevice(for peripheral: CBPeripheral) -> ConnectedVoiceStickDevice? {
-        if let device = discoveredDevices[peripheral.identifier] {
-            return device
-        }
-        if let device = connectedDevice(localName: nil, peripheralName: peripheral.name) {
-            return device
+        if let device = discoveredDevices[peripheral.identifier]
+            ?? connectedDevice(localName: nil, peripheralName: peripheral.name) {
+            return pairedDeviceIDs.contains(device.deviceID) ? device : nil
         }
         guard pairedDeviceIDs.count == 1, let deviceID = pairedDeviceIDs.first else {
             return nil
@@ -521,6 +534,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     private func removePeripheral(_ peripheral: CBPeripheral) {
+        peripheral.delegate = nil
         peripherals.removeValue(forKey: peripheral.identifier)
         discoveredDevices.removeValue(forKey: peripheral.identifier)
         connectedDevices.removeValue(forKey: peripheral.identifier)

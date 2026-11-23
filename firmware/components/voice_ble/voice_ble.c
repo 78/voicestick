@@ -1,6 +1,7 @@
 #include "voice_ble.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +35,7 @@ static const char *TAG = "voice_ble";
 
 static bool s_connected;
 static bool s_audio_subscribed;
-static bool s_state_subscribed;
+static atomic_bool s_state_subscribed;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t s_own_addr_type;
 static uint16_t s_audio_attr_handle;
@@ -88,8 +89,98 @@ static const ble_uuid128_t s_ota_state_uuid =
 
 static void start_advertising(void);
 static void stop_advertising(void);
+static esp_err_t send_state_json(const char *json);
 static struct ble_npl_callout s_adv_retry_callout;
 #define ADV_RETRY_DELAY_MS 1000
+
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+#define BATTERY_REPORT_INTERVAL_MS (60 * 1000)
+#define BATTERY_REPORT_DELTA_PERCENT 2
+
+typedef struct {
+    int percent;
+    bool charging;
+    bool usb_powered;
+} battery_status_t;
+
+/* The app task supplies the latest sample. NimBLE owns the last report and its timer. */
+static portMUX_TYPE s_battery_status_lock = portMUX_INITIALIZER_UNLOCKED;
+static battery_status_t s_battery_status = {.percent = -1};
+static battery_status_t s_last_battery_report = {.percent = -1};
+static struct ble_npl_event s_battery_status_event;
+static struct ble_npl_callout s_battery_report_timer;
+
+static void report_battery_status(bool periodic)
+{
+    if (!s_state_subscribed) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_battery_status_lock);
+    const battery_status_t status = s_battery_status;
+    portEXIT_CRITICAL(&s_battery_status_lock);
+    if (status.percent < 0) {
+        return;
+    }
+
+    if (!periodic && s_last_battery_report.percent >= 0 &&
+        abs(status.percent - s_last_battery_report.percent) < BATTERY_REPORT_DELTA_PERCENT &&
+        status.charging == s_last_battery_report.charging &&
+        status.usb_powered == s_last_battery_report.usb_powered) {
+        return;
+    }
+
+    char json[96];
+    const int len = snprintf(json, sizeof(json),
+                             "{\"event\":\"battery_status\",\"percent\":%d,"
+                             "\"charging\":%s,\"usb_powered\":%s}",
+                             status.percent, status.charging ? "true" : "false",
+                             status.usb_powered ? "true" : "false");
+    /* ATT notification overhead plus the VoiceStick state frame header. */
+    if (len + 3 + 4 > ble_att_mtu(s_conn_handle) || send_state_json(json) != ESP_OK) {
+        s_last_battery_report.percent = -1;
+        return;
+    }
+
+    s_last_battery_report = status;
+    if (ble_npl_callout_reset(&s_battery_report_timer, pdMS_TO_TICKS(BATTERY_REPORT_INTERVAL_MS)) != BLE_NPL_OK) {
+        s_last_battery_report.percent = -1;
+    }
+}
+
+static void battery_status_event_cb(struct ble_npl_event *event)
+{
+    (void)event;
+    report_battery_status(false);
+}
+
+static void battery_report_timer_cb(struct ble_npl_event *event)
+{
+    (void)event;
+    report_battery_status(true);
+}
+
+static void stop_battery_reporting(void)
+{
+    ble_npl_callout_stop(&s_battery_report_timer);
+    s_last_battery_report.percent = -1;
+}
+
+void voice_ble_update_battery_status(int percent, bool charging, bool usb_powered)
+{
+    if (percent < 0 || percent > 100) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_battery_status_lock);
+    s_battery_status = (battery_status_t){percent, charging, usb_powered};
+    portEXIT_CRITICAL(&s_battery_status_lock);
+
+    if (s_state_subscribed) {
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_battery_status_event);
+    }
+}
+#endif
 
 static void adv_retry_callout_cb(struct ble_npl_event *ev)
 {
@@ -507,6 +598,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_connected = false;
         s_audio_subscribed = false;
         s_state_subscribed = false;
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+        stop_battery_reporting();
+#endif
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_itvl_target = CONN_ITVL_NONE;
         s_itvl_update_pending = false;
@@ -537,6 +631,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
                     ESP_LOGW(TAG, "device_info send failed err=0x%x", rc);
                 }
             }
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+            if (s_state_subscribed) {
+                report_battery_status(true);
+            } else {
+                stop_battery_reporting();
+            }
+#endif
         }
         return 0;
 
@@ -564,6 +665,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_MTU:
         ESP_LOGD(TAG, "mtu=%u", event->mtu.value);
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+        report_battery_status(false);
+#endif
         return 0;
 
     default:
@@ -708,6 +812,11 @@ esp_err_t voice_ble_init(void)
 
     ble_npl_callout_init(&s_adv_retry_callout, nimble_port_get_dflt_eventq(),
                          adv_retry_callout_cb, NULL);
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+    ble_npl_event_init(&s_battery_status_event, battery_status_event_cb, NULL);
+    ble_npl_callout_init(&s_battery_report_timer, nimble_port_get_dflt_eventq(),
+                         battery_report_timer_cb, NULL);
+#endif
 
     nimble_port_freertos_init(nimble_host_task);
     ESP_LOGI(TAG, "BLE initialized as %s", s_device_name);

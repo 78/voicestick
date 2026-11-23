@@ -8,4 +8,8 @@ menu "Voice Stick"
             Deep sleep drops the BLE connection; the talk button or USB wakes
             the device again.
 
+    config VOICE_STICK_BLE_BATTERY_STATUS
+        bool "Report battery status over BLE"
+        default n
+
 endmenu

@@ -77,6 +77,7 @@ Currently emitted state events:
 {"event":"button_up","button":"primary","duration_ms":620,"session_id":1234}
 {"event":"button_down","button":"secondary"}
 {"event":"button_up","button":"secondary","duration_ms":90}
+{"event":"battery_status","percent":73,"charging":false,"usb_powered":false}
 ```
 
 Buttons are named by role instead of physical placement. On StickS3, the front
@@ -87,6 +88,13 @@ included when a `primary` press starts or stops a local audio recording.
 `"hardware":"voicestick_c3"` and `"buttons":["primary","secondary","prev","next"]`.
 The firmware drops trailing buttons if `device_info` would not fit one
 notification.
+
+VoiceStick C3 v1 sends `battery_status` once the host subscribes and a valid
+reading is available. While subscribed, it sends an update every 60 seconds,
+with earlier updates when the battery level changes by at least 2 percentage
+points or the charging or USB power state changes. `percent` is an integer
+from 0 to 100. Deep sleep closes the BLE connection. The Mac clears the
+reading on disconnect and uses the device icon to indicate connection status.
 
 Deprecated firmware-to-app events:
 

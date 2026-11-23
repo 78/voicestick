@@ -62,22 +62,12 @@ final class StatusController {
                 return "Error"
             }
         }
-
-        var visibleTitle: String? {
-            switch self {
-            case .needsPairing:
-                return "Pair"
-            case .processing:
-                return "Processing"
-            case .error:
-                return "Error"
-            case .listening, .ready:
-                return nil
-            }
-        }
     }
 
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private static let batteryPercentagePreference = "showBatteryPercentageInMenuBar"
+    private static let compactStatusItemWidth: CGFloat = 18
+    private static let batteryStatusItemSidePadding: CGFloat = 5
+    private let statusItem = NSStatusBar.system.statusItem(withLength: StatusController.compactStatusItemWidth)
     private let menu = NSMenu()
     private var overlays: [String: OverlayController] = [:]
     private var visibleOverlayKeys: Set<String> = []
@@ -98,11 +88,16 @@ final class StatusController {
         didSet { rebuildMenu() }
     }
     private var needsPairing: Bool
+    private var appStatus: AppStatus = .ready
     private var hasRecoverableInput = false
     private var pairedDeviceIDs: [String]
     private var deviceThemeColors: [String: OverlayThemeColor]
     private var deviceOverlayPositions: [String: OverlayPosition]
     private var connectedDevices: [ConnectedVoiceStickDevice] = []
+    private var batteryStatusByDeviceID: [String: DeviceBatteryStatus] = [:]
+    private var showsBatteryPercentage: Bool {
+        UserDefaults.standard.bool(forKey: Self.batteryPercentagePreference)
+    }
     private var firmwareInfoByDeviceID: [String: DeviceFirmwareInfo] = [:]
     private var interactionMode: InteractionMode
     private var autoEnter: Bool
@@ -124,7 +119,7 @@ final class StatusController {
         self.defaultOutputProfile = defaultOutputProfile
         self.deviceOutputProfiles = deviceOutputProfiles
         self.needsPairing = pairedDeviceIDs.isEmpty
-        updateStatusButton(.ready)
+        updateStatusButton()
         rebuildMenu()
     }
 
@@ -133,7 +128,9 @@ final class StatusController {
         deviceThemeColors = deviceThemeColors.filter { deviceIDs.contains($0.key) }
         deviceOverlayPositions = deviceOverlayPositions.filter { deviceIDs.contains($0.key) }
         deviceOutputProfiles = deviceOutputProfiles.filter { deviceIDs.contains($0.key) }
+        batteryStatusByDeviceID = batteryStatusByDeviceID.filter { deviceIDs.contains($0.key) }
         needsPairing = deviceIDs.isEmpty
+        updateStatusButton()
         rebuildMenu()
     }
 
@@ -152,6 +149,16 @@ final class StatusController {
         guard connectedDevices.map(\.deviceID) != sortedDevices.map(\.deviceID) ||
                 connectedDevices.map(\.name) != sortedDevices.map(\.name) else { return }
         connectedDevices = sortedDevices
+        let connectedIDs = Set(sortedDevices.map(\.deviceID))
+        batteryStatusByDeviceID = batteryStatusByDeviceID.filter { connectedIDs.contains($0.key) }
+        updateStatusButton()
+        rebuildMenu()
+    }
+
+    func setBatteryStatus(_ status: DeviceBatteryStatus, for deviceID: String) {
+        guard batteryStatusByDeviceID[deviceID] != status else { return }
+        batteryStatusByDeviceID[deviceID] = status
+        updateStatusButton()
         rebuildMenu()
     }
 
@@ -196,6 +203,14 @@ final class StatusController {
         }
 
         addDeviceItems()
+
+        let batteryPercentageItem = makeMenuItem(
+            title: "Show Battery Percentage in Menu Bar",
+            symbolName: "battery.100",
+            action: #selector(toggleBatteryPercentage)
+        )
+        batteryPercentageItem.state = showsBatteryPercentage ? .on : .off
+        menu.addItem(batteryPercentageItem)
 
         addInputItems()
 
@@ -306,25 +321,28 @@ final class StatusController {
         let connectedByID = Dictionary(uniqueKeysWithValues: connectedDevices.map { ($0.deviceID, $0) })
         for deviceID in pairedDeviceIDs.sorted() {
             let connectedDevice = connectedByID[deviceID]
-            let title = connectedDevice?.name ?? "VS-\(deviceID)"
+            var title = connectedDevice?.name ?? "VS-\(deviceID)"
+            if connectedDevice != nil, let battery = batteryStatusByDeviceID[deviceID] {
+                title += " · \(battery.percent)%"
+                if battery.charging {
+                    title += " · Charging"
+                } else if battery.usbPowered {
+                    title += " · USB Powered"
+                }
+            }
             let deviceItem = makeMenuItem(
                 title: title,
                 symbolName: connectedDevice == nil ? "link.circle" : "link.circle.fill",
                 action: nil
             )
             let submenu = NSMenu()
-            let stateItem = NSMenuItem(
-                title: connectedDevice == nil ? "Scanning" : "Connected",
-                action: nil,
-                keyEquivalent: ""
-            )
-            stateItem.isEnabled = false
-            stateItem.image = Self.symbolImage(
-                named: connectedDevice == nil ? "antenna.radiowaves.left.and.right" : "checkmark.circle",
-                accessibilityDescription: stateItem.title
-            )
-            submenu.addItem(stateItem)
-            submenu.addItem(NSMenuItem.separator())
+            if connectedDevice != nil {
+                let stateItem = NSMenuItem(title: "Connected", action: nil, keyEquivalent: "")
+                stateItem.isEnabled = false
+                stateItem.image = Self.symbolImage(named: "checkmark.circle", accessibilityDescription: stateItem.title)
+                submenu.addItem(stateItem)
+                submenu.addItem(NSMenuItem.separator())
+            }
 
             addThemeColorItems(to: submenu, deviceID: deviceID)
             addOverlayPositionItems(to: submenu, deviceID: deviceID)
@@ -471,7 +489,8 @@ final class StatusController {
 
     func setStatus(_ text: String) {
         DispatchQueue.main.async {
-            self.updateStatusButton(AppStatus(text: text))
+            self.appStatus = AppStatus(text: text)
+            self.updateStatusButton()
         }
     }
 
@@ -549,16 +568,33 @@ final class StatusController {
         overlay.hide(onHidden: onHidden)
     }
 
-    private func updateStatusButton(_ status: AppStatus) {
+    private func updateStatusButton() {
         guard let button = statusItem.button else { return }
+        var title = ""
+        var description = "VoiceStick: \(appStatus.accessibilityDescription)"
+        if showsBatteryPercentage, connectedDevices.count == 1, let device = connectedDevices.first,
+           let battery = batteryStatusByDeviceID[device.deviceID] {
+            title = "\(battery.percent)%"
+            description += ", battery \(title)"
+        }
+
         button.image = Self.symbolImage(
-            named: status.symbolName(hasConnectedDevices: !connectedDevices.isEmpty),
-            accessibilityDescription: status.accessibilityDescription
+            named: appStatus.symbolName(hasConnectedDevices: !connectedDevices.isEmpty),
+            accessibilityDescription: appStatus.accessibilityDescription,
+            pointSize: 16
         )
-        button.title = status.visibleTitle ?? ""
-        button.imagePosition = status.visibleTitle == nil ? .imageOnly : .imageLeading
-        button.toolTip = "VoiceStick: \(status.accessibilityDescription)"
-        button.setAccessibilityLabel("VoiceStick: \(status.accessibilityDescription)")
+        button.title = title
+        button.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
+        if title.isEmpty {
+            statusItem.length = Self.compactStatusItemWidth
+        } else {
+            let contentWidth = button.intrinsicContentSize.width
+            statusItem.length = contentWidth > 0
+                ? ceil(contentWidth) + 2 * Self.batteryStatusItemSidePadding
+                : NSStatusItem.variableLength
+        }
+        button.toolTip = description
+        button.setAccessibilityLabel(description)
     }
 
     private func makeMenuItem(
@@ -573,8 +609,12 @@ final class StatusController {
         return item
     }
 
-    private static func symbolImage(named name: String, accessibilityDescription: String) -> NSImage? {
-        let configuration = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+    private static func symbolImage(
+        named name: String,
+        accessibilityDescription: String,
+        pointSize: CGFloat = 14
+    ) -> NSImage? {
+        let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
         let image = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription)?
             .withSymbolConfiguration(configuration)
         image?.isTemplate = true
@@ -669,6 +709,12 @@ final class StatusController {
     private func applyOverlayStyle(for deviceID: String?, overlay: OverlayController) {
         overlay.setThemeColor(themeColor(for: deviceID))
         overlay.setPosition(overlayPosition(for: deviceID))
+    }
+
+    @objc private func toggleBatteryPercentage() {
+        UserDefaults.standard.set(!showsBatteryPercentage, forKey: Self.batteryPercentagePreference)
+        updateStatusButton()
+        rebuildMenu()
     }
 
     @objc private func openSettings() {

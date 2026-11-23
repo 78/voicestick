@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "sdkconfig.h"
 
 #define VOICE_BLE_DEVICE_NAME_PREFIX "VS"
 
@@ -45,6 +46,9 @@ esp_err_t voice_ble_send_audio(uint32_t session_id, uint32_t seq, uint8_t flags,
 esp_err_t voice_ble_request_fast_interval(void);
 esp_err_t voice_ble_request_slow_interval(void);
 esp_err_t voice_ble_send_device_info(void);
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+void voice_ble_update_battery_status(int percent, bool charging, bool usb_powered);
+#endif
 esp_err_t voice_ble_send_button_down(const char *button, uint32_t session_id);
 esp_err_t voice_ble_send_button_up(const char *button, uint32_t duration_ms,
                                    uint32_t session_id);

@@ -8,6 +8,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -39,6 +40,8 @@ static const struct {
 };
 
 static board_power_event_cb_t s_power_event_cb;
+static esp_pm_lock_handle_t s_usb_pm_lock;
+static bool s_usb_pm_locked;
 static adc_oneshot_unit_handle_t s_adc;
 static adc_cali_handle_t s_adc_cali;
 static adc_channel_t s_adc_channel;
@@ -173,30 +176,53 @@ static void IRAM_ATTR vbus_isr(void *arg)
     }
 }
 
+static esp_err_t arm_vbus_event(void)
+{
+    const bool usb_powered = gpio_get_level(VS_PIN_VBUS_SENSE) != 0;
+    if (usb_powered != s_usb_pm_locked) {
+        // An APB lock keeps the PLL running for USB enumeration and prevents light sleep.
+        esp_err_t err = usb_powered ? esp_pm_lock_acquire(s_usb_pm_lock) : esp_pm_lock_release(s_usb_pm_lock);
+        if (err != ESP_OK) {
+            return err;
+        }
+        s_usb_pm_locked = usb_powered;
+    }
+
+    // Keep VBUS interrupts while awake and leave GPIO5 isolated in light sleep.
+    esp_err_t err = gpio_set_intr_type(VS_PIN_VBUS_SENSE, usb_powered ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return gpio_intr_enable(VS_PIN_VBUS_SENSE);
+}
+
 esp_err_t board_power_events_init(board_power_event_cb_t callback)
 {
     s_power_event_cb = callback;
 
-    /* Only USB insertion raises an event. CHRG is polled: without a battery
-     * the TP4054 toggles it every few milliseconds. Edges missed in light
-     * sleep are covered by the app's periodic battery poll. */
-    esp_err_t err = gpio_install_isr_service(0);
+    // Keep monitoring CHRG by polling because the TP4054 toggles it without a battery.
+    esp_err_t err = esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "usb_vbus", &s_usb_pm_lock);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_sleep_enable_gpio_wakeup();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = gpio_install_isr_service(0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
     }
-    err = gpio_set_intr_type(VS_PIN_VBUS_SENSE, GPIO_INTR_ANYEDGE);
-    if (err == ESP_OK) {
-        err = gpio_isr_handler_add(VS_PIN_VBUS_SENSE, vbus_isr, NULL);
+    err = gpio_isr_handler_add(VS_PIN_VBUS_SENSE, vbus_isr, NULL);
+    if (err != ESP_OK) {
+        return err;
     }
-    if (err == ESP_OK) {
-        err = gpio_intr_enable(VS_PIN_VBUS_SENSE);
-    }
-    return err;
+    return arm_vbus_event();
 }
 
 void board_power_events_rearm(void)
 {
-    gpio_intr_enable(VS_PIN_VBUS_SENSE);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(arm_vbus_event());
 }
 
 static esp_err_t read_battery_mv(int *battery_mv)

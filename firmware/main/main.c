@@ -647,7 +647,8 @@ static void app_event_task(void *arg)
             ui_status_set_idle();
             note_activity();
             break;
-        case APP_EVENT_BLE_DISCONNECTED:
+        case APP_EVENT_BLE_DISCONNECTED: {
+            const bool was_recording = s_recording;
             s_recording = false;
             s_ota_updating = false;
             s_app_ui_state = APP_UI_STATE_READY;
@@ -655,8 +656,12 @@ static void app_event_task(void *arg)
             audio_pipeline_stop();
             release_recording_pm_locks();
             release_ota_pm_locks();
+            if (was_recording) {
+                restart_deep_sleep_timer();
+            }
             ui_status_set_pairing(voice_ble_device_name());
             break;
+        }
         case APP_EVENT_POWER_IRQ:
             board_power_events_rearm();
             /* fall through */
@@ -855,6 +860,9 @@ static void update_battery_status(void)
         s_battery_charging = charging;
         s_usb_powered = usb_powered;
         ui_status_set_battery(level, charging, usb_powered);
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+        voice_ble_update_battery_status(level, charging, usb_powered);
+#endif
         if (external_power_changed) {
             ESP_LOGI(TAG, "power source changed charging=%d usb=%d",
                      charging, usb_powered);
@@ -911,10 +919,12 @@ void app_main(void)
     ESP_ERROR_CHECK(init_battery_refresh_timer());
     ESP_ERROR_CHECK(board_power_events_init(power_event_isr_cb));
 
-    esp_pm_config_t pm_config = {
+#if CONFIG_FREERTOS_USE_TICKLESS_IDLE
+    const esp_pm_config_t pm_config = {
         .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
         .min_freq_mhz = CONFIG_XTAL_FREQ,
         .light_sleep_enable = true,
     };
-    esp_pm_configure(&pm_config);
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+#endif
 }

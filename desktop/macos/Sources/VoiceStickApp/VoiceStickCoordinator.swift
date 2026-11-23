@@ -334,10 +334,12 @@ final class VoiceStickCoordinator {
     }
 
     func updatePairedDeviceIDs(_ deviceIDs: [String]) {
+        let wasEmpty = pairedDeviceIDs.isEmpty
         pairedDeviceIDs = deviceIDs
         statusController.setPairedDeviceIDs(deviceIDs)
-        statusController.setConnectedDevices([])
-        statusController.setStatus(deviceIDs.isEmpty ? "Pair a VoiceStick" : "Ready")
+        if deviceIDs.isEmpty != wasEmpty {
+            statusController.setStatus(deviceIDs.isEmpty ? "Pair a VoiceStick" : "Ready")
+        }
         ble.updatePairedDeviceIDs(deviceIDs)
     }
 
@@ -402,6 +404,10 @@ final class VoiceStickCoordinator {
                 NSLog("Connected VoiceStick hardware=\(hardware) firmware=\(firmwareVersion)")
             }
             updateDeviceFirmwareInfo(event: event, peripheralID: peripheralID)
+        case "battery_status":
+            guard ble.isConnected(peripheralID), let deviceID = ble.deviceID(for: peripheralID),
+                  let status = event.batteryStatus else { return }
+            statusController.setBatteryStatus(status, for: deviceID)
         case "button_down":
             handleButtonDown(event, peripheralID: peripheralID)
         case "button_up":

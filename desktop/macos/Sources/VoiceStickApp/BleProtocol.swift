@@ -10,6 +10,12 @@ struct AudioFrame {
     var isEnd: Bool { flags & 0x02 != 0 }
 }
 
+struct DeviceBatteryStatus: Equatable {
+    let percent: Int
+    let charging: Bool
+    let usbPowered: Bool
+}
+
 struct StateEvent: Decodable {
     let event: String
     let button: String?
@@ -19,6 +25,15 @@ struct StateEvent: Decodable {
     let firmwareVersion: String?
     let buttons: [String]?
     let uiStates: [String]?
+    let percent: Int?
+    let charging: Bool?
+    let usbPowered: Bool?
+
+    var batteryStatus: DeviceBatteryStatus? {
+        guard event == "battery_status", let percent, (0...100).contains(percent),
+              let charging, let usbPowered else { return nil }
+        return DeviceBatteryStatus(percent: percent, charging: charging, usbPowered: usbPowered)
+    }
 
     enum CodingKeys: String, CodingKey {
         case event
@@ -29,6 +44,9 @@ struct StateEvent: Decodable {
         case firmwareVersion = "firmware_version"
         case buttons
         case uiStates = "ui_states"
+        case percent
+        case charging
+        case usbPowered = "usb_powered"
     }
 }
 
