@@ -1,0 +1,65 @@
+name: Build Windows 0.3.5 for signing
+on:
+  push:
+    branches: [codex/windows-035-build]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v0.3.5
+          persist-credentials: false
+      - name: Build x64 release
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake -G Ninja -S desktop\windows -B build-win -DCMAKE_BUILD_TYPE=RelWithDebInfo || exit /b 1
+          cmake --build build-win --target VoiceStickApp || exit /b 1
+      - name: Test x64 with assertions enabled
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake -G Ninja -S desktop\windows -B build-tests -DCMAKE_BUILD_TYPE=Debug "-DFETCHCONTENT_SOURCE_DIR_WINSPARKLE=%CD%\build-win\_deps\winsparkle-src" || exit /b 1
+          cmake --build build-tests --target voicestick_windows_tests || exit /b 1
+          ctest --test-dir build-tests --output-on-failure || exit /b 1
+      - name: Install WiX 6
+        shell: pwsh
+        run: |
+          dotnet tool install wix --version 6.0.2 --tool-path "$env:RUNNER_TEMP\wix"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP\wix\wix.exe" extension add WixToolset.UI.wixext/6.0.2 WixToolset.Util.wixext/6.0.2
+          exit $LASTEXITCODE
+      - name: Package and verify unsigned MSI for signing preparation
+        shell: pwsh
+        run: |
+          $out = (New-Item -ItemType Directory -Path staging).FullName
+          Copy-Item build-win\VoiceStick.exe,build-win\WinSparkle.dll $out
+          $version = (Get-Content -Raw VERSION).Trim()
+          if ($version -ne '0.3.5') { throw "Unexpected version $version" }
+          $msi = "$out\VoiceStick_0.3.5-unsigned.msi"
+          & "$env:RUNNER_TEMP\wix\wix.exe" build desktop\windows\installer\VoiceStick.wxs desktop\windows\installer\zh-CN.wxl -arch x64 -culture zh-CN -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -d "ProductVersion=$version" -d "BuildDir=$out" -d "ProjectDir=$PWD" -o $msi
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.OpenDatabase($msi,0)
+          $query = $db.OpenView("SELECT Value FROM Property WHERE Property = 'ProductVersion'")
+          $query.Execute()
+          if ($query.Fetch().StringData(1) -ne $version) { throw "MSI version mismatch" }
+          $extract = "$env:RUNNER_TEMP\msi-files"
+          $process = Start-Process msiexec.exe -ArgumentList @('/a', "`"$msi`"", '/qn', "TARGETDIR=`"$extract`"") -Wait -PassThru
+          if ($process.ExitCode) { throw "Installer extraction failed with $($process.ExitCode)" }
+          foreach ($file in 'VoiceStick.exe','WinSparkle.dll') {
+            $installed = @(Get-ChildItem $extract -Recurse -Filter $file)
+            if ($installed.Count -ne 1 -or (Get-FileHash $installed[0].FullName).Hash -ne (Get-FileHash "$out\$file").Hash) { throw "Packaged $file differs" }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoiceStick-0.3.5-windows-x64-unsigned
+          path: |
+            staging/*.exe
+            staging/*.dll
+            staging/*.msi
+          if-no-files-found: error
