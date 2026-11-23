@@ -81,7 +81,7 @@ public:
     std::function<void(std::string)> on_partial;
     std::function<void(AsrSegment)> on_segment;
     std::function<void(std::string)> on_final;
-    std::function<void(std::string)> on_error;
+    std::function<void(std::string message, std::string partial_text)> on_error;
     std::function<void(std::string, std::string)> on_upgrade_url;
 };
 
@@ -245,7 +245,7 @@ private:
     bool StartAsrAndFlushBufferedChunks(bool last_chunk_is_final);
     void CancelShortRecording();
     void FinishWithFinalText(const std::string& text);
-    void FinishWithAsrError(const std::string& message);
+    void FinishWithAsrError(const std::string& message, const std::string& partial_text = {});
     void RecoverFromAsrError(bool hide_overlay = true);
     void CommitPendingPaste(const std::string& text);
     void CompletePendingPaste(const std::string& text);

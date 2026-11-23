@@ -79,6 +79,7 @@ private:
     void ShowNotification(const std::string& title, const std::string& body);
     std::wstring Utf16(const std::string& text) const;
     void DispatchToUi(std::function<void()> action);
+    void PostToUi(std::function<void()> action);
     void ShutdownAndQuit();
 
     HINSTANCE instance_;

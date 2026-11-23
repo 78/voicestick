@@ -66,10 +66,12 @@ std::optional<std::wstring> WinHttpUrlFromWebSocketUrl(std::string_view websocke
 
 } // namespace
 
-AsrClientWin::AsrClientWin(AppConfig config) : config_(std::move(config)) {}
+AsrClientWin::AsrClientWin(AppConfig config, std::function<void(std::function<void()>)> post_to_ui)
+    : config_(std::move(config)), post_to_ui_(std::move(post_to_ui)) {}
 
 AsrClientWin::~AsrClientWin() {
     ShutdownReusableConnection();
+    callback_generation_->fetch_add(1);
 }
 
 bool AsrClientWin::Start(AsrSessionOptions options) {
@@ -95,6 +97,7 @@ bool AsrClientWin::StartReusableSession() {
             last_start_error_ = "ASR session already active";
             return false;
         }
+        callback_generation_->fetch_add(1);
         current_session_id_ = GenerateSessionId();
         latest_session_transcript_.clear();
         queued_audio_chunks_.clear();
@@ -142,6 +145,7 @@ std::string AsrClientWin::LastStartError() const {
 
 void AsrClientWin::CancelReusableSession() {
     std::lock_guard lock(mutex_);
+    callback_generation_->fetch_add(1);
     queued_audio_chunks_.clear();
     latest_session_transcript_.clear();
     emitted_definite_segment_keys_.clear();
@@ -356,10 +360,7 @@ void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HI
     if (message_type == 0x0f) {
         auto response = AsrProtocol::ParseResponse(data);
         if (response && response->is_error) {
-            FailReusableSession(response->text);
-            if (response->upgrade_url && on_upgrade_url) {
-                on_upgrade_url(*response->upgrade_url, response->text);
-            }
+            FailReusableSession(response->text, response->upgrade_url);
         }
         return;
     }
@@ -417,17 +418,24 @@ void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HI
     case AsrEvent::kAsrInfo: {
         std::string transcript;
         std::vector<AsrSegment> segments;
+        std::uint64_t generation;
         {
             std::lock_guard lock(mutex_);
             if (response.session_id != current_session_id_) return;
+            generation = callback_generation_->load();
             transcript = AsrProtocol::ExtractTranscript(response.payload_text);
             if (!transcript.empty()) latest_session_transcript_ = transcript;
             segments = AsrProtocol::ExtractNewDefiniteSegments(
                 response.payload_text, &emitted_definite_segment_keys_);
         }
-        if (!transcript.empty() && on_partial) on_partial(transcript);
-        for (const auto& segment : segments) {
-            if (on_segment) on_segment(segment);
+        if (!transcript.empty() || !segments.empty()) {
+            PostSessionCallback(generation, [partial = on_partial, segment_callback = on_segment,
+                transcript = std::move(transcript), segments = std::move(segments)] {
+                if (!transcript.empty() && partial) partial(transcript);
+                if (segment_callback) {
+                    for (const auto& segment : segments) segment_callback(segment);
+                }
+            });
         }
         break;
     }
@@ -435,9 +443,11 @@ void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HI
     case AsrEvent::kSessionFinished: {
         std::string final_text;
         std::vector<AsrSegment> segments;
+        std::uint64_t generation;
         {
             std::lock_guard lock(mutex_);
             if (response.session_id != current_session_id_) return;
+            generation = callback_generation_->load();
             final_text = AsrProtocol::ExtractTranscript(response.payload_text);
             if (final_text.empty()) final_text = latest_session_transcript_;
             segments = AsrProtocol::ExtractNewDefiniteSegments(
@@ -448,10 +458,13 @@ void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HI
             queued_audio_chunks_.clear();
             session_state_ = SessionState::kIdle;
         }
-        for (const auto& segment : segments) {
-            if (on_segment) on_segment(segment);
-        }
-        if (on_final) on_final(final_text);
+        PostSessionCallback(generation, [final = on_final, segment_callback = on_segment,
+            final_text = std::move(final_text), segments = std::move(segments)] {
+            if (segment_callback) {
+                for (const auto& segment : segments) segment_callback(segment);
+            }
+            if (final) final(final_text);
+        });
         break;
     }
 
@@ -522,44 +535,65 @@ void AsrClientWin::FinishReusableSessionIfNeeded() {
                             "finish ASR session");
 }
 
-void AsrClientWin::FailReusableSession(const std::string& message) {
-    const bool was_cancelled = cancelled_.load();
+void AsrClientWin::FailReusableSession(const std::string& message, std::optional<std::string> upgrade_url) {
     bool had_active_session = false;
-    cancelled_ = true;
+    std::string partial_text;
+    std::uint64_t generation;
     {
         std::lock_guard lock(mutex_);
+        if (cancelled_.exchange(true)) return;
         had_active_session = session_state_ != SessionState::kIdle;
         queued_audio_chunks_.clear();
         current_session_id_.clear();
-        latest_session_transcript_.clear();
+        partial_text = std::exchange(latest_session_transcript_, {});
+        generation = callback_generation_->load();
         session_state_ = SessionState::kIdle;
         connection_state_ = ConnectionState::kDisconnected;
         websocket_ = nullptr;
     }
-    if (!was_cancelled && had_active_session && on_error) on_error(message);
+    if (had_active_session) {
+        PostSessionError(generation, message, std::move(partial_text), std::move(upgrade_url));
+    }
 }
 
 bool AsrClientWin::SendReusableFrameOrFail(const ByteVector& frame, const std::string& context) {
     const auto message = "Failed to " + context;
     bool should_notify = false;
+    std::string partial_text;
+    std::uint64_t generation;
     {
         std::lock_guard lock(mutex_);
         if (websocket_ && SendFrame(websocket_, frame)) return true;
 
-        const bool was_cancelled = cancelled_.load();
+        const bool was_cancelled = cancelled_.exchange(true);
         const bool had_active_session = session_state_ != SessionState::kIdle;
         last_start_error_ = message;
-        cancelled_ = true;
         queued_audio_chunks_.clear();
         current_session_id_.clear();
-        latest_session_transcript_.clear();
+        partial_text = std::exchange(latest_session_transcript_, {});
+        generation = callback_generation_->load();
         session_state_ = SessionState::kIdle;
         connection_state_ = ConnectionState::kDisconnected;
         websocket_ = nullptr;
         should_notify = !was_cancelled && had_active_session;
     }
-    if (should_notify && on_error) on_error(message);
+    if (should_notify) PostSessionError(generation, message, std::move(partial_text));
     return false;
+}
+
+void AsrClientWin::PostSessionCallback(std::uint64_t generation, std::function<void()> callback) const {
+    post_to_ui_([current = callback_generation_, generation, callback = std::move(callback)] {
+        if (current->load() == generation) callback();
+    });
+}
+
+void AsrClientWin::PostSessionError(std::uint64_t generation, std::string message,
+                                   std::string partial_text, std::optional<std::string> upgrade_url) const {
+    PostSessionCallback(generation, [error = on_error, upgrade = on_upgrade_url, message = std::move(message),
+        partial_text = std::move(partial_text), upgrade_url = std::move(upgrade_url)]() mutable {
+        if (error) error(message, std::move(partial_text));
+        if (upgrade && upgrade_url) upgrade(*upgrade_url, message);
+    });
 }
 
 void AsrClientWin::SetLastStartError(std::string message) {

@@ -8,6 +8,8 @@
 
 #include <array>
 #include <atomic>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -19,7 +21,7 @@ namespace voicestick {
 
 class AsrClientWin : public AsrClient {
 public:
-    explicit AsrClientWin(AppConfig config);
+    AsrClientWin(AppConfig config, std::function<void(std::function<void()>)> post_to_ui);
     ~AsrClientWin() override;
 
     bool Start(AsrSessionOptions options = {}) override;
@@ -55,9 +57,12 @@ private:
     void HandleReusableResponse(std::span<const std::uint8_t> data, HINTERNET websocket);
     void SendReusableAudio(std::span<const std::uint8_t> data, bool is_last);
     void FinishReusableSessionIfNeeded();
-    void FailReusableSession(const std::string& message);
+    void FailReusableSession(const std::string& message, std::optional<std::string> upgrade_url = {});
     void SetLastStartError(std::string message);
     bool SendReusableFrameOrFail(const ByteVector& frame, const std::string& context);
+    void PostSessionCallback(std::uint64_t generation, std::function<void()> callback) const;
+    void PostSessionError(std::uint64_t generation, std::string message, std::string partial_text,
+                          std::optional<std::string> upgrade_url = {}) const;
 
     static bool SendFrame(HINTERNET websocket, const ByteVector& frame);
     static void AddHeader(HINTERNET request, std::string_view name, std::string_view value);
@@ -68,6 +73,10 @@ private:
                              HINTERNET request, HINTERNET websocket);
 
     AppConfig config_;
+    std::function<void(std::function<void()>)> post_to_ui_;
+    // Queued callbacks may outlive the session or the client that posted them.
+    std::shared_ptr<std::atomic_uint64_t> callback_generation_ =
+        std::make_shared<std::atomic_uint64_t>(0);
     std::atomic_bool cancelled_ = false;
     std::thread worker_;
     mutable std::mutex mutex_;

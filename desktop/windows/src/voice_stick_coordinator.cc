@@ -63,7 +63,11 @@ void VoiceStickCoordinator::Start() {
         ui_->SetConnectedDevices(devices);
         CancelActiveCycleIfDeviceDisconnected();
         RefreshFirmwareAvailability();
-        ui_->SetStatus(paired_device_ids_.empty() ? "Pair a VoiceStick" : "Ready");
+        if (session_state_ == SessionState::kPausedConfirmation && active_device_id_) {
+            if (ble_->IsConnected(*active_device_id_)) RefreshDeviceUiState(*active_device_id_);
+        } else {
+            ui_->SetStatus(paired_device_ids_.empty() ? "Pair a VoiceStick" : "Ready");
+        }
         ble_->SendInteractionMode(config_.interaction_mode, std::nullopt);
     };
     ble_->on_connection_error = [this](std::string device_id, std::string message) {
@@ -259,6 +263,7 @@ void VoiceStickCoordinator::CancelFirmwareUpdate() {
 
 void VoiceStickCoordinator::ConfigureAsrCallbacks() {
     asr_->on_partial = [this](std::string text) {
+        if (session_state_ != SessionState::kRecording && !IsWaitingForFinalText()) return;
         ui_->ShowPartial(text, active_device_id_);
         if (ShouldSendPartialToDevice()) {
             SendUiStateForActiveDevice("thinking", text);
@@ -270,10 +275,13 @@ void VoiceStickCoordinator::ConfigureAsrCallbacks() {
     asr_->on_final = [this](std::string text) {
         FinishWithFinalText(text);
     };
-    asr_->on_error = [this](std::string message) {
-        FinishWithAsrError(message);
+    asr_->on_error = [this](std::string message, std::string partial_text) {
+        std::lock_guard lock(audio_mutex_);
+        if (is_shutdown_ || !asr_started_ || pasted_final_text_) return;
+        FinishWithAsrError(message, partial_text);
     };
     asr_->on_upgrade_url = [this](std::string url, std::string message) {
+        if (!is_showing_asr_error_) return;
         const auto device_id = active_device_id_;
         RecoverFromAsrError(false);
         ui_->ShowCloudUpgrade(message, url, device_id);
@@ -299,7 +307,7 @@ void VoiceStickCoordinator::ConfigureSubtitleAsrCallbacks(SubtitleCycle* cycle) 
     cycle->asr->on_final = [this, device_id, session_id](std::string text) {
         FinishSubtitleCycleWithFinalText(device_id, session_id, text);
     };
-    cycle->asr->on_error = [this, device_id, session_id](std::string message) {
+    cycle->asr->on_error = [this, device_id, session_id](std::string message, std::string) {
         FinishSubtitleCycleWithError(device_id, session_id, message);
     };
     cycle->asr->on_upgrade_url = [this, device_id](std::string url, std::string message) {
@@ -709,8 +717,8 @@ void VoiceStickCoordinator::SendFinalOggChunkIfNeeded(double recording_duration_
     debug_audio_recorder_.Append(final_chunk);
     debug_audio_recorder_.Finish();
     active_session_id_.reset();
-    SendOrBufferOggChunk(final_chunk, true, true);
     EnterFinalizing("final_audio_sent");
+    SendOrBufferOggChunk(final_chunk, true, true);
 }
 
 void VoiceStickCoordinator::SendOrBufferOggChunk(const ByteVector& chunk, bool is_last, bool can_start_asr) {
@@ -1012,13 +1020,17 @@ void VoiceStickCoordinator::CancelAudioEndTimeout() {
     audio_end_wait_generation_.fetch_add(1);
 }
 
-void VoiceStickCoordinator::FinishWithAsrError(const std::string& message) {
-    CancelAudioEndTimeout();
+void VoiceStickCoordinator::FinishWithAsrError(const std::string& message, const std::string& partial_text) {
+    FinishRecognitionCycle();
     asr_->Cancel();
     pending_paste_state_ = {};
     active_session_id_.reset();
     debug_audio_recorder_.Discard();
-    FinishRecognitionCycle();
+    if (!partial_text.empty()) {
+        ui_->SetStatus("Awaiting confirmation");
+        EnterPausedConfirmation(partial_text, "asr_error_with_partial");
+        return;
+    }
     EnterError(message, "asr_error");
 }
 
@@ -1107,7 +1119,8 @@ void VoiceStickCoordinator::CancelActiveCycleIfDeviceDisconnected() {
             ++it;
         }
     }
-    if (active_device_id_.has_value() && !ble_->IsConnected(*active_device_id_)) {
+    if (session_state_ != SessionState::kPausedConfirmation &&
+        active_device_id_.has_value() && !ble_->IsConnected(*active_device_id_)) {
         if (waiting_for_audio_end_.load()) {
             SendFinalOggChunkIfNeeded(CurrentRecordingDurationSeconds());
             return;

@@ -795,6 +795,56 @@ void TestCoordinatorShowsDetailedAsrStartError() {
     assert(HasUiStateText(*ble_ptr, "error", "Missing ASR API key", "5A74"));
 }
 
+void TestCoordinatorKeepsPartialForManualConfirmationAfterAsrError() {
+    auto ble = std::make_unique<FakeBleCentral>();
+    auto* ble_ptr = ble.get();
+    auto asr = std::make_unique<FakeAsrClient>();
+    auto* asr_ptr = asr.get();
+    FakeUi ui;
+    FakeInputInjector input;
+    VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
+    coordinator.Start();
+    ble_ptr->connected_device_ids.insert("5A74");
+
+    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 25));
+    std::this_thread::sleep_for(std::chrono::milliseconds(520));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(25, 1));
+    asr_ptr->on_partial("already recognized");
+    asr_ptr->on_error("ASR timeout", "already recognized");
+    asr_ptr->on_partial("late update");
+    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 25));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(25, 2));
+
+    assert(asr_ptr->cancelled);
+    assert(ui.partials == std::vector<std::string>{"already recognized"});
+    assert(ui.paused_finals == std::vector<std::string>{"already recognized"});
+    assert(ui.errors.empty());
+    assert(ui.final_countdowns.empty());
+    assert(input.pasted_text.empty());
+
+    ble_ptr->connected_device_ids.clear();
+    ble_ptr->on_connection_change({});
+    assert(ui.hide_overlay_count == 0);
+    ble_ptr->connected_device_ids.insert("5A74");
+    ble_ptr->on_connection_change({ConnectedDevice{"5A74", "VoiceStick"}});
+    assert(ble_ptr->sent_ui_states.back().state == "pending_confirmation");
+    assert(ble_ptr->sent_ui_states.back().text == "already recognized");
+    ble_ptr->on_state_event("5A74", ButtonEvent("button_click", "primary"));
+    assert(input.pasted_text == "already recognized");
+
+    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 26));
+    std::this_thread::sleep_for(std::chrono::milliseconds(520));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(26, 1));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(26, 2));
+    asr_ptr->on_error("ASR timeout", "discard this partial");
+    assert(ui.paused_finals.back() == "discard this partial");
+
+    ble_ptr->on_state_event("5A74", ButtonEvent("button_click", "secondary"));
+    assert(ble_ptr->sent_ui_states.back().state == "ready");
+    assert(input.pasted_text == "already recognized");
+    assert(!coordinator.RestoreLastInputConfirmation());
+}
+
 void TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError() {
     auto ble = std::make_unique<FakeBleCentral>();
     auto* ble_ptr = ble.get();
@@ -810,7 +860,7 @@ void TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError() {
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
     ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 24));
     ble_ptr->on_audio_frame("5A74", EmptyEndFrame(24, 2));
-    asr_ptr->on_error("ASR 44002: VoiceStick Cloud API key is invalid.");
+    asr_ptr->on_error("ASR 44002: VoiceStick Cloud API key is invalid.", {});
     asr_ptr->on_upgrade_url("https://example.test/upgrade",
                             "ASR 44002: VoiceStick Cloud API key is invalid.");
 
@@ -841,6 +891,7 @@ int main() {
     TestCoordinatorClickToTalkPrimaryClickTogglesRecording();
     TestCoordinatorMainPartialSentToDeviceOnlyAfterFinalAudio();
     TestCoordinatorShowsDetailedAsrStartError();
+    TestCoordinatorKeepsPartialForManualConfirmationAfterAsrError();
     TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError();
     return 0;
 }

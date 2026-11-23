@@ -161,14 +161,17 @@ int Win32App::Run() {
         LogLine("Creating BLE coordinator");
         auto ble = std::make_unique<BleCentralWin>(config_.paired_device_ids, hwnd_);
         ble_central_ = ble.get();
+        const auto post_to_ui = [this](std::function<void()> action) {
+            PostToUi(std::move(action));
+        };
         coordinator_ = std::make_unique<VoiceStickCoordinator>(
             config_,
             std::move(ble),
-            std::make_unique<AsrClientWin>(config_),
+            std::make_unique<AsrClientWin>(config_, post_to_ui),
             this,
             &input_injector_,
-            [](const AppConfig& config) {
-                return std::make_unique<AsrClientWin>(config);
+            [post_to_ui](const AppConfig& config) {
+                return std::make_unique<AsrClientWin>(config, post_to_ui);
             });
         LogLine("Starting coordinator");
         coordinator_->Start();
@@ -544,7 +547,10 @@ void Win32App::DispatchToUi(std::function<void()> action) {
         action();
         return;
     }
+    PostToUi(std::move(action));
+}
 
+void Win32App::PostToUi(std::function<void()> action) {
     auto* heap_action = new std::function<void()>(std::move(action));
     if (!PostMessageW(hwnd_, kUiDispatchMessage, reinterpret_cast<WPARAM>(heap_action), 0)) {
         std::unique_ptr<std::function<void()>> cleanup(heap_action);
