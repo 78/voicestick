@@ -67,6 +67,14 @@ jobs:
             )
           fi
           python3 scripts/update-appcast.py "${args[@]}"
+          echo "VITE_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          python3 - <<'PYTHON' >> "$GITHUB_ENV"
+          import xml.etree.ElementTree as ET
+          feed = ET.parse("website/public/appcast.xml")
+          windows = feed.find(".//enclosure[@sparkle:os='windows']", {"sparkle": "http://www.andymatuschak.org/xml-namespaces/sparkle"})
+          if windows is not None:
+              print("VITE_WINDOWS_DOWNLOAD_URL=" + windows.attrib["url"])
+          PYTHON
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

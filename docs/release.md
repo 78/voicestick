@@ -3,7 +3,7 @@
 VoiceStick releases have three moving parts:
 
 - macOS app: built, signed, notarized, and uploaded by GitHub Actions.
-- StickS3 firmware: built by GitHub Actions and uploaded to Aliyun OSS and GitHub Releases.
+- StickS3 and VoiceStick C3 firmware: built by GitHub Actions and uploaded to Aliyun OSS and GitHub Releases.
 - Windows app: built and signed manually on the Windows signing machine, then uploaded to the matching GitHub Release.
 
 The Windows package is the special case because the signing certificate is local hardware or local machine state. The release process supports either order:
@@ -52,13 +52,16 @@ Pushing the tag runs `.github/workflows/release.yml`. That workflow builds:
 - `VoiceStick-<version>.signature`
 - `voicestick-firmware-sticks3-ota-<version>.bin`
 - `voicestick-firmware-sticks3-merged-<version>.bin`
-- firmware checksums and `manifest.json`
+- `voicestick-firmware-c3-ota-<version>.bin` and `voicestick-firmware-c3-merged-<version>.bin`
+- firmware checksums, `manifest.json` for StickS3 and `manifest-voicestick_c3.json` for C3
 
 It also uploads the firmware to Aliyun OSS under both:
 
 ```text
 voicestick/firmwares/<version>/
 voicestick/firmwares/latest/
+voicestick/firmwares/voicestick_c3/<version>/
+voicestick/firmwares/voicestick_c3/latest/
 ```
 
 After publishing the GitHub Release, the workflow requests a website deploy so the appcast is refreshed.
@@ -131,6 +134,7 @@ Stable update endpoints:
 ```text
 https://78.github.io/voicestick/appcast.xml
 https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/manifest.json
+https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/voicestick_c3/latest/manifest.json
 ```
 
 For version `0.2.4`, the appcast should contain:

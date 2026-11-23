@@ -9,10 +9,11 @@ import packageInfo from '../package.json'
 const { locale, t } = useI18n()
 const releaseUrl = 'https://github.com/78/voicestick/releases/latest'
 const githubUrl = 'https://github.com/78/voicestick'
-const releaseDownloadBase = `https://github.com/78/voicestick/releases/download/v${packageInfo.version}`
-const macDownloadUrl = `${releaseDownloadBase}/VoiceStick-${packageInfo.version}.dmg`
-const windowsDownloadUrl = `${releaseDownloadBase}/VoiceStick_${packageInfo.version}.msi`
-const defaultFirmwareUrl = `https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/voicestick-firmware-sticks3-merged-${packageInfo.version}.bin`
+const releaseVersion = import.meta.env.VITE_RELEASE_VERSION || packageInfo.version
+const releaseDownloadBase = `${githubUrl}/releases/download/v${releaseVersion}`
+const macDownloadUrl = `${releaseDownloadBase}/VoiceStick-${releaseVersion}.dmg`
+const windowsDownloadUrl = import.meta.env.VITE_WINDOWS_DOWNLOAD_URL || `${githubUrl}/releases/download/v${packageInfo.version}/VoiceStick_${packageInfo.version}.msi`
+const defaultFirmwareUrl = `https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/voicestick-firmware-sticks3-merged-${releaseVersion}.bin`
 const firmwareManifestUrl = import.meta.env.VITE_FIRMWARE_MANIFEST_URL || 'https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/manifest.json'
 const firmwareUrl = ref(import.meta.env.VITE_FIRMWARE_URL || defaultFirmwareUrl)
 const appResetSequence = 'D0|R1|W100|R0|W500|D0'

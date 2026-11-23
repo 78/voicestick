@@ -106,7 +106,7 @@ scripts/make-dmg.sh
 
 生成的 App、ZIP 和签名在 `build/` 下。Windows 在本地签名机运行 `scripts\build-msi.bat`，脚本签名可执行文件、WinSparkle DLL 和 MSI。发布时将 MSI 上传到对应的 GitHub Release，再运行 `Deploy Website to GitHub Pages` 更新 appcast。
 
-推送与 `VERSION` 匹配的 `v<version>` 标签会触发发布流程，生成 macOS 安装包和 StickS3 固件，并部署网站和 appcast。StickS3 发布文件包括 BLE OTA 应用镜像、从偏移 0x0 写入的合并镜像和 `manifest.json`。OSS 同时维护版本目录和 `latest/`。macOS 在应用启动、设备连接或重连时检查固件，也可从菜单手动刷新；运行期间的定时检查最多每 24 小时一次。开始 OTA 前会校验镜像大小和 SHA-256。
+推送与 `VERSION` 匹配的 `v<version>` 标签会触发发布流程，生成 macOS 安装包、StickS3 和 VoiceStick C3 固件，并部署网站和 appcast。每款固件都包括 BLE OTA 应用镜像、从偏移 0x0 写入的合并镜像和 `manifest.json`。StickS3 沿用原有 OSS 路径，C3 的版本目录和 `latest/` 位于 `voicestick/firmwares/voicestick_c3/` 下。macOS 在应用启动、设备连接或重连时检查固件，也可从菜单手动刷新；运行期间的定时检查最多每 24 小时一次。开始 OTA 前会校验镜像大小和 SHA-256。
 
 CI 使用 `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`、`ALIYUN_OSS_ENDPOINT`、`ALIYUN_OSS_BUCKET`，公开下载地址由 `ALIYUN_OSS_PUBLIC_BASE_URL` 配置，`ALIYUN_OSS_PREFIX` 默认是 `voicestick/firmwares`。完整步骤见[发布说明](docs/release.md)。
 

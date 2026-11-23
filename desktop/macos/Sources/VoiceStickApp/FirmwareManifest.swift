@@ -101,15 +101,10 @@ final class FirmwareManifestClient {
         }
     }
 
-    private let manifestURL: URL
-
-    init(manifestURL: URL = AppConfig.firmwareManifestURL) {
-        self.manifestURL = manifestURL
-    }
-
-    func fetchManifest(completion: @escaping (Result<FirmwareManifest, Error>) -> Void) {
+    func fetchManifest(at url: URL, for hardware: String,
+                       completion: @escaping (Result<FirmwareManifest, Error>) -> Void) {
         var request = URLRequest(
-            url: manifestURL,
+            url: url,
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
         )
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -129,6 +124,9 @@ final class FirmwareManifestClient {
 
             do {
                 let manifest = try JSONDecoder().decode(FirmwareManifest.self, from: data)
+                guard manifest.hardware == hardware else {
+                    throw FirmwareManifestError.invalidResponse
+                }
                 completion(.success(manifest))
             } catch {
                 completion(.failure(error))

@@ -21,7 +21,23 @@ concurrency:
 
 jobs:
   build-firmware:
-    name: Build StickS3 Firmware
+    name: Build ${{ matrix.label }} Firmware
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: StickS3
+            board: m5stick_s3
+            chip: esp32s3
+            hardware: stick_s3
+            slug: sticks3
+            subdir: ""
+          - label: VoiceStick C3
+            board: voicestick_c3
+            chip: esp32c3
+            hardware: voicestick_c3
+            slug: c3
+            subdir: /voicestick_c3
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -43,6 +59,7 @@ jobs:
               echo "::error ::tag ${tag} does not match VERSION (${version})."
               exit 1
           fi
+          test "$(cat firmware/version.txt)" = "${version}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
@@ -50,14 +67,18 @@ jobs:
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: release-v6.1
-          target: esp32s3
+          target: ${{ matrix.chip }}
           path: firmware
           command: |
-            idf.py -DBOARD=m5stick_s3 build
-            mkdir -p ../dist
-            cp build/voice_stick.bin "../dist/voicestick-firmware-sticks3-ota-${{ steps.ver.outputs.version }}.bin"
+            set -euo pipefail
+            idf.py -DBOARD=${{ matrix.board }} build
             cd build
-            python -m esptool --chip esp32s3 merge-bin -o "../../dist/voicestick-firmware-sticks3-merged-${{ steps.ver.outputs.version }}.bin" @flash_args
+            out="../../dist${{ matrix.subdir }}"
+            name="voicestick-firmware-${{ matrix.slug }}"
+            version="${{ steps.ver.outputs.version }}"
+            mkdir -p "$out"
+            cp voice_stick.bin "$out/$name-ota-$version.bin"
+            python -m esptool --chip ${{ matrix.chip }} merge-bin -o "$out/$name-merged-$version.bin" @flash_args
 
       - name: Stage firmware checksums and manifest
         run: |
@@ -68,10 +89,12 @@ jobs:
           prefix="${ALIYUN_OSS_PREFIX:-voicestick/firmwares}"
           public_base="${public_base%/}"
           prefix="${prefix#/}"
-          prefix="${prefix%/}"
-          ota="voicestick-firmware-sticks3-ota-${version}.bin"
-          merged="voicestick-firmware-sticks3-merged-${version}.bin"
-          cd dist
+          prefix="${prefix%/}${{ matrix.subdir }}"
+          ota="voicestick-firmware-${{ matrix.slug }}-ota-${version}.bin"
+          merged="voicestick-firmware-${{ matrix.slug }}-merged-${version}.bin"
+          jq -e --arg version "$version" --arg chip "${{ matrix.chip }}" \
+            '.project_version == $version and .target == $chip' firmware/build/project_description.json
+          cd "dist${{ matrix.subdir }}"
           shasum -a 256 "${ota}" > "${ota}.sha256"
           shasum -a 256 "${merged}" > "${merged}.sha256"
           ota_sha="$(awk '{print $1}' "${ota}.sha256")"
@@ -81,7 +104,7 @@ jobs:
           python3 - <<PY
           import json
           manifest = {
-              "hardware": "stick_s3",
+              "hardware": "${{ matrix.hardware }}",
               "version": "${version}",
               "ota_url": "${public_base}/${prefix}/${version}/${ota}",
               "ota_sha256": "${ota_sha}",
@@ -98,50 +121,15 @@ jobs:
           ALIYUN_OSS_PUBLIC_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL }}
           ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
 
-      - name: Upload firmware to Aliyun OSS
-        env:
-          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
-          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
-          ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
-        run: |
-          set -euo pipefail
-          test -n "${ALIYUN_OSS_ACCESS_KEY_ID:-}" || (echo "::error ::Missing ALIYUN_OSS_ACCESS_KEY_ID" && exit 1)
-          test -n "${ALIYUN_OSS_ACCESS_KEY_SECRET:-}" || (echo "::error ::Missing ALIYUN_OSS_ACCESS_KEY_SECRET" && exit 1)
-          test -n "${ALIYUN_OSS_ENDPOINT:-}" || (echo "::error ::Missing ALIYUN_OSS_ENDPOINT" && exit 1)
-          test -n "${ALIYUN_OSS_BUCKET:-}" || (echo "::error ::Missing ALIYUN_OSS_BUCKET" && exit 1)
-
-          sudo -v
-          curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
-
-          prefix="${ALIYUN_OSS_PREFIX:-voicestick/firmwares}"
-          prefix="${prefix#/}"
-          prefix="${prefix%/}"
-          version="${{ steps.ver.outputs.version }}"
-          ota="voicestick-firmware-sticks3-ota-${version}.bin"
-          merged="voicestick-firmware-sticks3-merged-${version}.bin"
-
-          ossutil config \
-            -e "$ALIYUN_OSS_ENDPOINT" \
-            -i "$ALIYUN_OSS_ACCESS_KEY_ID" \
-            -k "$ALIYUN_OSS_ACCESS_KEY_SECRET" \
-            -L EN
-
-          for file in "${ota}" "${ota}.sha256" "${merged}" "${merged}.sha256" "manifest.json"; do
-            ossutil cp -f "dist/${file}" "oss://${ALIYUN_OSS_BUCKET}/${prefix}/${version}/${file}"
-            ossutil cp -f "dist/${file}" "oss://${ALIYUN_OSS_BUCKET}/${prefix}/latest/${file}"
-          done
-
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: voicestick-firmware-${{ steps.ver.outputs.version }}
-          path: dist/*
+          name: voicestick-firmware-${{ matrix.slug }}-${{ steps.ver.outputs.version }}
+          path: dist/
 
   build-macos:
     name: Build macOS Release
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -221,6 +209,12 @@ jobs:
       - name: Build notarized DMG
         run: scripts/make-dmg.sh
 
+      - name: Verify release signatures
+        run: |
+          version="${{ steps.ver.outputs.version }}"
+          xcrun stapler validate "build/VoiceStick-${version}.dmg"
+          test "$(base64 -D < "build/VoiceStick-${version}.signature" | wc -c | tr -d ' ')" = "64"
+
       - name: Stage artifacts
         id: artifact
         run: |
@@ -271,6 +265,43 @@ jobs:
           pattern: voicestick-*
           merge-multiple: true
 
+      - name: Upload firmware to Aliyun OSS
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
+        run: |
+          set -euo pipefail
+          test -n "${ALIYUN_OSS_ACCESS_KEY_ID:-}" || (echo "::error ::Missing ALIYUN_OSS_ACCESS_KEY_ID" && exit 1)
+          test -n "${ALIYUN_OSS_ACCESS_KEY_SECRET:-}" || (echo "::error ::Missing ALIYUN_OSS_ACCESS_KEY_SECRET" && exit 1)
+          test -n "${ALIYUN_OSS_ENDPOINT:-}" || (echo "::error ::Missing ALIYUN_OSS_ENDPOINT" && exit 1)
+          test -n "${ALIYUN_OSS_BUCKET:-}" || (echo "::error ::Missing ALIYUN_OSS_BUCKET" && exit 1)
+
+          sudo -v
+          curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
+
+          prefix="${ALIYUN_OSS_PREFIX:-voicestick/firmwares}"
+          prefix="${prefix#/}"
+          prefix="${prefix%/}"
+          ossutil config \
+            -e "$ALIYUN_OSS_ENDPOINT" \
+            -i "$ALIYUN_OSS_ACCESS_KEY_ID" \
+            -k "$ALIYUN_OSS_ACCESS_KEY_SECRET" \
+            -L EN
+
+          version="${{ steps.ver.outputs.version }}"
+          for manifest in dist/manifest.json dist/voicestick_c3/manifest.json; do
+            dir="${manifest%/*}"
+            destination="oss://${ALIYUN_OSS_BUCKET}/${prefix}${dir#dist}"
+            for file in "$dir"/*.bin "$dir"/*.bin.sha256 "$manifest"; do
+              ossutil cp -f "$file" "$destination/$version/${file##*/}"
+              ossutil cp -f "$file" "$destination/latest/${file##*/}"
+            done
+          done
+          cp dist/voicestick_c3/{manifest.json,manifest-voicestick_c3.json}
+
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
@@ -289,6 +320,11 @@ jobs:
             dist/voicestick-firmware-sticks3-merged-${{ steps.ver.outputs.version }}.bin
             dist/voicestick-firmware-sticks3-merged-${{ steps.ver.outputs.version }}.bin.sha256
             dist/manifest.json
+            dist/voicestick_c3/voicestick-firmware-c3-ota-${{ steps.ver.outputs.version }}.bin
+            dist/voicestick_c3/voicestick-firmware-c3-ota-${{ steps.ver.outputs.version }}.bin.sha256
+            dist/voicestick_c3/voicestick-firmware-c3-merged-${{ steps.ver.outputs.version }}.bin
+            dist/voicestick_c3/voicestick-firmware-c3-merged-${{ steps.ver.outputs.version }}.bin.sha256
+            dist/voicestick_c3/manifest-voicestick_c3.json
 
   request-website-deploy:
     name: Request Website Deploy
