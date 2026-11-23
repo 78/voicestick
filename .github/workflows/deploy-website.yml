@@ -36,34 +36,46 @@ jobs:
         run: npm ci
         working-directory: website
 
-      - name: Update appcast from latest release
+      - name: Update appcast from the latest macOS and Windows releases
         run: |
           set -euo pipefail
           curl -fsSL "https://78.github.io/voicestick/appcast.xml" \
             -o website/public/appcast.xml || true
-          tag="$(gh release view --json tagName -q .tagName)"
-          version="${tag#v}"
-          zip_asset="VoiceStick-${version}.zip"
-          sig_asset="VoiceStick-${version}.signature"
-          zip_length="$(gh release view "$tag" --json assets \
-            -q ".assets[] | select(.name == \"${zip_asset}\") | .size")"
-          msi_asset="VoiceStick_${version}.msi"
-          msi_length="$(gh release view "$tag" --json assets \
-            -q ".assets[] | select(.name == \"${msi_asset}\") | .size" || true)"
-          gh release download "$tag" --pattern "$sig_asset" --dir "$RUNNER_TEMP"
+          releases="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -c '
+            def asset($name): first(.assets[] | select(.name == $name and .size > 0)) // null;
+            add
+            | map(select((.draft or .prerelease) | not)
+                | select(.tag_name | test("^v[0-9]+[.][0-9]+[.][0-9]+$")))
+            | sort_by(.tag_name[1:] | split(".") | map(tonumber)) | reverse
+            | map(.tag_name[1:] as $version | {
+                tag: .tag_name, version: $version, notes: (.body // ""),
+                zip: asset("VoiceStick-" + $version + ".zip"),
+                signature: asset("VoiceStick-" + $version + ".signature"),
+                msi: asset("VoiceStick_" + $version + ".msi")
+              })
+            | {
+                mac: (first(.[] | select(.zip and .signature)) // null),
+                windows: (first(.[] | select(.msi)) // null)
+              }
+          ')"
+          mac_tag="$(jq -er '.mac.tag' <<< "$releases")"
+          version="$(jq -er '.mac.version' <<< "$releases")"
+          sig_asset="$(jq -er '.mac.signature.name' <<< "$releases")"
+          gh release download "$mac_tag" --pattern "$sig_asset" --dir "$RUNNER_TEMP"
           signature="$(cat "$RUNNER_TEMP/$sig_asset" | tr -d '\n')"
-          notes="$(gh release view "$tag" --json body -q .body)"
           args=(
-            --version "$version" \
-            --zip-url "https://github.com/78/voicestick/releases/download/${tag}/${zip_asset}" \
-            --signature "$signature" \
-            --length "$zip_length" \
-            --release-notes "$notes"
+            --version "$version"
+            --zip-url "$(jq -er '.mac.zip.browser_download_url' <<< "$releases")"
+            --signature "$signature"
+            --length "$(jq -er '.mac.zip.size' <<< "$releases")"
+            --release-notes "$(jq -r '.mac.notes' <<< "$releases")"
           )
-          if [ -n "${msi_length:-}" ]; then
+          if jq -e '.windows' <<< "$releases" > /dev/null; then
             args+=(
-              --msi-url "https://github.com/78/voicestick/releases/download/${tag}/${msi_asset}" \
-              --msi-length "$msi_length" \
+              --msi-version "$(jq -er '.windows.version' <<< "$releases")"
+              --msi-url "$(jq -er '.windows.msi.browser_download_url' <<< "$releases")"
+              --msi-length "$(jq -er '.windows.msi.size' <<< "$releases")"
+              --msi-release-notes "$(jq -r '.windows.notes' <<< "$releases")"
             )
           fi
           python3 scripts/update-appcast.py "${args[@]}"

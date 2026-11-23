@@ -20,6 +20,10 @@ def existing_windows_item(path: Path) -> str:
     return match.group(0) if match else ""
 
 
+def release_notes_html(notes: str, default: str) -> str:
+    return "".join(f"<li>{html.escape(line)}</li>" for line in notes.splitlines() if line.strip()) or default
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Write the Sparkle appcast for a VoiceStick release.")
     parser.add_argument("--version", required=True)
@@ -28,6 +32,8 @@ def main() -> None:
     parser.add_argument("--length", required=True, type=int)
     parser.add_argument("--msi-url")
     parser.add_argument("--msi-length", type=int)
+    parser.add_argument("--msi-version")
+    parser.add_argument("--msi-release-notes")
     parser.add_argument("--output", default="website/public/appcast.xml")
     parser.add_argument("--release-notes", default="VoiceStick macOS release.")
     args = parser.parse_args()
@@ -39,27 +45,30 @@ def main() -> None:
     if args.msi_url and (not args.msi_length or args.msi_length <= 0):
         sys.exit("Error: --msi-length must be greater than 0 when --msi-url is set.")
 
-    notes = "".join(f"<li>{html.escape(line)}</li>" for line in args.release_notes.splitlines() if line.strip())
-    if not notes:
-        notes = "<li>VoiceStick macOS release.</li>"
+    notes = release_notes_html(args.release_notes, "<li>VoiceStick macOS release.</li>")
 
     pub_date = email.utils.format_datetime(datetime.now(timezone.utc))
     output_path = Path(args.output)
     windows_item = ""
     if args.msi_url and args.msi_length:
+        windows_version = html.escape(args.msi_version or args.version)
+        windows_notes = release_notes_html(
+            args.msi_release_notes if args.msi_release_notes is not None else args.release_notes,
+            "<li>VoiceStick Windows release.</li>",
+        )
         windows_item = f"""    <item>
-      <title>Version {html.escape(args.version)}</title>
+      <title>Version {windows_version}</title>
       <description><![CDATA[
         <ul>
-          {notes}
+          {windows_notes}
         </ul>
       ]]></description>
       <pubDate>{pub_date}</pubDate>
       <enclosure
         url="{html.escape(args.msi_url)}"
         sparkle:os="windows"
-        sparkle:version="{html.escape(args.version)}"
-        sparkle:shortVersionString="{html.escape(args.version)}"
+        sparkle:version="{windows_version}"
+        sparkle:shortVersionString="{windows_version}"
         sparkle:installerArguments="/passive"
         length="{args.msi_length}"
         type="application/octet-stream"
