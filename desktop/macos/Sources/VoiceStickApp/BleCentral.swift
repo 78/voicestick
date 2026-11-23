@@ -73,6 +73,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var isWorkspaceSleeping = false
 
     var onConnectionChange: (([ConnectedVoiceStickDevice]) -> Void)?
+    var onControlReady: ((UUID) -> Void)?
     var onAudioFrame: ((UUID, AudioFrame) -> Void)?
     var onStateEvent: ((UUID, StateEvent) -> Void)?
 
@@ -303,6 +304,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 controlCharacteristics[peripheral.identifier] = characteristic
                 sendUIState("ready", to: peripheral.identifier)
                 sendInteractionMode(interactionMode, to: peripheral.identifier)
+                onControlReady?(peripheral.identifier)
             case BleProtocol.otaRXUUID:
                 otaCharacteristics[peripheral.identifier] = characteristic
             case BleProtocol.otaStateUUID:

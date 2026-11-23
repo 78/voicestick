@@ -20,11 +20,13 @@ struct ASRSegment {
 }
 
 protocol ASRClient: AnyObject {
+    // Session control and callbacks are used on the main queue.
     var onPartial: ((String) -> Void)? { get set }
     var onSegment: ((ASRSegment) -> Void)? { get set }
     var onFinal: ((String) -> Void)? { get set }
-    var onError: ((String) -> Void)? { get set }
+    var onError: ((_ message: String, _ partialText: String) -> Void)? { get set }
     var onUpgradeURL: ((URL, String) -> Void)? { get set }
+    var lastStartError: String? { get }
 
     func start(options: ASRSessionOptions) -> Bool
     func sendOggOpusChunk(_ data: Data, isLast: Bool)
@@ -82,6 +84,8 @@ final class ASRWebSocketClient: ASRClient {
     private let resultType: ASRResultType
     private let showUtterances: Bool
     private let queue = DispatchQueue(label: "VoiceStick.ASRWebSocketClient")
+    // The main queue uses this ID to reject callbacks from canceled or superseded sessions.
+    private var callbackSessionID: String?
     private var webSocket: URLSessionWebSocketTask?
     private var connectionState: ConnectionState = .disconnected
     private var sessionState: SessionState = .idle
@@ -94,8 +98,9 @@ final class ASRWebSocketClient: ASRClient {
     var onPartial: ((String) -> Void)?
     var onSegment: ((ASRSegment) -> Void)?
     var onFinal: ((String) -> Void)?
-    var onError: ((String) -> Void)?
+    var onError: ((_ message: String, _ partialText: String) -> Void)?
     var onUpgradeURL: ((URL, String) -> Void)?
+    private(set) var lastStartError: String?
 
     init(config: AppConfig, resultType: ASRResultType = .full, showUtterances: Bool = false) {
         self.config = config
@@ -113,21 +118,22 @@ final class ASRWebSocketClient: ASRClient {
     }
 
     private func startSession(options: ASRSessionOptions) -> Bool {
+        lastStartError = nil
         let apiKey = providerAPIKey
         guard !apiKey.isEmpty else {
-            let message = "Missing ASR API key"
-            NSLog("ASR config error: \(message)")
-            onError?(message)
+            lastStartError = "Missing ASR API key"
             return false
         }
 
         guard URL(string: providerWebSocketURL) != nil else {
-            onError?("Invalid ASR URL")
+            lastStartError = "Invalid ASR URL"
             return false
         }
 
+        let sessionID = UUID().uuidString
+        callbackSessionID = sessionID
         queue.async { [weak self] in
-            self?.beginSession(options: options)
+            self?.beginSession(options: options, sessionID: sessionID)
         }
         return true
     }
@@ -163,18 +169,21 @@ final class ASRWebSocketClient: ASRClient {
     }
 
     func cancel() {
+        callbackSessionID = nil
         queue.async { [weak self] in
             self?.cancelSession()
         }
     }
 
-    private func beginSession(options: ASRSessionOptions) {
+    private func beginSession(options: ASRSessionOptions, sessionID: String) {
         guard sessionState == .idle else {
-            notifyError("ASR session already active")
+            postSessionCallback(for: sessionID) { client in
+                client.onError?("ASR session already active", "")
+            }
             return
         }
 
-        currentSessionID = UUID().uuidString
+        currentSessionID = sessionID
         sessionOptions = options
         latestSessionTranscript = ""
         emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
@@ -277,6 +286,10 @@ final class ASRWebSocketClient: ASRClient {
             }
         }
 
+        resetSession()
+    }
+
+    private func resetSession() {
         queuedAudioChunks.removeAll(keepingCapacity: true)
         latestSessionTranscript = ""
         emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
@@ -302,19 +315,24 @@ final class ASRWebSocketClient: ASRClient {
         connectionState = .disconnected
     }
 
-    private func failSession(_ message: String) {
-        queuedAudioChunks.removeAll(keepingCapacity: true)
-        latestSessionTranscript = ""
-        emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
-        currentSessionID = nil
-        sessionState = .idle
+    private func failSession(_ message: String, upgradeURL: URL? = nil) {
+        let sessionID = currentSessionID
+        let partialText = latestSessionTranscript
         closeWebSocket(sendFinishConnection: false)
-        notifyError(message)
+        resetSession()
+        guard let sessionID else { return }
+        postSessionCallback(for: sessionID) { client in
+            client.onError?(message, partialText)
+            if let upgradeURL {
+                client.onUpgradeURL?(upgradeURL, message)
+            }
+        }
     }
 
-    private func notifyError(_ message: String) {
+    private func postSessionCallback(for sessionID: String, _ callback: @escaping (ASRWebSocketClient) -> Void) {
         DispatchQueue.main.async { [weak self] in
-            self?.onError?(message)
+            guard let self, self.callbackSessionID == sessionID else { return }
+            callback(self)
         }
     }
 
@@ -383,7 +401,10 @@ final class ASRWebSocketClient: ASRClient {
                 if let error {
                     NSLog("ASR send event error: \(error.localizedDescription)")
                     self?.queue.async {
-                        self?.failSession(error.localizedDescription)
+                        guard let self, self.webSocket === sendingTask,
+                              sessionID == nil || sessionID == self.currentSessionID
+                        else { return }
+                        self.failSession(error.localizedDescription)
                     }
                     return
                 }
@@ -476,9 +497,8 @@ final class ASRWebSocketClient: ASRClient {
             }
 
         case .connectionFinished:
-            connectionState = .disconnected
-            webSocket = nil
             NSLog("ASR websocket connection_finished")
+            failSession("ASR connection closed")
 
         case .connectionFailed:
             failSession(response.payloadText ?? "ASR connection failed")
@@ -490,19 +510,22 @@ final class ASRWebSocketClient: ASRClient {
             flushQueuedAudioChunks()
 
         case .asrResponse, .asrInfo:
-            guard response.sessionID == currentSessionID, let text = response.payloadText else { return }
+            guard let sessionID = currentSessionID, response.sessionID == sessionID,
+                  let text = response.payloadText
+            else { return }
             let transcript = extractTranscript(from: text)
             let definiteSegments = extractNewDefiniteSegments(from: text)
-            if !transcript.isEmpty {
+            let hasTranscript = !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if hasTranscript {
                 latestSessionTranscript = transcript
-                DispatchQueue.main.async { [weak self] in
-                    self?.onPartial?(transcript)
-                }
             }
-            if !definiteSegments.isEmpty {
-                DispatchQueue.main.async { [weak self] in
+            if hasTranscript || !definiteSegments.isEmpty {
+                postSessionCallback(for: sessionID) { client in
+                    if hasTranscript {
+                        client.onPartial?(transcript)
+                    }
                     for segment in definiteSegments {
-                        self?.onSegment?(segment)
+                        client.onSegment?(segment)
                     }
                 }
             }
@@ -511,7 +534,7 @@ final class ASRWebSocketClient: ASRClient {
             break
 
         case .sessionFinished:
-            guard response.sessionID == currentSessionID else { return }
+            guard let sessionID = currentSessionID, response.sessionID == sessionID else { return }
             let finalText = response.payloadText.flatMap { text in
                 let transcript = extractTranscript(from: text)
                 return transcript.isEmpty ? nil : transcript
@@ -520,25 +543,17 @@ final class ASRWebSocketClient: ASRClient {
                 extractNewDefiniteSegments(from: $0)
             } ?? []
             NSLog("ASR websocket session_finished session_id=\(response.sessionID ?? "") text_len=\(finalText.count)")
-            currentSessionID = nil
-            latestSessionTranscript = ""
-            emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
-            queuedAudioChunks.removeAll(keepingCapacity: true)
-            sessionState = .idle
-            DispatchQueue.main.async { [weak self] in
+            resetSession()
+            postSessionCallback(for: sessionID) { client in
                 for segment in definiteSegments {
-                    self?.onSegment?(segment)
+                    client.onSegment?(segment)
                 }
-                self?.onFinal?(finalText)
+                client.onFinal?(finalText)
             }
 
         case .sessionCanceled:
             if response.sessionID == currentSessionID {
-                currentSessionID = nil
-                latestSessionTranscript = ""
-                emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
-                queuedAudioChunks.removeAll(keepingCapacity: true)
-                sessionState = .idle
+                resetSession()
             }
 
         case .usageResponse:
@@ -609,12 +624,7 @@ final class ASRWebSocketClient: ASRClient {
         let message = String(data: body, encoding: .utf8) ?? "Unknown ASR error"
         NSLog("ASR server error code=\(code): \(message)")
         let parsedError = parsedErrorMessage(code: code, message: message)
-        failSession(parsedError.message)
-        if let upgradeURL = parsedError.upgradeURL {
-            DispatchQueue.main.async { [weak self] in
-                self?.onUpgradeURL?(upgradeURL, parsedError.message)
-            }
-        }
+        failSession(parsedError.message, upgradeURL: parsedError.upgradeURL)
     }
 
     private func connectionPayload() -> [String: Any] {
