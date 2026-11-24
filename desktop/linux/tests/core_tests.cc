@@ -447,6 +447,26 @@ void TestFirmwareManifestParsingAndVersionCompare() {
     assert(IsFirmwareHardwareCompatible("", "", "stick_s3"));
 }
 
+void TestFirmwareLinuxAppVersionRequirement() {
+    const std::string required_fields =
+        R"("hardware":"sticks3","version":"1.0.0","ota_url":"https://example.test/ota.bin",)"
+        R"("ota_sha256":"abc","ota_size":123)";
+    const auto unrestricted = ParseFirmwareManifest("{" + required_fields + "}");
+    assert(unrestricted && unrestricted->SupportsLinuxAppVersion(""));
+    const auto other_platform = ParseFirmwareManifest(
+        "{" + required_fields + R"(,"minimum_app_versions":{"macos":"0.4.0"}})");
+    assert(other_platform && other_platform->SupportsLinuxAppVersion("0.1.0"));
+    const auto restricted = ParseFirmwareManifest(
+        "{" + required_fields + R"(,"minimum_app_versions":{"linux":"0.4.0"}})");
+    assert(restricted && restricted->minimum_linux_app_version == "0.4.0");
+    assert(!restricted->SupportsLinuxAppVersion("0.3.9"));
+    assert(!restricted->SupportsLinuxAppVersion("0.4.0-beta"));
+    assert(restricted->SupportsLinuxAppVersion("0.4.0"));
+    assert(restricted->SupportsLinuxAppVersion("0.4.1"));
+    assert(!ParseFirmwareManifest(
+        "{" + required_fields + R"(,"minimum_app_versions":{"linux":"invalid"}})"));
+}
+
 void TestCoordinatorCancelsShortPrimaryPress() {
     auto ble = std::make_unique<FakeBleCentral>();
     auto* ble_ptr = ble.get();
@@ -876,6 +896,7 @@ int main() {
     TestAsrProtocol();
     TestAppConfig();
     TestFirmwareManifestParsingAndVersionCompare();
+    TestFirmwareLinuxAppVersionRequirement();
     TestCoordinatorCancelsShortPrimaryPress();
     TestCoordinatorPrimaryDuringFinalizingRefreshesThinking();
     TestCoordinatorSecondaryCancelsFinalizing();

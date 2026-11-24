@@ -207,6 +207,11 @@ struct StatusItemSni::Impl {
                 add_child(device_menu, {.label = "Checking for Updates", .enabled = false});
             } else if (!device.firmware.error_message.empty()) {
                 add_child(device_menu, {.label = "Update Check Failed", .enabled = false});
+            } else if (!device.firmware.required_app_version.empty()) {
+                add_child(device_menu, {
+                    .label = "Update VoiceStick to " + device.firmware.required_app_version + " or later",
+                    .enabled = false,
+                });
             } else if (device.firmware.update_available && !device.firmware.latest_version.empty()) {
                 add_child(device_menu, {
                     .label = "Update to " + device.firmware.latest_version + "…",

@@ -24,12 +24,12 @@ firmware/version.txt
 
 `VERSION` is used by the desktop packaging scripts and the GitHub release workflow. `firmware/version.txt` is the firmware version reported by the device, so it must match the release version for OTA update detection to work correctly.
 
-Set the minimum supported desktop app version for each compatible platform in
+Set any required minimum desktop app versions in
 `firmware/minimum-app-versions.json`. The workflow includes this map as
 `minimum_app_versions` in the OTA manifest. Supported keys are `macos`, `windows`,
-and `linux`. Add a platform once its app supports the firmware and can enforce
-the minimum. All supported platforms share the same firmware files for a given
-board.
+and `linux`. An omitted key leaves that platform without an app-version
+minimum. Use `{}` when the release needs no minimums. The platforms share the
+same firmware files for a given board.
 
 For release `0.2.4`, the tag must be:
 
@@ -50,9 +50,10 @@ For the firmware that introduces BLE bonding, release macOS and firmware togethe
 with `v0.3.7`. The updated macOS app can connect to older firmware before upgrading
 the device. Test pairing after the upgrade using the device's pairing button.
 
-Each board's `latest/manifest.json` includes the optional
-`minimum_app_versions` field. Apps that understand the field check their
-platform's entry before offering an update. Older apps ignore the field.
+Each board's `latest/manifest.json` can include `minimum_app_versions`.
+Clients that implement this check apply their platform's minimum when an entry
+is present. An omitted field or platform entry means every app version meets
+the version requirement for that platform. Older apps ignore the field.
 GitHub Pages serves the manifests for current clients. The release also
 updates the existing OSS manifests for installed clients that use those URLs.
 Verify that both Pages manifests report the new firmware and minimum app

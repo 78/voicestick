@@ -1462,8 +1462,7 @@ final class VoiceStickCoordinator {
                 case .failure(let error):
                     NSLog("Firmware manifest check failed for \(hardware): \(error.localizedDescription)")
                     switch error {
-                    case FirmwareManifestClient.FirmwareManifestError.appUpdateRequired,
-                         FirmwareManifestClient.FirmwareManifestError.platformNotSupported:
+                    case FirmwareManifestClient.FirmwareManifestError.appUpdateRequired:
                         feed.manifest = nil
                         feed.lastChecked = nil
                         feed.errorMessage = error.localizedDescription

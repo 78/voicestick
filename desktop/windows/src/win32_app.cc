@@ -735,6 +735,9 @@ void Win32App::ShowTrayMenu() {
             } else if (!firmware.error_message.empty()) {
                 auto error_text = L"Firmware Check Failed";
                 AppendMenuW(submenu, MF_STRING | MF_DISABLED, 0, error_text);
+            } else if (!firmware.required_app_version.empty()) {
+                const auto action = L"Update VoiceStick to " + Utf16(firmware.required_app_version) + L" First...";
+                AppendMenuW(submenu, MF_STRING, kMenuUpdateFirmwareBase + static_cast<UINT>(i), action.c_str());
             } else if (firmware.update_available && !firmware.latest_version.empty()) {
                 auto update_text = L"Update available: " + Utf16(firmware.latest_version);
                 AppendMenuW(submenu, MF_STRING | MF_DISABLED, 0, update_text.c_str());
@@ -957,6 +960,15 @@ void Win32App::ShowSettings() {
 void Win32App::StartFirmwareUpdate(const std::string& device_id) {
     if (!coordinator_) return;
     auto firmware_it = firmware_info_map_.find(device_id);
+    if (firmware_it != firmware_info_map_.end() && !firmware_it->second.required_app_version.empty()) {
+        const auto message = L"Update VoiceStick to " + Utf16(firmware_it->second.required_app_version) +
+                             L" or later before updating firmware.\n\nCheck for app updates now?";
+        if (MessageBoxW(hwnd_, message.c_str(), L"Update VoiceStick First",
+                        MB_ICONINFORMATION | MB_YESNO | MB_DEFBUTTON2) == IDYES) {
+            win_sparkle_check_update_with_ui();
+        }
+        return;
+    }
     const std::string version = firmware_it != firmware_info_map_.end()
                                     ? firmware_it->second.latest_version
                                     : std::string();

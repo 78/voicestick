@@ -61,6 +61,7 @@ std::optional<ParsedVersion> ParseVersion(std::string_view text) {
     ParsedVersion version;
     version.has_suffix = dash != std::string::npos;
     if (version.has_suffix) version.suffix = trimmed.substr(dash + 1);
+    if (version.has_suffix && version.suffix.empty()) return std::nullopt;
 
     std::size_t start = 0;
     while (start <= number_text.size()) {
@@ -69,7 +70,9 @@ std::optional<ParsedVersion> ParseVersion(std::string_view text) {
         if (part.empty()) return std::nullopt;
         int value = 0;
         auto result = std::from_chars(part.data(), part.data() + part.size(), value);
-        if (result.ec != std::errc() || result.ptr != part.data() + part.size()) return std::nullopt;
+        if (result.ec != std::errc() || result.ptr != part.data() + part.size() || value < 0) {
+            return std::nullopt;
+        }
         version.numbers.push_back(value);
         if (dot == std::string::npos) break;
         start = dot + 1;
@@ -253,6 +256,16 @@ bool FirmwareVersion::IsOlderThan(std::string_view current, std::string_view lat
     return VersionLess(*current_version, *latest_version);
 }
 
+FirmwareAppCompatibility FirmwareManifest::CheckWindowsAppVersion(std::string_view app_version) const {
+    if (minimum_windows_app_version.empty()) return FirmwareAppCompatibility::kSupported;
+    const auto minimum = ParseVersion(minimum_windows_app_version);
+    const auto current = ParseVersion(app_version);
+    if (!minimum || !current || VersionLess(*current, *minimum)) {
+        return FirmwareAppCompatibility::kAppUpdateRequired;
+    }
+    return FirmwareAppCompatibility::kSupported;
+}
+
 std::optional<FirmwareManifest> ParseFirmwareManifest(std::string_view json) {
     std::string json_text(json);
     cJSON* root = cJSON_Parse(json_text.c_str());
@@ -267,9 +280,17 @@ std::optional<FirmwareManifest> ParseFirmwareManifest(std::string_view json) {
     manifest.merged_url = JsonStringValue(root, "merged_url");
     manifest.merged_sha256 = JsonStringValue(root, "merged_sha256");
     manifest.merged_size = JsonU32Value(root, "merged_size");
+    const auto* minimum_app_versions = cJSON_GetObjectItemCaseSensitive(root, "minimum_app_versions");
+    bool valid_minimum = !minimum_app_versions || cJSON_IsNull(minimum_app_versions) ||
+                         cJSON_IsObject(minimum_app_versions);
+    if (cJSON_IsObject(minimum_app_versions) &&
+        cJSON_GetObjectItemCaseSensitive(minimum_app_versions, "windows")) {
+        manifest.minimum_windows_app_version = Trim(JsonStringValue(minimum_app_versions, "windows"));
+        valid_minimum = ParseVersion(manifest.minimum_windows_app_version).has_value();
+    }
     cJSON_Delete(root);
 
-    if (manifest.hardware.empty() || manifest.version.empty() ||
+    if (!valid_minimum || manifest.hardware.empty() || manifest.version.empty() ||
         manifest.ota_url.empty() || manifest.ota_sha256.empty() || manifest.ota_size == 0) {
         return std::nullopt;
     }

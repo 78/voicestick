@@ -25,9 +25,9 @@ struct FirmwareManifest: Decodable {
     }
 
     func checkMacOSAppVersion(_ appVersion: String?) throws {
-        guard let minimumAppVersions else { return }
-        guard let minimum = minimumAppVersions["macos"] else {
-            throw FirmwareManifestClient.FirmwareManifestError.platformNotSupported
+        guard let minimum = minimumAppVersions?["macos"] else { return }
+        guard FirmwareVersion.isValid(minimum) else {
+            throw FirmwareManifestClient.FirmwareManifestError.invalidResponse
         }
         guard FirmwareVersion.meetsMinimum(minimum, current: appVersion) else {
             throw FirmwareManifestClient.FirmwareManifestError.appUpdateRequired(minimum)
@@ -45,6 +45,10 @@ struct DeviceFirmwareInfo {
 }
 
 enum FirmwareVersion {
+    static func isValid(_ version: String) -> Bool {
+        ParsedVersion(version) != nil
+    }
+
     static func isVersion(_ current: String, olderThan latest: String) -> Bool {
         guard let current = ParsedVersion(current), let latest = ParsedVersion(latest) else {
             return false
@@ -67,6 +71,7 @@ enum FirmwareVersion {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
             let parts = trimmed.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            if parts.count > 1 && parts[1].isEmpty { return nil }
             let numberParts = parts[0].split(separator: ".", omittingEmptySubsequences: false)
             var parsedNumbers: [Int] = []
             for part in numberParts {
@@ -105,7 +110,6 @@ final class FirmwareManifestClient {
     private let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
 
     enum FirmwareManifestError: LocalizedError {
-        case platformNotSupported
         case appUpdateRequired(String)
         case deviceInfoUnavailable
         case invalidResponse
@@ -114,8 +118,6 @@ final class FirmwareManifestClient {
 
         var errorDescription: String? {
             switch self {
-            case .platformNotSupported:
-                return "This firmware release is unavailable in the macOS app."
             case .appUpdateRequired(let version):
                 return "Update VoiceStick for macOS to version \(version) or later before installing this firmware."
             case .deviceInfoUnavailable:

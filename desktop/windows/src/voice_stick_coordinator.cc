@@ -1,6 +1,7 @@
 #include "voice_stick_coordinator.h"
 
 #include "log.h"
+#include "version.h"
 
 #include <algorithm>
 #include <chrono>
@@ -240,6 +241,13 @@ void VoiceStickCoordinator::UpdateFirmwareFromLatest(
     }
     if (!manifest.has_value()) {
         completion(false, "Firmware update manifest is not loaded yet.");
+        return;
+    }
+
+    if (manifest->CheckWindowsAppVersion(VOICESTICK_VERSION_STR) ==
+        FirmwareAppCompatibility::kAppUpdateRequired) {
+        completion(false, "Update VoiceStick to " + manifest->minimum_windows_app_version +
+                          " or later before updating firmware.");
         return;
     }
 
@@ -1222,6 +1230,7 @@ void VoiceStickCoordinator::RefreshFirmwareAvailability() {
         std::lock_guard lock(firmware_mutex_);
         for (auto& [device_id, info] : firmware_info_by_device_id_) {
             info.latest_version.clear();
+            info.required_app_version.clear();
             info.update_available = false;
             if (!latest_firmware_manifest_.has_value() ||
                 info.hardware.empty() ||
@@ -1236,6 +1245,9 @@ void VoiceStickCoordinator::RefreshFirmwareAvailability() {
                                    " latest=" + latest_firmware_manifest_->version +
                                    " update=false reason=hardware_mismatch manifest_hardware=" +
                                    latest_firmware_manifest_->hardware);
+            } else if (latest_firmware_manifest_->CheckWindowsAppVersion(VOICESTICK_VERSION_STR) ==
+                       FirmwareAppCompatibility::kAppUpdateRequired) {
+                info.required_app_version = latest_firmware_manifest_->minimum_windows_app_version;
             } else {
                 info.latest_version = latest_firmware_manifest_->version;
                 info.update_available = FirmwareVersion::IsOlderThan(

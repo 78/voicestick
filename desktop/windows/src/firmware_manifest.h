@@ -8,6 +8,11 @@
 
 namespace voicestick {
 
+enum class FirmwareAppCompatibility {
+    kSupported,
+    kAppUpdateRequired,
+};
+
 struct FirmwareManifest {
     std::string hardware;
     std::string version;
@@ -17,6 +22,9 @@ struct FirmwareManifest {
     std::string merged_url;
     std::string merged_sha256;
     std::uint32_t merged_size = 0;
+    std::string minimum_windows_app_version;
+
+    FirmwareAppCompatibility CheckWindowsAppVersion(std::string_view app_version) const;
 };
 
 struct DeviceFirmwareInfo {
@@ -26,6 +34,7 @@ struct DeviceFirmwareInfo {
     bool update_available = false;
     bool is_checking = false;
     std::string error_message;
+    std::string required_app_version;
 };
 
 class FirmwareManifestClient {

@@ -38,6 +38,7 @@ std::optional<ParsedVersion> ParseVersion(std::string_view text) {
     ParsedVersion version;
     version.has_suffix = dash != std::string::npos;
     if (version.has_suffix) version.suffix = trimmed.substr(dash + 1);
+    if (version.has_suffix && version.suffix.empty()) return std::nullopt;
 
     std::size_t start = 0;
     while (start <= number_text.size()) {
@@ -136,6 +137,13 @@ bool FirmwareVersion::IsOlderThan(std::string_view current, std::string_view lat
     return VersionLess(*current_version, *latest_version);
 }
 
+bool FirmwareManifest::SupportsLinuxAppVersion(std::string_view app_version) const {
+    if (minimum_linux_app_version.empty()) return true;
+    const auto minimum = ParseVersion(minimum_linux_app_version);
+    const auto current = ParseVersion(app_version);
+    return minimum && current && !VersionLess(*current, *minimum);
+}
+
 std::optional<FirmwareManifest> ParseFirmwareManifest(std::string_view json) {
     std::string json_text(json);
     cJSON* root = cJSON_Parse(json_text.c_str());
@@ -150,9 +158,17 @@ std::optional<FirmwareManifest> ParseFirmwareManifest(std::string_view json) {
     manifest.merged_url = JsonStringValue(root, "merged_url");
     manifest.merged_sha256 = JsonStringValue(root, "merged_sha256");
     manifest.merged_size = JsonU32Value(root, "merged_size");
+    const auto* minimum_app_versions = cJSON_GetObjectItemCaseSensitive(root, "minimum_app_versions");
+    bool valid_minimum = !minimum_app_versions || cJSON_IsNull(minimum_app_versions) ||
+                         cJSON_IsObject(minimum_app_versions);
+    if (cJSON_IsObject(minimum_app_versions) &&
+        cJSON_GetObjectItemCaseSensitive(minimum_app_versions, "linux")) {
+        manifest.minimum_linux_app_version = TrimCopy(JsonStringValue(minimum_app_versions, "linux"));
+        valid_minimum = ParseVersion(manifest.minimum_linux_app_version).has_value();
+    }
     cJSON_Delete(root);
 
-    if (manifest.hardware.empty() || manifest.version.empty() ||
+    if (!valid_minimum || manifest.hardware.empty() || manifest.version.empty() ||
         manifest.ota_url.empty() || manifest.ota_sha256.empty() || manifest.ota_size == 0) {
         return std::nullopt;
     }

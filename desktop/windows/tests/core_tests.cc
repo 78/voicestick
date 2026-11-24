@@ -869,6 +869,38 @@ void TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError() {
     assert(!ui.cloud_upgrades.empty());
 }
 
+void TestFirmwareWindowsAppVersionRequirement() {
+    const std::string required_fields =
+        R"("hardware":"sticks3","version":"1.0.0","ota_url":"https://example.test/ota.bin",)"
+        R"("ota_sha256":"abc","ota_size":123)";
+    const auto legacy_manifest = ParseFirmwareManifest("{" + required_fields + "}");
+    assert(legacy_manifest);
+    assert(legacy_manifest->CheckWindowsAppVersion("") == FirmwareAppCompatibility::kSupported);
+
+    for (const auto* versions : {R"({"macos":"0.3.7"})", R"({})", R"(null)"}) {
+        const auto manifest = ParseFirmwareManifest("{" + required_fields + ",\"minimum_app_versions\":" +
+                                                    versions + "}");
+        assert(manifest);
+        assert(manifest->CheckWindowsAppVersion("0.1.0") == FirmwareAppCompatibility::kSupported);
+    }
+    for (const auto* versions : {R"("0.3.7")", R"({"windows":123})",
+                                 R"({"windows":null})", R"({"windows":""})", R"({"windows":"invalid"})"}) {
+        const auto manifest = ParseFirmwareManifest("{" + required_fields + ",\"minimum_app_versions\":" +
+                                                    versions + "}");
+        assert(!manifest);
+    }
+
+    const auto manifest = ParseFirmwareManifest(
+        "{" + required_fields + R"(,"minimum_app_versions":{"macos":"0.3.5","windows":"0.3.7"}})");
+    assert(manifest);
+    assert(manifest->minimum_windows_app_version == "0.3.7");
+    assert(manifest->CheckWindowsAppVersion("0.3.6") == FirmwareAppCompatibility::kAppUpdateRequired);
+    assert(manifest->CheckWindowsAppVersion("0.3.7-beta") == FirmwareAppCompatibility::kAppUpdateRequired);
+    assert(manifest->CheckWindowsAppVersion("") == FirmwareAppCompatibility::kAppUpdateRequired);
+    assert(manifest->CheckWindowsAppVersion("0.3.7") == FirmwareAppCompatibility::kSupported);
+    assert(manifest->CheckWindowsAppVersion("0.3.10") == FirmwareAppCompatibility::kSupported);
+}
+
 } // namespace
 
 int main() {
@@ -879,6 +911,7 @@ int main() {
     TestAsrProtocol();
     TestAppConfig();
     TestFirmwareManifestParsingAndVersionCompare();
+    TestFirmwareWindowsAppVersionRequirement();
     TestCoordinatorCancelsShortPrimaryPress();
     TestCoordinatorPrimaryDuringFinalizingRefreshesThinking();
     TestCoordinatorSecondaryCancelsFinalizing();

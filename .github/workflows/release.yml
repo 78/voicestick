@@ -87,7 +87,7 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" dist
           version="${{ steps.ver.outputs.version }}"
           minimum_app_versions="$(jq -ce '
-            select(type == "object" and length > 0)
+            select(type == "object")
             | select(all(keys[]; . == "macos" or . == "windows" or . == "linux"))
             | select(all(.[]; type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+$")))
           ' firmware/minimum-app-versions.json)"
