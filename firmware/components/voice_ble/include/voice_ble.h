@@ -18,6 +18,7 @@
 #define VOICE_BLE_OTA_TYPE_STATE 0x30
 
 typedef void (*voice_ble_connection_cb_t)(bool connected);
+typedef void (*voice_ble_pairing_cb_t)(bool open);
 typedef void (*voice_ble_control_cb_t)(const char *json);
 
 typedef enum {
@@ -34,6 +35,8 @@ typedef void (*voice_ble_ota_cb_t)(voice_ble_ota_event_t event,
 
 esp_err_t voice_ble_init(void);
 void voice_ble_set_connection_callback(voice_ble_connection_cb_t callback);
+void voice_ble_set_pairing_callback(voice_ble_pairing_cb_t callback);
+void voice_ble_open_pairing(void);
 void voice_ble_set_control_callback(voice_ble_control_cb_t callback);
 void voice_ble_set_ota_callback(voice_ble_ota_cb_t callback);
 const char *voice_ble_device_id(void);

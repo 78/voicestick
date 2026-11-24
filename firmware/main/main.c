@@ -30,6 +30,7 @@ static const char *TAG = "voice_stick";
 #define DISPLAY_DIM_BRIGHTNESS 32
 #define DISPLAY_DIM_TIMEOUT_US (DISPLAY_DIM_TIMEOUT_MS * 1000ULL)
 #define DEEP_SLEEP_TIMEOUT_US (CONFIG_VOICE_STICK_DEEP_SLEEP_TIMEOUT_S * 1000000ULL)
+#define PAIRING_HOLD_MS 3000
 #define MAX_BUTTONS 4
 
 static bool s_recording;
@@ -92,9 +93,12 @@ typedef enum {
     APP_EVENT_PRIMARY_UP,
     APP_EVENT_BUTTON_DOWN,
     APP_EVENT_BUTTON_UP,
+    APP_EVENT_PAIRING_HOLD,
     APP_EVENT_UI_STATE,
     APP_EVENT_BLE_CONNECTED,
     APP_EVENT_BLE_DISCONNECTED,
+    APP_EVENT_PAIRING_OPENED,
+    APP_EVENT_PAIRING_CLOSED,
     APP_EVENT_POWER_IRQ,
     APP_EVENT_BATTERY_REFRESH,
     APP_EVENT_ENTER_DEEP_SLEEP,
@@ -104,6 +108,9 @@ typedef enum {
     APP_EVENT_OTA_END,
     APP_EVENT_HOST_RESPONSE_TIMEOUT,
 } app_event_type_t;
+
+static bool s_pairing_open;
+static bool s_pairing_hold_handled;
 
 typedef struct {
     app_event_type_t type;
@@ -262,7 +269,7 @@ static uint32_t elapsed_button_ms(int64_t down_us)
 
 static void enter_deep_sleep(bool low_battery)
 {
-    if (s_ota_updating || voice_ble_ota_is_active()) {
+    if (s_ota_updating || voice_ble_ota_is_active() || (s_pairing_open && !low_battery)) {
         restart_deep_sleep_timer();
         return;
     }
@@ -457,9 +464,21 @@ static void button_up_cb(void *button_handle, void *usr_data)
     queue_button_event(button == 0 ? APP_EVENT_PRIMARY_UP : APP_EVENT_BUTTON_UP, button);
 }
 
+static void pairing_hold_cb(void *button_handle, void *usr_data)
+{
+    (void)button_handle;
+    (void)usr_data;
+    queue_app_event(APP_EVENT_PAIRING_HOLD);
+}
+
 static void ble_connection_cb(bool connected)
 {
     queue_app_event(connected ? APP_EVENT_BLE_CONNECTED : APP_EVENT_BLE_DISCONNECTED);
+}
+
+static void ble_pairing_cb(bool open)
+{
+    queue_app_event(open ? APP_EVENT_PAIRING_OPENED : APP_EVENT_PAIRING_CLOSED);
 }
 
 static void ble_control_cb(const char *json)
@@ -486,6 +505,8 @@ static void ble_control_cb(const char *json)
         } else {
             ESP_LOGW(TAG, "unknown interaction_mode %s", mode->valuestring);
         }
+    } else if (cJSON_IsString(event) && strcmp(event->valuestring, "get_device_info") == 0) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(voice_ble_send_device_info());
     }
     cJSON_Delete(root);
 }
@@ -634,9 +655,19 @@ static void app_event_task(void *arg)
         case APP_EVENT_BUTTON_UP:
             ESP_LOGI(TAG, "button %s up", s_buttons[event.button].name);
             note_activity();
-            voice_ble_send_button_click(s_buttons[event.button].name,
-                                        elapsed_button_ms(s_button_down_us[event.button]), 0);
+            if (s_pairing_hold_handled && strcmp(s_buttons[event.button].name, "secondary") == 0) {
+                s_pairing_hold_handled = false;
+            } else {
+                voice_ble_send_button_click(s_buttons[event.button].name,
+                                            elapsed_button_ms(s_button_down_us[event.button]), 0);
+            }
             s_button_down_us[event.button] = 0;
+            break;
+        case APP_EVENT_PAIRING_HOLD:
+            if (!s_recording && !s_ota_updating) {
+                s_pairing_hold_handled = true;
+                voice_ble_open_pairing();
+            }
             break;
         case APP_EVENT_UI_STATE:
             apply_app_ui_state(event.state, event.text);
@@ -658,9 +689,22 @@ static void app_event_task(void *arg)
             if (was_recording) {
                 restart_deep_sleep_timer();
             }
-            ui_status_set_pairing(voice_ble_device_name());
+            if (!s_pairing_open) {
+                ui_status_set_advertising();
+            }
             break;
         }
+        case APP_EVENT_PAIRING_OPENED:
+            s_pairing_open = true;
+            note_activity();
+            ui_status_set_pairing(voice_ble_device_name());
+            break;
+        case APP_EVENT_PAIRING_CLOSED:
+            s_pairing_open = false;
+            if (!voice_ble_is_connected()) {
+                ui_status_set_advertising();
+            }
+            break;
         case APP_EVENT_POWER_IRQ:
             board_power_events_rearm();
             /* fall through */
@@ -749,6 +793,14 @@ static esp_err_t init_buttons(void)
                                      button_up_cb, index);
         if (err != ESP_OK) {
             return err;
+        }
+        if (strcmp(s_buttons[i].name, "secondary") == 0) {
+            button_event_args_t args = {.long_press.press_time = PAIRING_HOLD_MS};
+            err = iot_button_register_cb(s_button_handles[i], BUTTON_LONG_PRESS_START, &args,
+                                         pairing_hold_cb, NULL);
+            if (err != ESP_OK) {
+                return err;
+            }
         }
     }
 
@@ -896,6 +948,7 @@ void app_main(void)
     ESP_ERROR_CHECK(init_host_response_timer());
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
+    voice_ble_set_pairing_callback(ble_pairing_cb);
     voice_ble_set_control_callback(ble_control_cb);
     voice_ble_set_ota_callback(ble_ota_cb);
     ESP_ERROR_CHECK(init_buttons());
@@ -915,7 +968,7 @@ void app_main(void)
     }
 
     if (err == ESP_OK) {
-        ui_status_set_pairing(voice_ble_device_name());
+        ui_status_set_advertising();
     }
     ESP_LOGI(TAG, "Voice Stick booted");
 

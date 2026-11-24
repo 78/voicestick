@@ -15,12 +15,15 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 
 #include "host/ble_att.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
+#include "host/ble_sm.h"
+#include "host/ble_store.h"
 #include "host/ble_uuid.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -32,11 +35,14 @@
 static const char *TAG = "voice_ble";
 
 #define OTA_PROGRESS_NOTIFY_BYTES (32 * 1024)
+#define PAIRING_WINDOW_MS (60 * 1000)
+#define BONDED_SECURITY_GRACE_MS 1500
 
-static bool s_connected;
+static atomic_bool s_connected;
 static bool s_audio_subscribed;
 static atomic_bool s_state_subscribed;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static uint16_t s_link_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t s_own_addr_type;
 static uint16_t s_audio_attr_handle;
 static uint16_t s_state_attr_handle;
@@ -44,8 +50,20 @@ static uint16_t s_ota_state_attr_handle;
 static char s_device_id[5] = "0000";
 static char s_device_name[8] = VOICE_BLE_DEVICE_NAME_PREFIX "-0000";
 static voice_ble_connection_cb_t s_connection_cb;
+static voice_ble_pairing_cb_t s_pairing_cb;
 static voice_ble_control_cb_t s_control_cb;
 static voice_ble_ota_cb_t s_ota_cb;
+static atomic_bool s_ble_initialized;
+
+/* Pairing state and bond storage are owned by the NimBLE host task. */
+static bool s_pairing_open;
+static bool s_has_owner;
+static ble_addr_t s_owner;
+static nvs_handle_t s_owner_store;
+static const char *OWNER_KEY = "owner";
+static struct ble_npl_event s_open_pairing_event;
+static struct ble_npl_callout s_pairing_timeout;
+static struct ble_npl_callout s_bonded_security;
 
 typedef enum {
     CONN_ITVL_NONE,
@@ -86,6 +104,17 @@ static const ble_uuid128_t s_ota_rx_uuid =
 static const ble_uuid128_t s_ota_state_uuid =
     BLE_UUID128_INIT(0x05, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
                      0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
+static const ble_uuid128_t s_pairing_adv_uuid =
+    BLE_UUID128_INIT(0x06, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
+                     0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
+static const ble_uuid128_t s_reconnect_adv_uuid =
+    BLE_UUID128_INIT(0x07, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
+                     0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
+static const ble_uuid128_t s_authorized_uuid =
+    BLE_UUID128_INIT(0x08, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
+                     0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
+
+void ble_store_config_init(void);
 
 static void start_advertising(void);
 static void stop_advertising(void);
@@ -165,9 +194,116 @@ void voice_ble_update_battery_status(int percent, bool charging, bool usb_powere
 static void adv_retry_callout_cb(struct ble_npl_event *ev)
 {
     (void)ev;
-    if (!s_connected && !ble_gap_adv_active()) {
-        ESP_LOGI(TAG, "retrying advertising after earlier failure");
+    if (s_link_handle == BLE_HS_CONN_HANDLE_NONE && !ble_gap_adv_active()) {
         start_advertising();
+    }
+}
+
+static bool is_owner(const ble_addr_t *peer)
+{
+    return s_has_owner && ble_addr_cmp(&s_owner, peer) == 0;
+}
+
+static void prune_bonds(void)
+{
+    ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
+    int count;
+    int rc = ble_store_util_bonded_peers(peers, &count, CONFIG_BT_NIMBLE_MAX_BONDS);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "could not list bonds: rc=%d", rc);
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        if (!is_owner(&peers[i])) {
+            rc = ble_store_util_delete_peer(&peers[i]);
+            if (rc != 0) {
+                ESP_LOGW(TAG, "could not remove old bond: rc=%d", rc);
+            }
+        }
+    }
+}
+
+static bool save_owner(const ble_addr_t *peer)
+{
+    /* A bond must already be stored before it can replace the current owner. */
+    const struct ble_store_key_sec key = {.peer_addr = *peer};
+    struct ble_store_value_sec bond;
+    if (ble_store_read_our_sec(&key, &bond) != 0 || !bond.ltk_present) {
+        ESP_LOGW(TAG, "pairing did not create a usable bond");
+        return false;
+    }
+
+    esp_err_t err = nvs_set_blob(s_owner_store, OWNER_KEY, peer, sizeof(*peer));
+    if (err == ESP_OK) {
+        err = nvs_commit(s_owner_store);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "could not save pairing: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    s_owner = *peer;
+    s_has_owner = true;
+    prune_bonds();
+    return true;
+}
+
+static void terminate_link(void)
+{
+    int rc = ble_gap_terminate(s_link_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_ENOTCONN) {
+        ESP_LOGW(TAG, "disconnect request failed: rc=%d", rc);
+    }
+}
+
+static void set_pairing_open(bool open)
+{
+    if (s_pairing_open == open) {
+        return;
+    }
+    s_pairing_open = open;
+    if (open) {
+        ble_npl_callout_reset(&s_pairing_timeout, pdMS_TO_TICKS(PAIRING_WINDOW_MS));
+    } else {
+        ble_npl_callout_stop(&s_pairing_timeout);
+    }
+    ESP_LOGI(TAG, "pairing window %s", open ? "opened" : "closed");
+    if (s_pairing_cb) {
+        s_pairing_cb(open);
+    }
+}
+
+static void restart_advertising(void)
+{
+    stop_advertising();
+    /* Start in a separate host event after stopping the old advertisement. */
+    ble_npl_callout_reset(&s_adv_retry_callout, 1);
+}
+
+static void open_pairing_event_cb(struct ble_npl_event *event)
+{
+    (void)event;
+    if (s_ota.active || s_pairing_open || !ble_hs_synced()) {
+        return;
+    }
+    set_pairing_open(true);
+    if (s_link_handle != BLE_HS_CONN_HANDLE_NONE) {
+        terminate_link();
+    } else {
+        restart_advertising();
+    }
+}
+
+static void pairing_timeout_cb(struct ble_npl_event *event)
+{
+    (void)event;
+    set_pairing_open(false);
+    if (s_link_handle != BLE_HS_CONN_HANDLE_NONE) {
+        if (!s_connected) {
+            terminate_link();
+        }
+    } else {
+        restart_advertising();
     }
 }
 
@@ -380,9 +516,12 @@ static int ota_abort(uint32_t transfer_id)
 static int ota_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                          struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn_handle;
     (void)attr_handle;
     (void)arg;
+
+    if (!s_connected || conn_handle != s_conn_handle) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
+    }
 
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
         return BLE_ATT_ERR_UNLIKELY;
@@ -455,9 +594,12 @@ static int ota_access_cb(uint16_t conn_handle, uint16_t attr_handle,
 static int control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn_handle;
     (void)attr_handle;
     (void)arg;
+
+    if (!s_connected || conn_handle != s_conn_handle) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
+    }
 
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
         return BLE_ATT_ERR_UNLIKELY;
@@ -488,6 +630,20 @@ static int notify_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
+static int authorized_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)attr_handle;
+    (void)arg;
+
+    if (!s_connected || conn_handle != s_conn_handle) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
+    }
+    const uint8_t authorized = 1;
+    return os_mbuf_append(ctxt->om, &authorized, sizeof(authorized)) == 0
+        ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static const struct ble_gatt_svc_def s_gatt_services[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -508,12 +664,12 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
             {
                 .uuid = &s_control_uuid.u,
                 .access_cb = control_access_cb,
-                .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
+                .flags = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC,
             },
             {
                 .uuid = &s_ota_rx_uuid.u,
                 .access_cb = ota_access_cb,
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC,
             },
             {
                 .uuid = &s_ota_state_uuid.u,
@@ -521,51 +677,152 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
                 .val_handle = &s_ota_state_attr_handle,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
             },
+            {
+                .uuid = &s_authorized_uuid.u,
+                .access_cb = authorized_access_cb,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC,
+            },
             {0},
         },
     },
     {0},
 };
 
+static void announce_state_subscription(void)
+{
+    if (!s_connected || !s_state_subscribed) {
+        return;
+    }
+    esp_err_t rc = voice_ble_send_device_info();
+    if (rc != ESP_OK) {
+        ESP_LOGW(TAG, "device_info send failed err=0x%x", rc);
+    }
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+    report_battery_status();
+#endif
+}
+
+static void on_link_encrypted(uint16_t conn_handle, int status)
+{
+    if (conn_handle != s_link_handle) {
+        return;
+    }
+    struct ble_gap_conn_desc desc;
+    const bool secure = ble_gap_conn_find(conn_handle, &desc) == 0 &&
+                        desc.sec_state.encrypted && desc.sec_state.bonded;
+    if (status == BLE_HS_ETIMEOUT && s_connected && secure && is_owner(&desc.peer_id_addr)) {
+        /* The central may have restored encryption before receiving our Security Request. */
+        ESP_LOGD(TAG, "security request expired on an already authorized link");
+        return;
+    }
+    if (status != 0 || !secure) {
+        ESP_LOGW(TAG, "link security failed: status=%d", status);
+        terminate_link();
+        return;
+    }
+
+    if (!is_owner(&desc.peer_id_addr) && (!s_pairing_open || !save_owner(&desc.peer_id_addr))) {
+        ESP_LOGW(TAG, "encrypted peer is not authorized");
+        terminate_link();
+        return;
+    }
+    if (s_connected) {
+        return;
+    }
+
+    s_conn_handle = conn_handle;
+    s_connected = true;
+    ble_npl_callout_stop(&s_bonded_security);
+    set_pairing_open(false);
+    ESP_LOGI(TAG, "authorized connection handle=%u", conn_handle);
+    if (s_connection_cb) {
+        s_connection_cb(true);
+    }
+    announce_state_subscription();
+}
+
+static bool request_link_security(uint16_t conn_handle)
+{
+    int rc = ble_gap_security_initiate(conn_handle);
+    if (rc == 0 || rc == BLE_HS_EALREADY) {
+        return true;
+    }
+    ESP_LOGW(TAG, "security request failed: rc=%d", rc);
+    terminate_link();
+    return false;
+}
+
+static void bonded_security_cb(struct ble_npl_event *event)
+{
+    (void)event;
+    struct ble_gap_conn_desc desc;
+    if (s_connected || ble_gap_conn_find(s_link_handle, &desc) != 0) {
+        return;
+    }
+    if (desc.sec_state.encrypted && desc.sec_state.bonded) {
+        on_link_encrypted(s_link_handle, 0);
+    } else {
+        request_link_security(s_link_handle);
+    }
+}
+
 static int gap_event_cb(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
 
     switch (event->type) {
-    case BLE_GAP_EVENT_CONNECT:
-        if (event->connect.status == 0) {
-            s_connected = true;
-            s_audio_subscribed = false;
-            s_state_subscribed = false;
-            s_conn_handle = event->connect.conn_handle;
-            ESP_LOGI(TAG, "connected handle=%u", s_conn_handle);
-            stop_advertising();
-            // Some BLE centrals (notably WinRT on Windows) do not always
-            // initiate the ATT MTU exchange themselves. Without it the MTU
-            // stays at the BLE default of 23 bytes, which means our state
-            // notifications (~170+ bytes including device_info) get dropped
-            // by NimBLE with BLE_HS_EMSGSIZE before they ever reach the
-            // peer. Initiate the exchange from our side as a defensive
-            // measure so the link is usable for both audio and state.
-            {
-                int mtu_rc = ble_gattc_exchange_mtu(s_conn_handle, NULL, NULL);
-                if (mtu_rc != 0 && mtu_rc != BLE_HS_EALREADY) {
-                    ESP_LOGW(TAG, "mtu exchange request failed rc=%d", mtu_rc);
-                }
-            }
-            if (s_connection_cb) {
-                s_connection_cb(true);
-            }
-        } else {
+    case BLE_GAP_EVENT_CONNECT: {
+        if (event->connect.status != 0) {
             ESP_LOGW(TAG, "connect failed status=%d", event->connect.status);
             start_advertising();
-            if (s_connection_cb) {
-                s_connection_cb(false);
-            }
+            return 0;
+        }
+
+        s_link_handle = event->connect.conn_handle;
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(s_link_handle, &desc) != 0 ||
+            (!s_pairing_open && !is_owner(&desc.peer_id_addr))) {
+            ESP_LOGI(TAG, "rejected connection outside the pairing window");
+            terminate_link();
+            return 0;
+        }
+
+        if (desc.sec_state.encrypted && desc.sec_state.bonded) {
+            on_link_encrypted(s_link_handle, 0);
+        } else if (is_owner(&desc.peer_id_addr)) {
+            /* A bonded central can start restoring encryption on its own. */
+            ble_npl_callout_reset(&s_bonded_security, pdMS_TO_TICKS(BONDED_SECURITY_GRACE_MS));
+        } else if (!request_link_security(s_link_handle)) {
+            return 0;
+        }
+        /* Some centrals do not initiate MTU exchange on their own. */
+        int rc = ble_gattc_exchange_mtu(s_link_handle, NULL, NULL);
+        if (rc != 0 && rc != BLE_HS_EALREADY) {
+            ESP_LOGW(TAG, "mtu exchange request failed rc=%d", rc);
         }
         return 0;
+    }
 
-    case BLE_GAP_EVENT_DISCONNECT:
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        on_link_encrypted(event->enc_change.conn_handle, event->enc_change.status);
+        return 0;
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        struct ble_gap_conn_desc desc;
+        if (s_pairing_open &&
+            ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0 &&
+            ble_store_util_delete_peer(&desc.peer_id_addr) == 0) {
+            return BLE_GAP_REPEAT_PAIRING_RETRY;
+        }
+        return BLE_GAP_REPEAT_PAIRING_IGNORE;
+    }
+
+    case BLE_GAP_EVENT_DISCONNECT: {
+        if (event->disconnect.conn.conn_handle != s_link_handle) {
+            return 0;
+        }
+        ble_npl_callout_stop(&s_bonded_security);
+        const bool was_connected = s_connected;
         ESP_LOGI(TAG, "disconnected reason=%d", event->disconnect.reason);
         if (s_ota.active) {
             (void)esp_ota_abort(s_ota.handle);
@@ -582,24 +839,22 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_last_battery_report.percent = -1;
 #endif
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_link_handle = BLE_HS_CONN_HANDLE_NONE;
         s_itvl_target = CONN_ITVL_NONE;
         s_itvl_update_pending = false;
+        if (!was_connected) {
+            prune_bonds();
+        }
         start_advertising();
-        if (s_connection_cb) {
+        if (was_connected && s_connection_cb) {
             s_connection_cb(false);
         }
         return 0;
+    }
 
     case BLE_GAP_EVENT_SUBSCRIBE:
-        // SUBSCRIBE always implies an active connection on this conn_handle.
-        // Defensively re-sync our cached state in case a stale DISCONNECT
-        // for an older connection arrived out of order and cleared things,
-        // which would otherwise make send_state_json bail with INVALID_STATE.
-        if (!s_connected || s_conn_handle != event->subscribe.conn_handle) {
-            ESP_LOGW(TAG, "subscribe state desync: cached conn=%u connected=%d, event conn=%u; resyncing",
-                     s_conn_handle, s_connected, event->subscribe.conn_handle);
-            s_connected = true;
-            s_conn_handle = event->subscribe.conn_handle;
+        if (s_link_handle != event->subscribe.conn_handle) {
+            return 0;
         }
         if (event->subscribe.attr_handle == s_audio_attr_handle) {
             s_audio_subscribed = event->subscribe.cur_notify;
@@ -608,15 +863,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
             s_last_battery_report.percent = -1;
 #endif
-            if (s_state_subscribed) {
-                esp_err_t rc = voice_ble_send_device_info();
-                if (rc != ESP_OK) {
-                    ESP_LOGW(TAG, "device_info send failed err=0x%x", rc);
-                }
-#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-                report_battery_status();
-#endif
-            }
+            announce_state_subscription();
         }
         return 0;
 
@@ -656,20 +903,15 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 
 static void start_advertising(void)
 {
-    if (s_connected) {
-        ESP_LOGD(TAG, "skip advertising while connected");
-        return;
-    }
-
-    if (ble_gap_adv_active()) {
-        ESP_LOGD(TAG, "advertising already active");
+    if (s_link_handle != BLE_HS_CONN_HANDLE_NONE || ble_gap_adv_active() ||
+        (!s_pairing_open && !s_has_owner)) {
         return;
     }
 
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof(fields));
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.uuids128 = &s_service_uuid;
+    fields.uuids128 = s_pairing_open ? &s_pairing_adv_uuid : &s_reconnect_adv_uuid;
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
 
@@ -694,8 +936,8 @@ static void start_advertising(void)
     memset(&params, 0, sizeof(params));
     params.conn_mode = BLE_GAP_CONN_MODE_UND;
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    params.itvl_min = BLE_GAP_ADV_ITVL_MS(60);
-    params.itvl_max = BLE_GAP_ADV_ITVL_MS(120);
+    params.itvl_min = BLE_GAP_ADV_ITVL_MS(s_pairing_open ? 60 : 200);
+    params.itvl_max = BLE_GAP_ADV_ITVL_MS(s_pairing_open ? 120 : 320);
 
     rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &params, gap_event_cb, NULL);
     if (rc != 0) {
@@ -706,7 +948,8 @@ static void start_advertising(void)
         return;
     }
 
-    ESP_LOGI(TAG, "advertising as %s", s_device_name);
+    ESP_LOGI(TAG, "advertising as %s for %s", s_device_name,
+             s_pairing_open ? "pairing" : "reconnection");
 }
 
 static void stop_advertising(void)
@@ -732,6 +975,7 @@ static void on_sync(void)
         return;
     }
 
+    prune_bonds();
     start_advertising();
 }
 
@@ -770,6 +1014,15 @@ esp_err_t voice_ble_init(void)
     }
     ESP_RETURN_ON_ERROR(err, TAG, "nvs init failed");
 
+    ESP_RETURN_ON_ERROR(nvs_open("voice_pairing", NVS_READWRITE, &s_owner_store),
+                        TAG, "pairing storage open failed");
+    size_t owner_size = sizeof(s_owner);
+    err = nvs_get_blob(s_owner_store, OWNER_KEY, &s_owner, &owner_size);
+    s_has_owner = err == ESP_OK && owner_size == sizeof(s_owner);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "could not read pairing owner: %s", esp_err_to_name(err));
+    }
+
     ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "nimble init failed");
 
     ble_svc_gap_init();
@@ -777,9 +1030,12 @@ esp_err_t voice_ble_init(void)
 
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
-    ble_hs_cfg.sm_bonding = 0;
-    ble_hs_cfg.sm_our_key_dist = 0;
-    ble_hs_cfg.sm_their_key_dist = 0;
+    ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_store_config_init();
 
     int rc = ble_svc_gap_device_name_set(s_device_name);
     ESP_RETURN_ON_FALSE(rc == 0, ESP_FAIL, TAG, "set device name failed rc=%d", rc);
@@ -791,11 +1047,15 @@ esp_err_t voice_ble_init(void)
 
     ble_npl_callout_init(&s_adv_retry_callout, nimble_port_get_dflt_eventq(),
                          adv_retry_callout_cb, NULL);
+    ble_npl_event_init(&s_open_pairing_event, open_pairing_event_cb, NULL);
+    ble_npl_callout_init(&s_pairing_timeout, nimble_port_get_dflt_eventq(), pairing_timeout_cb, NULL);
+    ble_npl_callout_init(&s_bonded_security, nimble_port_get_dflt_eventq(), bonded_security_cb, NULL);
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
     ble_npl_event_init(&s_battery_status_event, battery_status_event_cb, NULL);
 #endif
 
     nimble_port_freertos_init(nimble_host_task);
+    s_ble_initialized = true;
     ESP_LOGI(TAG, "BLE initialized as %s", s_device_name);
     return ESP_OK;
 }
@@ -813,6 +1073,18 @@ const char *voice_ble_device_name(void)
 void voice_ble_set_connection_callback(voice_ble_connection_cb_t callback)
 {
     s_connection_cb = callback;
+}
+
+void voice_ble_set_pairing_callback(voice_ble_pairing_cb_t callback)
+{
+    s_pairing_cb = callback;
+}
+
+void voice_ble_open_pairing(void)
+{
+    if (s_ble_initialized) {
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_open_pairing_event);
+    }
 }
 
 void voice_ble_set_control_callback(voice_ble_control_cb_t callback)

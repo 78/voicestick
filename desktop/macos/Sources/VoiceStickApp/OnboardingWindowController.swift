@@ -1,15 +1,7 @@
 import AppKit
 import ApplicationServices
-import CoreBluetooth
 
-private struct OnboardingDevice {
-    let identifier: UUID
-    var name: String
-    var deviceID: String
-    var rssi: Int
-}
-
-final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CBCentralManagerDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class OnboardingWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private enum Step: Int, CaseIterable {
         case device
         case provider
@@ -47,8 +39,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     private let accessibilityStatusLabel = NSTextField(labelWithString: "")
     private let accessibilitySettingsButton = NSButton(title: "Open Accessibility Settings", target: nil, action: nil)
 
-    private var central: CBCentralManager?
-    private var devices: [OnboardingDevice] = []
+    private let scanner = BlePairingScanner()
+    private var devices: [PairingDevice] = []
     private var currentStep: Step = .device
     private var currentDisplayedProvider: ASRProvider
     private var config: AppConfig
@@ -71,6 +63,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
+        scanner.onDevice = { [weak self] in self?.updateDevice($0) }
+        scanner.onStatus = { [weak self] in self?.scanStatusLabel.stringValue = $0 }
         accessibilitySettingsButton.target = self
         accessibilitySettingsButton.action = #selector(requestAccessibilityPermission)
         applyTrialAPIKeyButton.target = self
@@ -104,11 +98,11 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         showWindow(nil)
         window?.center()
         NSApp.activate(ignoringOtherApps: true)
-        central = CBCentralManager(delegate: self, queue: .main)
+        scanner.start()
     }
 
     func windowWillClose(_ notification: Notification) {
-        central?.stopScan()
+        scanner.stop()
         if !didComplete {
             NSApp.terminate(nil)
         }
@@ -205,7 +199,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         switch currentStep {
         case .device:
             titleLabel.stringValue = "Pair your VoiceStick"
-            detailLabel.stringValue = "Choose a nearby VS-XXXX device. VoiceStick needs a paired device before the app can listen."
+            detailLabel.stringValue = "Hold the cancel or side button on your VoiceStick, then choose it below."
             contentStack.addArrangedSubview(deviceView())
         case .provider:
             titleLabel.stringValue = "Choose your speech provider"
@@ -347,31 +341,9 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         return row
     }
 
-    func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        guard central.state == .poweredOn else {
-            scanStatusLabel.stringValue = "Bluetooth unavailable"
-            return
-        }
-        scanStatusLabel.stringValue = "Scanning"
-        central.scanForPeripherals(withServices: [CBUUID(string: BleProtocol.serviceUUID)])
-    }
-
-    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
-                        advertisementData: [String: Any], rssi RSSI: NSNumber) {
+    private func updateDevice(_ device: PairingDevice) {
         let selectedIdentifier = selectedDeviceIdentifier
-        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? peripheral.name
-            ?? ""
-        guard let deviceID = BleCentral.deviceID(from: name) else { return }
-
-        let device = OnboardingDevice(
-            identifier: peripheral.identifier,
-            name: name,
-            deviceID: deviceID,
-            rssi: RSSI.intValue
-        )
-
-        if let index = devices.firstIndex(where: { $0.identifier == peripheral.identifier }) {
+        if let index = devices.firstIndex(where: { $0.identifier == device.identifier }) {
             devices[index] = device
         } else {
             devices.append(device)
@@ -386,7 +358,10 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        selectCurrentDevice()
+        if let selectedDevice {
+            scanStatusLabel.stringValue = "Selected \(selectedDevice.name)"
+        }
+        updateNextButton()
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -407,23 +382,12 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     }
 
     @objc private func pairSelectedDevice() {
-        guard selectCurrentDevice() else { return }
         goNext()
     }
 
-    @discardableResult
-    private func selectCurrentDevice() -> Bool {
+    private var selectedDevice: PairingDevice? {
         let row = tableView.selectedRow
-        guard row >= 0, row < devices.count else {
-            scanStatusLabel.stringValue = "Select a device"
-            updateNextButton()
-            return false
-        }
-        let deviceID = devices[row].deviceID
-        config.pairedDeviceIDs = [deviceID]
-        scanStatusLabel.stringValue = "Selected VS-\(deviceID)"
-        updateNextButton()
-        return true
+        return devices.indices.contains(row) ? devices[row] : nil
     }
 
     @objc private func providerSelectionChanged() {
@@ -539,17 +503,28 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         saveDisplayedProviderFields()
         currentStep = step
         renderStep()
+        if step == .device { scanner.start() }
     }
 
     @objc private func goNext() {
         statusLabel.stringValue = ""
         saveDisplayedProviderFields()
 
+        if currentStep == .device, let selectedDevice,
+           !config.pairedDeviceIDs.contains(selectedDevice.deviceID) {
+            scanner.pair(selectedDevice) { [weak self] deviceID in
+                guard let self else { return }
+                self.config.pairedDeviceIDs = [deviceID]
+                self.advanceToNextStep()
+            }
+            return
+        }
+
         if currentStep == .finish {
             do {
                 try config.save()
                 didComplete = true
-                central?.stopScan()
+                scanner.stop()
                 close()
                 onComplete(config)
             } catch {
@@ -558,8 +533,13 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             return
         }
 
+        advanceToNextStep()
+    }
+
+    private func advanceToNextStep() {
         guard validateCurrentStep() else { return }
         guard let step = Step(rawValue: currentStep.rawValue + 1) else { return }
+        if currentStep == .device { scanner.stop() }
         currentStep = step
         renderStep()
     }
@@ -596,7 +576,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     private func updateNextButton() {
         switch currentStep {
         case .device:
-            nextButton.isEnabled = !config.pairedDeviceIDs.isEmpty
+            nextButton.isEnabled = selectedDevice != nil || !config.pairedDeviceIDs.isEmpty
         case .accessibility:
             nextButton.isEnabled = AXIsProcessTrusted()
         default:
@@ -605,9 +585,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     }
 
     private var selectedDeviceIdentifier: UUID? {
-        let row = tableView.selectedRow
-        guard row >= 0, row < devices.count else { return nil }
-        return devices[row].identifier
+        selectedDevice?.identifier
     }
 
     private func restoreSelection(_ identifier: UUID?) {

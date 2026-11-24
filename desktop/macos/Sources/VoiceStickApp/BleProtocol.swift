@@ -72,6 +72,9 @@ struct FirmwareOTAStateEvent: Decodable {
 
 enum BleProtocol {
     static let serviceUUID = "8F2F0B84-6E6F-4B23-88F7-3A3CEAFC5100"
+    static let pairingAdvertisementUUID = "8F2F0B84-6E6F-4B23-88F7-3A3CEAFC5106"
+    static let reconnectAdvertisementUUID = "8F2F0B84-6E6F-4B23-88F7-3A3CEAFC5107"
+    static let authorizedUUID = "8F2F0B84-6E6F-4B23-88F7-3A3CEAFC5108"
     static let audioUUID = "8F2F0B84-6E6F-4B23-88F7-3A3CEAFC5101"
     static let stateUUID = "8F2F0B84-6E6F-4B23-88F7-3A3CEAFC5102"
     static let controlUUID = "8F2F0B84-6E6F-4B23-88F7-3A3CEAFC5103"
@@ -137,6 +140,8 @@ enum BleProtocol {
         ]
         return (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
     }
+
+    static let deviceInfoRequest = Data(#"{"event":"get_device_info"}"#.utf8)
 
     static func otaBeginPayload(imageSize: UInt32, transferID: UInt32) -> Data {
         var data = Data([1, otaTypeBegin, 12, 0])

@@ -67,6 +67,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var discoveredDevices: [UUID: ConnectedVoiceStickDevice] = [:]
     private var connectedDevices: [UUID: ConnectedVoiceStickDevice] = [:]
     private var controlCharacteristics: [UUID: CBCharacteristic] = [:]
+    private var pendingAuthorization: [UUID: [CBCharacteristic]] = [:]
     private var otaCharacteristics: [UUID: CBCharacteristic] = [:]
     private var firmwareUpdateSession: FirmwareUpdateSession?
     private var interactionMode: InteractionMode = .holdToTalk
@@ -104,7 +105,6 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func updatePairedDeviceIDs(_ deviceIDs: [String]) {
         let updatedIDs = Set(deviceIDs)
-        guard pairedDeviceIDs != updatedIDs else { return }
         pairedDeviceIDs = updatedIDs
 
         let removedPeripherals = peripherals.values.filter { peripheral in
@@ -120,6 +120,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             onConnectionChange?(currentConnectedDevices)
         }
 
+        // The pairing advertisement changes after bonding, even if this ID is already saved.
         central?.stopScan()
         scanIfReady()
     }
@@ -264,9 +265,6 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             central.cancelPeripheralConnection(peripheral)
             return
         }
-        connectedDevices[peripheral.identifier] = discoveredDevices[peripheral.identifier]
-            ?? connectedDevice(localName: nil, peripheralName: peripheral.name)
-        onConnectionChange?(currentConnectedDevices)
         peripheral.discoverServices([CBUUID(string: BleProtocol.serviceUUID)])
     }
 
@@ -284,17 +282,39 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             onConnectionChange?(currentConnectedDevices)
         }
         guard !isWorkspaceSleeping else { return }
+        central?.stopScan()
         scanIfReady()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        peripheral.services?.forEach {
-            peripheral.discoverCharacteristics(nil, for: $0)
+        guard error == nil,
+              let service = peripheral.services?.first(where: { $0.uuid.uuidString == BleProtocol.serviceUUID }) else {
+            central?.cancelPeripheralConnection(peripheral)
+            return
         }
+        peripheral.discoverCharacteristics(nil, for: service)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        service.characteristics?.forEach { characteristic in
+        guard error == nil, let characteristics = service.characteristics else {
+            central?.cancelPeripheralConnection(peripheral)
+            return
+        }
+        if let authorization = characteristics.first(where: { $0.uuid.uuidString == BleProtocol.authorizedUUID }) {
+            pendingAuthorization[peripheral.identifier] = characteristics
+            peripheral.readValue(for: authorization)
+        } else {
+            activate(peripheral, characteristics: characteristics)
+        }
+    }
+
+    private func activate(_ peripheral: CBPeripheral, characteristics: [CBCharacteristic]) {
+        guard peripherals[peripheral.identifier] != nil else { return }
+        connectedDevices[peripheral.identifier] = discoveredDevices[peripheral.identifier]
+            ?? connectedDevice(localName: nil, peripheralName: peripheral.name)
+        onConnectionChange?(currentConnectedDevices)
+
+        characteristics.forEach { characteristic in
             switch characteristic.uuid.uuidString.uppercased() {
             case BleProtocol.audioUUID:
                 peripheral.setNotifyValue(true, for: characteristic)
@@ -315,7 +335,30 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
     }
 
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid.uuidString.uppercased() == BleProtocol.stateUUID else { return }
+        if let error {
+            NSLog("BLE state subscription failed: \(error.localizedDescription)")
+            return
+        }
+        guard characteristic.isNotifying,
+              connectedDevices[peripheral.identifier] != nil,
+              let control = controlCharacteristics[peripheral.identifier] else { return }
+
+        // A bonded peripheral can restore its subscription before this app starts listening.
+        peripheral.writeValue(BleProtocol.deviceInfoRequest, for: control, type: .withoutResponse)
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        if characteristic.uuid.uuidString == BleProtocol.authorizedUUID {
+            guard let characteristics = pendingAuthorization.removeValue(forKey: peripheral.identifier) else { return }
+            if error == nil, characteristic.value == Data([1]) {
+                activate(peripheral, characteristics: characteristics)
+            } else {
+                central?.cancelPeripheralConnection(peripheral)
+            }
+            return
+        }
         guard let data = characteristic.value else { return }
         switch characteristic.uuid.uuidString.uppercased() {
         case BleProtocol.audioUUID:
@@ -481,7 +524,10 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         if pairedDeviceIDs.isEmpty {
             central.stopScan()
         } else {
-            central.scanForPeripherals(withServices: [CBUUID(string: BleProtocol.serviceUUID)])
+            central.scanForPeripherals(withServices: [
+                CBUUID(string: BleProtocol.serviceUUID),
+                CBUUID(string: BleProtocol.reconnectAdvertisementUUID),
+            ])
         }
     }
 
@@ -491,20 +537,14 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let restoredPeripherals = central.retrieveConnectedPeripherals(withServices: [serviceUUID])
         guard !restoredPeripherals.isEmpty else { return }
 
-        var didRestore = false
         for peripheral in restoredPeripherals {
             guard let device = knownDevice(for: peripheral) else {
                 continue
             }
             discoveredDevices[peripheral.identifier] = device
-            connectedDevices[peripheral.identifier] = device
             peripherals[peripheral.identifier] = peripheral
             peripheral.delegate = self
             peripheral.discoverServices([serviceUUID])
-            didRestore = true
-        }
-        if didRestore {
-            onConnectionChange?(currentConnectedDevices)
         }
     }
 
@@ -531,6 +571,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         discoveredDevices.removeAll()
         connectedDevices.removeAll()
         controlCharacteristics.removeAll()
+        pendingAuthorization.removeAll()
         otaCharacteristics.removeAll()
         onConnectionChange?([])
     }
@@ -541,6 +582,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         discoveredDevices.removeValue(forKey: peripheral.identifier)
         connectedDevices.removeValue(forKey: peripheral.identifier)
         controlCharacteristics.removeValue(forKey: peripheral.identifier)
+        pendingAuthorization.removeValue(forKey: peripheral.identifier)
         otaCharacteristics.removeValue(forKey: peripheral.identifier)
         if firmwareUpdateSession?.peripheralID == peripheral.identifier {
             failFirmwareUpdate(FirmwareUpdateError.noConnectedDevice)

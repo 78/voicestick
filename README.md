@@ -302,13 +302,12 @@ Do not commit API keys.
 
 ## Pairing Flow
 
-1. Flash and boot the StickS3. The screen shows `VS-XXXX`.
-2. Start the macOS desktop app.
-3. Open `Pair Device...` from the menu bar app.
-4. Select the matching `VS-XXXX` in the scan list and click `Pair`.
-5. After saving, the desktop app scans for and connects to that device. Repeat this flow to pair additional devices.
+1. Turn on the VoiceStick and start the macOS desktop app.
+2. Hold the C3 cancel button or the StickS3 side button for three seconds. The device accepts pairing for 60 seconds. The C3 flashes blue during that window.
+3. Open `Pair Device...` from the menu bar, select the matching `VS-XXXX`, and click `Pair`.
+4. Confirm the Bluetooth connection in macOS if prompted. The app reconnects automatically after pairing.
 
-You can also edit `paired_device_ids` manually. When multiple IDs are saved, the desktop app ignores nearby unpaired VoiceStick devices.
+Each VoiceStick remembers one computer. The macOS app can connect to multiple VoiceSticks. With older firmware, select the device directly from the list.
 
 ## Debug Audio
 

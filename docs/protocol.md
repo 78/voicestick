@@ -28,8 +28,11 @@ Characteristics:
 | `control_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5103` | Mac -> StickS3 | write without response |
 | `ota_rx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5104` | Mac -> StickS3 | write, write without response |
 | `ota_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105` | StickS3 -> Mac | notify |
+| `authorized` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5108` | VoiceStick -> desktop | encrypted read, returns `0x01` after authorization |
 
-The desktop app scans for this service and only connects to devices whose `VS-XXXX` ID is present in the local paired-device list. Multiple paired devices may be connected at the same time; audio, state, control, and OTA handling are scoped by CoreBluetooth peripheral identity.
+A three-second hold of the `secondary` button advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106` for pairing. The window closes after 60 seconds or a successful encrypted BLE bond. Each VoiceStick keeps one authorized host in persistent storage. Outside the window, a VoiceStick with an authorized host advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5107` for reconnection. Both advertisements lead to the same GATT service above. The previous firmware advertised the service UUID directly.
+
+The Mac app uses the pairing advertisement in the device picker and checks the encrypted `authorized` characteristic before saving the device. Background scanning uses the reconnect and legacy advertisements and matches the local `VS-XXXX` list. The firmware also validates the saved host bond before accepting control or OTA writes or sending audio and state. The Mac app can connect to multiple VoiceSticks.
 
 ## Audio Frame
 
@@ -89,6 +92,11 @@ included when a `primary` press starts or stops a local audio recording.
 The firmware drops trailing buttons if `device_info` would not fit one
 notification.
 
+**Unsolicited `device_info` notifications are deprecated.** Firmware still
+sends one when an authorized connection subscribes to `state_tx` for
+compatibility with existing clients. New clients should request `device_info`
+with `get_device_info` after subscribing.
+
 VoiceStick C3 v1 sends `battery_status` once the host subscribes and a valid
 reading is available. The firmware checks the battery at startup, on USB power
 changes, after the charging signal has settled, and with a 60-second polling
@@ -120,7 +128,14 @@ Current desktop events:
 {"event":"ui_state","state":"error","text":"ASR timeout"}
 {"event":"interaction_mode","mode":"hold_to_talk"}
 {"event":"interaction_mode","mode":"click_to_talk"}
+{"event":"get_device_info"}
 ```
+
+After enabling notifications on `state_tx`, the desktop can write
+`get_device_info` to `control_rx` and read `firmware_version` and other device
+information from the resulting `device_info` notification.
+This also covers bonded links where the firmware restored the subscription
+before the desktop started listening.
 
 The desktop helper always includes a `text` field, even for states without text
 content. Firmware may immediately render local physical feedback, such as
@@ -234,6 +249,9 @@ boot -> advertising -> connected -> idle -> recording -> idle
 ```
 
 The firmware also dims the display after 30 seconds of idle time. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes the device from deep sleep.
+
+The C3 turns off the status LED while waiting for the paired host and enters
+deep sleep after 60 minutes idle on battery power. The voice button wakes it.
 
 macOS:
 

@@ -1,19 +1,11 @@
 import AppKit
-import CoreBluetooth
 
-private struct PairingDevice {
-    let identifier: UUID
-    var name: String
-    var deviceID: String
-    var rssi: Int
-}
-
-final class PairDeviceWindowController: NSWindowController, CBCentralManagerDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class PairDeviceWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(labelWithString: "Scanning")
     private let existingDeviceIDs: Set<String>
     private let onPair: (String) -> Void
-    private var central: CBCentralManager?
+    private let scanner = BlePairingScanner()
     private var devices: [PairingDevice] = []
 
     init(existingDeviceIDs: [String], onPair: @escaping (String) -> Void) {
@@ -29,6 +21,9 @@ final class PairDeviceWindowController: NSWindowController, CBCentralManagerDele
         window.title = "Pair VoiceStick"
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        window.delegate = self
+        scanner.onDevice = { [weak self] in self?.updateDevice($0) }
+        scanner.onStatus = { [weak self] in self?.statusLabel.stringValue = $0 }
         buildContent()
     }
 
@@ -40,7 +35,11 @@ final class PairDeviceWindowController: NSWindowController, CBCentralManagerDele
         showWindow(nil)
         window?.center()
         NSApp.activate(ignoringOtherApps: true)
-        central = CBCentralManager(delegate: self, queue: .main)
+        scanner.start()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        scanner.stop()
     }
 
     private func buildContent() {
@@ -95,38 +94,16 @@ final class PairDeviceWindowController: NSWindowController, CBCentralManagerDele
         return column
     }
 
-    func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        guard central.state == .poweredOn else {
-            statusLabel.stringValue = "Bluetooth unavailable"
-            return
-        }
-        statusLabel.stringValue = "Scanning"
-        central.scanForPeripherals(withServices: [CBUUID(string: BleProtocol.serviceUUID)])
-    }
-
-    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
-                        advertisementData: [String: Any], rssi RSSI: NSNumber) {
+    private func updateDevice(_ device: PairingDevice) {
         let selectedIdentifier = selectedDeviceIdentifier
-        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? peripheral.name
-            ?? ""
-        guard let deviceID = BleCentral.deviceID(from: name) else { return }
-
-        let device = PairingDevice(
-            identifier: peripheral.identifier,
-            name: name,
-            deviceID: deviceID,
-            rssi: RSSI.intValue
-        )
-
-        if let index = devices.firstIndex(where: { $0.identifier == peripheral.identifier }) {
+        if let index = devices.firstIndex(where: { $0.identifier == device.identifier }) {
             devices[index] = device
         } else {
             devices.append(device)
         }
         tableView.reloadData()
         restoreSelection(selectedIdentifier)
-        statusLabel.stringValue = devices.isEmpty ? "Scanning" : "\(devices.count) found"
+        statusLabel.stringValue = "\(devices.count) found"
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -156,13 +133,13 @@ final class PairDeviceWindowController: NSWindowController, CBCentralManagerDele
             statusLabel.stringValue = "Select a device"
             return
         }
-        central?.stopScan()
-        onPair(devices[row].deviceID)
-        close()
+        scanner.pair(devices[row]) { [weak self] deviceID in
+            self?.onPair(deviceID)
+            self?.close()
+        }
     }
 
     @objc private func cancel() {
-        central?.stopScan()
         close()
     }
 

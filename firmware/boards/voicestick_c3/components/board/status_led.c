@@ -22,6 +22,7 @@ static const char *TAG = "status_led";
 
 typedef enum {
     SCENE_BOOT,
+    SCENE_ADVERTISING,
     SCENE_PAIRING,
     SCENE_READY,
     SCENE_RECORDING,
@@ -40,7 +41,8 @@ typedef struct {
 
 static const pattern_t s_patterns[] = {
     [SCENE_BOOT] = {255, 255, 255, 0, 0},
-    [SCENE_PAIRING] = {0, 64, 255, 100, 2000},
+    [SCENE_ADVERTISING] = {0, 0, 0, 0, 0},
+    [SCENE_PAIRING] = {0, 64, 255, 100, 300},
     [SCENE_READY] = {0, 255, 32, 250, 0},
     [SCENE_RECORDING] = {255, 0, 0, 0, 0},
     [SCENE_THINKING] = {160, 0, 255, 500, 1000},
@@ -226,6 +228,7 @@ void ui_status_set_device_name(const char *device_name)
 
 void ui_status_set_advertising(void)
 {
+    set_scene(SCENE_ADVERTISING);
 }
 
 void ui_status_set_pairing(const char *device_name)

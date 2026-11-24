@@ -409,7 +409,7 @@ void ui_status_set_device_name(const char *device_name)
 void ui_status_set_advertising(void)
 {
     ESP_LOGD(TAG, "advertising");
-    set_scene(UI_STATUS_ICON_PAIRING, "Pairing", "Open the Mac app");
+    set_scene(UI_STATUS_ICON_PAIRING, "Disconnected", "Hold side button to pair");
 }
 
 void ui_status_set_pairing(const char *device_name)

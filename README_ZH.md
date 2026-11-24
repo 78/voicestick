@@ -31,7 +31,7 @@ StickS3 的引脚见[板级头文件](firmware/boards/m5stack_stick_s3/component
 
 ## 录音、确认与配对
 
-设备广播名为 `VS-XXXX`，末四位来自 eFuse MAC 地址。将已烧录的设备开机，在 macOS 菜单栏选择 `Pair Device...`，选中相符的设备并点击 `Pair`。可以重复配对多台设备，应用会分别显示连接状态，也可通过配置项 `paired_device_ids` 管理设备。
+设备广播名为 `VS-XXXX`，末四位来自 eFuse MAC 地址。长按 C3 的取消键或 StickS3 的侧键 3 秒，在 macOS 菜单栏选择 `Pair Device...`，选中相符的设备并点击 `Pair`。如果 macOS 弹出蓝牙配对确认，点「配对」。配对窗口持续 60 秒，C3 在窗口打开时快闪蓝灯。每台设备记住一台电脑，Mac 应用可以同时连接多台设备。设备进入深睡后，先按语音主键唤醒。
 
 | 状态（默认按住说话） | 主键 | 侧键 / 取消键 |
 | --- | --- | --- |
