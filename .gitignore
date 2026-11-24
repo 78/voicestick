@@ -29,6 +29,7 @@ dependencies.lock
 /tmp/
 /demos/
 /hardware/*
+!/hardware/AGENTS.md
 !/hardware/README.md
 !/hardware/README_ZH.md
 !/hardware/voicestick_*/
