@@ -94,23 +94,19 @@ static struct ble_npl_callout s_adv_retry_callout;
 #define ADV_RETRY_DELAY_MS 1000
 
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-#define BATTERY_REPORT_INTERVAL_MS (60 * 1000)
-#define BATTERY_REPORT_DELTA_PERCENT 2
-
 typedef struct {
     int percent;
     bool charging;
     bool usb_powered;
 } battery_status_t;
 
-/* The app task supplies the latest sample. NimBLE owns the last report and its timer. */
+/* The app task supplies the latest sample. NimBLE tracks what it sent. */
 static portMUX_TYPE s_battery_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static battery_status_t s_battery_status = {.percent = -1};
 static battery_status_t s_last_battery_report = {.percent = -1};
 static struct ble_npl_event s_battery_status_event;
-static struct ble_npl_callout s_battery_report_timer;
 
-static void report_battery_status(bool periodic)
+static void report_battery_status(void)
 {
     if (!s_state_subscribed) {
         return;
@@ -123,8 +119,7 @@ static void report_battery_status(bool periodic)
         return;
     }
 
-    if (!periodic && s_last_battery_report.percent >= 0 &&
-        abs(status.percent - s_last_battery_report.percent) < BATTERY_REPORT_DELTA_PERCENT &&
+    if (status.percent == s_last_battery_report.percent &&
         status.charging == s_last_battery_report.charging &&
         status.usb_powered == s_last_battery_report.usb_powered) {
         return;
@@ -143,27 +138,12 @@ static void report_battery_status(bool periodic)
     }
 
     s_last_battery_report = status;
-    if (ble_npl_callout_reset(&s_battery_report_timer, pdMS_TO_TICKS(BATTERY_REPORT_INTERVAL_MS)) != BLE_NPL_OK) {
-        s_last_battery_report.percent = -1;
-    }
 }
 
 static void battery_status_event_cb(struct ble_npl_event *event)
 {
     (void)event;
-    report_battery_status(false);
-}
-
-static void battery_report_timer_cb(struct ble_npl_event *event)
-{
-    (void)event;
-    report_battery_status(true);
-}
-
-static void stop_battery_reporting(void)
-{
-    ble_npl_callout_stop(&s_battery_report_timer);
-    s_last_battery_report.percent = -1;
+    report_battery_status();
 }
 
 void voice_ble_update_battery_status(int percent, bool charging, bool usb_powered)
@@ -599,7 +579,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_audio_subscribed = false;
         s_state_subscribed = false;
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-        stop_battery_reporting();
+        s_last_battery_report.percent = -1;
 #endif
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_itvl_target = CONN_ITVL_NONE;
@@ -625,19 +605,18 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             s_audio_subscribed = event->subscribe.cur_notify;
         } else if (event->subscribe.attr_handle == s_state_attr_handle) {
             s_state_subscribed = event->subscribe.cur_notify;
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+            s_last_battery_report.percent = -1;
+#endif
             if (s_state_subscribed) {
                 esp_err_t rc = voice_ble_send_device_info();
                 if (rc != ESP_OK) {
                     ESP_LOGW(TAG, "device_info send failed err=0x%x", rc);
                 }
-            }
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-            if (s_state_subscribed) {
-                report_battery_status(true);
-            } else {
-                stop_battery_reporting();
-            }
+                report_battery_status();
 #endif
+            }
         }
         return 0;
 
@@ -666,7 +645,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_MTU:
         ESP_LOGD(TAG, "mtu=%u", event->mtu.value);
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-        report_battery_status(false);
+        report_battery_status();
 #endif
         return 0;
 
@@ -814,8 +793,6 @@ esp_err_t voice_ble_init(void)
                          adv_retry_callout_cb, NULL);
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
     ble_npl_event_init(&s_battery_status_event, battery_status_event_cb, NULL);
-    ble_npl_callout_init(&s_battery_report_timer, nimble_port_get_dflt_eventq(),
-                         battery_report_timer_cb, NULL);
 #endif
 
     nimble_port_freertos_init(nimble_host_task);

@@ -15,7 +15,7 @@ In both cases, finish by redeploying the website and verifying all update URLs.
 
 ## Version Sources
 
-Update both version files before creating the release tag:
+Update both version files before creating a combined desktop and firmware release tag:
 
 ```text
 VERSION
@@ -31,6 +31,16 @@ v0.2.4
 ```
 
 The GitHub Actions release workflow validates that `v<VERSION>` matches the pushed tag.
+
+## Firmware-Only Release
+
+Set the firmware version in `firmware/version.txt` and push the matching
+`firmware-v<version>` tag. For example, `firmware-v0.3.6` builds both boards,
+publishes the OTA and merged images, and updates their OSS manifests. The
+desktop apps keep their separate version and release tags.
+
+Verify that both firmware manifests report the new version and that their OTA
+and merged URLs are reachable.
 
 ## Standard Flow
 

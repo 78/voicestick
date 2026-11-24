@@ -17,7 +17,7 @@ typedef struct {
     const char *name;  /* BLE button role, e.g. "primary" */
 } board_button_t;
 
-/* Called from an ISR when the charger or USB state may have changed. */
+/* Called from ISR or task context when the charger or USB state may have changed. */
 typedef void (*board_power_event_cb_t)(void);
 
 /* Hardware id sent in device_info; the desktop app only offers OTA images

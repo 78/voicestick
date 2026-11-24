@@ -2,11 +2,11 @@ name: Release Build
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "firmware-v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build, for example v0.1.0. Must match VERSION."
+        description: "Release tag, for example v0.1.0 or firmware-v0.1.0."
         required: true
 
 permissions:
@@ -45,22 +45,23 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
-      - name: Resolve tag and validate VERSION
+      - name: Resolve firmware version
         id: ver
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              tag="${{ inputs.tag }}"
+          version="$(cat firmware/version.txt)"
+          if [[ "$RELEASE_TAG" == firmware-v* ]]; then
+              expected_tag="firmware-v${version}"
           else
-              tag="${GITHUB_REF_NAME}"
+              expected_tag="v${version}"
+              test "$(cat VERSION | head -n1 | tr -d '[:space:]')" = "${version}"
           fi
-          version="$(cat VERSION | head -n1 | tr -d '[:space:]')"
-          if [ "v${version}" != "${tag}" ]; then
-              echo "::error ::tag ${tag} does not match VERSION (${version})."
+          if [ "$RELEASE_TAG" != "$expected_tag" ]; then
+              echo "::error ::tag ${RELEASE_TAG} does not match ${expected_tag}."
               exit 1
           fi
-          test "$(cat firmware/version.txt)" = "${version}"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Build firmware and merged image
@@ -129,6 +130,7 @@ jobs:
 
   build-macos:
     name: Build macOS Release
+    if: ${{ !startsWith(inputs.tag || github.ref_name, 'firmware-v') }}
     runs-on: macos-15
     steps:
       - name: Checkout
@@ -238,6 +240,9 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     needs: [build-firmware, build-macos]
+    if: >-
+      ${{ !cancelled() && needs.build-firmware.result == 'success' &&
+          (needs.build-macos.result == 'success' || startsWith(inputs.tag || github.ref_name, 'firmware-v')) }}
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
@@ -246,17 +251,49 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve tag
+      - name: Resolve tag and release assets
         id: ver
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              tag="${{ inputs.tag }}"
+          version="${RELEASE_TAG#firmware-}"
+          version="${version#v}"
+          files=(
+              "dist/voicestick-firmware-sticks3-ota-${version}.bin"
+              "dist/voicestick-firmware-sticks3-ota-${version}.bin.sha256"
+              "dist/voicestick-firmware-sticks3-merged-${version}.bin"
+              "dist/voicestick-firmware-sticks3-merged-${version}.bin.sha256"
+              "dist/manifest.json"
+              "dist/voicestick_c3/voicestick-firmware-c3-ota-${version}.bin"
+              "dist/voicestick_c3/voicestick-firmware-c3-ota-${version}.bin.sha256"
+              "dist/voicestick_c3/voicestick-firmware-c3-merged-${version}.bin"
+              "dist/voicestick_c3/voicestick-firmware-c3-merged-${version}.bin.sha256"
+              "dist/voicestick_c3/manifest-voicestick_c3.json"
+          )
+          if [[ "$RELEASE_TAG" == firmware-v* ]]; then
+              name="VoiceStick Firmware ${version}"
+              make_latest=false
           else
-              tag="${GITHUB_REF_NAME}"
+              name="VoiceStick ${version}"
+              make_latest=
+              files+=(
+                  "dist/VoiceStick-${version}.dmg"
+                  "dist/VoiceStick-${version}.dmg.sha256"
+                  "dist/VoiceStick-${version}.zip"
+                  "dist/VoiceStick-${version}.zip.sha256"
+                  "dist/VoiceStick-${version}.signature"
+              )
           fi
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          {
+              echo "tag=${RELEASE_TAG}"
+              echo "version=${version}"
+              echo "name=${name}"
+              echo "make_latest=${make_latest}"
+              echo 'files<<RELEASE_FILES'
+              printf '%s\n' "${files[@]}"
+              echo 'RELEASE_FILES'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -306,25 +343,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
-          name: VoiceStick ${{ steps.ver.outputs.version }}
+          name: ${{ steps.ver.outputs.name }}
+          make_latest: ${{ steps.ver.outputs.make_latest }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            dist/VoiceStick-${{ steps.ver.outputs.version }}.dmg
-            dist/VoiceStick-${{ steps.ver.outputs.version }}.dmg.sha256
-            dist/VoiceStick-${{ steps.ver.outputs.version }}.zip
-            dist/VoiceStick-${{ steps.ver.outputs.version }}.zip.sha256
-            dist/VoiceStick-${{ steps.ver.outputs.version }}.signature
-            dist/voicestick-firmware-sticks3-ota-${{ steps.ver.outputs.version }}.bin
-            dist/voicestick-firmware-sticks3-ota-${{ steps.ver.outputs.version }}.bin.sha256
-            dist/voicestick-firmware-sticks3-merged-${{ steps.ver.outputs.version }}.bin
-            dist/voicestick-firmware-sticks3-merged-${{ steps.ver.outputs.version }}.bin.sha256
-            dist/manifest.json
-            dist/voicestick_c3/voicestick-firmware-c3-ota-${{ steps.ver.outputs.version }}.bin
-            dist/voicestick_c3/voicestick-firmware-c3-ota-${{ steps.ver.outputs.version }}.bin.sha256
-            dist/voicestick_c3/voicestick-firmware-c3-merged-${{ steps.ver.outputs.version }}.bin
-            dist/voicestick_c3/voicestick-firmware-c3-merged-${{ steps.ver.outputs.version }}.bin.sha256
-            dist/voicestick_c3/manifest-voicestick_c3.json
+          files: ${{ steps.ver.outputs.files }}
 
   request-website-deploy:
     name: Request Website Deploy

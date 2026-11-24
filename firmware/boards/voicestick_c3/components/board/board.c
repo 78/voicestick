@@ -2,9 +2,8 @@
 
 #include <stdlib.h>
 
+#include "adc_battery_estimation.h"
 #include "driver/gpio.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -12,16 +11,17 @@
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 
 #include "voicestick_c3.h"
 
 static const char *TAG = "board";
 
-#define BATTERY_ADC_SAMPLES 16
 #define BATTERY_CRITICAL_MV 3500
-/* Consecutive low readings (10 s apart) before shutting down, so a load
- * transient during a BLE burst does not trigger it. */
+/* Require consecutive low readings so a brief load transient cannot trigger shutdown. */
 #define BATTERY_CRITICAL_READINGS 3
+/* The TP4054 can pulse CHRG when powered without a battery. */
+#define CHARGE_DEBOUNCE_TICKS pdMS_TO_TICKS(2200)
 
 static const board_button_t s_buttons[] = {
     {VS_PIN_KEY_MAIN, "primary"},
@@ -30,21 +30,20 @@ static const board_button_t s_buttons[] = {
     {VS_PIN_KEY_NEXT, "next"},
 };
 
-/* Resting LiPo voltage to remaining capacity, light load. */
-static const struct {
-    int mv;
-    int percent;
-} s_battery_curve[] = {
-    {3500, 0}, {3600, 8}, {3680, 20}, {3740, 35}, {3800, 50},
-    {3870, 62}, {3950, 75}, {4050, 88}, {4150, 100},
+/* Resting LiPo voltage to remaining capacity, in descending voltage order. */
+static const battery_point_t s_battery_curve[] = {
+    {4.15f, 100}, {4.05f, 88}, {3.95f, 75}, {3.87f, 62}, {3.80f, 50},
+    {3.74f, 35}, {3.68f, 20}, {3.60f, 8}, {BATTERY_CRITICAL_MV / 1000.0f, 0},
 };
 
 static board_power_event_cb_t s_power_event_cb;
 static esp_pm_lock_handle_t s_usb_pm_lock;
 static bool s_usb_pm_locked;
-static adc_oneshot_unit_handle_t s_adc;
-static adc_cali_handle_t s_adc_cali;
-static adc_channel_t s_adc_channel;
+static TimerHandle_t s_charge_debounce_timer;
+static portMUX_TYPE s_charge_lock = portMUX_INITIALIZER_UNLOCKED;
+static TickType_t s_charge_edge_tick;
+static bool s_charging;
+static adc_battery_estimation_handle_t s_battery_estimator;
 static int s_low_battery_readings;
 
 static portMUX_TYPE s_periph_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -81,36 +80,47 @@ size_t board_buttons(const board_button_t **buttons)
     return sizeof(s_buttons) / sizeof(s_buttons[0]);
 }
 
-static esp_err_t init_battery_adc(void)
+static bool battery_is_charging(void *arg)
+{
+    (void)arg;
+    /* CHRG floats without VBUS; only trust it while USB is present. */
+    if (!gpio_get_level(VS_PIN_VBUS_SENSE)) {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_charge_lock);
+    if (s_usb_pm_locked && xTaskGetTickCount() - s_charge_edge_tick >= CHARGE_DEBOUNCE_TICKS) {
+        s_charging = gpio_get_level(VS_PIN_CHRG) == 0;
+    }
+    const bool charging = s_charging;
+    taskEXIT_CRITICAL(&s_charge_lock);
+    return charging;
+}
+
+static esp_err_t init_battery_estimator(void)
 {
     adc_unit_t unit;
-    esp_err_t err = adc_oneshot_io_to_channel(VS_PIN_BAT_ADC, &unit, &s_adc_channel);
+    adc_channel_t channel;
+    esp_err_t err = adc_oneshot_io_to_channel(VS_PIN_BAT_ADC, &unit, &channel);
     if (err != ESP_OK) {
         return err;
     }
 
-    const adc_oneshot_unit_init_cfg_t unit_config = {.unit_id = unit};
-    err = adc_oneshot_new_unit(&unit_config, &s_adc);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    const adc_oneshot_chan_cfg_t channel_config = {
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    adc_battery_estimation_t config = {
+        .internal = {
+            .adc_unit = unit,
+            .adc_bitwidth = ADC_BITWIDTH_DEFAULT,
+            .adc_atten = ADC_ATTEN_DB_12,
+        },
+        .adc_channel = channel,
+        .upper_resistor = 1000000.0f,
+        .lower_resistor = 1000000.0f,
+        .battery_points = s_battery_curve,
+        .battery_points_count = sizeof(s_battery_curve) / sizeof(s_battery_curve[0]),
+        .charging_detect_cb = battery_is_charging,
     };
-    err = adc_oneshot_config_channel(s_adc, s_adc_channel, &channel_config);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    const adc_cali_curve_fitting_config_t cali_config = {
-        .unit_id = unit,
-        .chan = s_adc_channel,
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-    };
-    return adc_cali_create_scheme_curve_fitting(&cali_config, &s_adc_cali);
+    s_battery_estimator = adc_battery_estimation_create(&config);
+    return s_battery_estimator ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t board_init(void)
@@ -157,9 +167,9 @@ esp_err_t board_init(void)
     gpio_sleep_sel_dis(VS_PIN_PERIPH_EN);
     gpio_sleep_sel_dis(VS_PIN_CHRG);
 
-    err = init_battery_adc();
+    err = init_battery_estimator();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "battery ADC init failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "battery estimator init failed: %s", esp_err_to_name(err));
     }
 #ifdef CONFIG_VOICE_STICK_PDM_CAPTURE
     voicestick_pdm_capture_start();
@@ -176,6 +186,28 @@ static void IRAM_ATTR vbus_isr(void *arg)
     }
 }
 
+static void IRAM_ATTR charge_isr(void *arg)
+{
+    (void)arg;
+    taskENTER_CRITICAL_ISR(&s_charge_lock);
+    s_charge_edge_tick = xTaskGetTickCountFromISR();
+    taskEXIT_CRITICAL_ISR(&s_charge_lock);
+
+    BaseType_t high_task_woken = pdFALSE;
+    xTimerResetFromISR(s_charge_debounce_timer, &high_task_woken);
+    if (high_task_woken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void charge_debounce_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    if (gpio_get_level(VS_PIN_VBUS_SENSE) && s_power_event_cb) {
+        s_power_event_cb();
+    }
+}
+
 static esp_err_t arm_vbus_event(void)
 {
     const bool usb_powered = gpio_get_level(VS_PIN_VBUS_SENSE) != 0;
@@ -185,11 +217,23 @@ static esp_err_t arm_vbus_event(void)
         if (err != ESP_OK) {
             return err;
         }
+        taskENTER_CRITICAL(&s_charge_lock);
         s_usb_pm_locked = usb_powered;
+        s_charge_edge_tick = xTaskGetTickCount();
+        s_charging = false;
+        taskEXIT_CRITICAL(&s_charge_lock);
+
+        if (usb_powered) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_intr_enable(VS_PIN_CHRG));
+            (void)xTimerReset(s_charge_debounce_timer, 0);
+        } else {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_intr_disable(VS_PIN_CHRG));
+            (void)xTimerStop(s_charge_debounce_timer, 0);
+        }
     }
 
-    // Keep VBUS interrupts while awake and leave GPIO5 isolated in light sleep.
-    esp_err_t err = gpio_set_intr_type(VS_PIN_VBUS_SENSE, usb_powered ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
+    // Set the level for both the interrupt and the light-sleep wake source.
+    esp_err_t err = gpio_wakeup_enable(VS_PIN_VBUS_SENSE, usb_powered ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
     if (err != ESP_OK) {
         return err;
     }
@@ -200,7 +244,12 @@ esp_err_t board_power_events_init(board_power_event_cb_t callback)
 {
     s_power_event_cb = callback;
 
-    // Keep monitoring CHRG by polling because the TP4054 toggles it without a battery.
+    s_charge_debounce_timer = xTimerCreate("charge_debounce", CHARGE_DEBOUNCE_TICKS,
+                                          pdFALSE, NULL, charge_debounce_cb);
+    if (!s_charge_debounce_timer) {
+        return ESP_ERR_NO_MEM;
+    }
+
     esp_err_t err = esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "usb_vbus", &s_usb_pm_lock);
     if (err != ESP_OK) {
         return err;
@@ -217,6 +266,17 @@ esp_err_t board_power_events_init(board_power_event_cb_t callback)
     if (err != ESP_OK) {
         return err;
     }
+    // Adding an ISR enables the pin. Set the trigger only after masking it.
+    err = gpio_isr_handler_add(VS_PIN_CHRG, charge_isr, NULL);
+    if (err == ESP_OK) {
+        err = gpio_intr_disable(VS_PIN_CHRG);
+    }
+    if (err == ESP_OK) {
+        err = gpio_set_intr_type(VS_PIN_CHRG, GPIO_INTR_ANYEDGE);
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
     return arm_vbus_event();
 }
 
@@ -225,62 +285,34 @@ void board_power_events_rearm(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(arm_vbus_event());
 }
 
-static esp_err_t read_battery_mv(int *battery_mv)
-{
-    if (!s_adc || !s_adc_cali) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    int sum = 0;
-    for (int i = 0; i < BATTERY_ADC_SAMPLES; ++i) {
-        int raw = 0;
-        esp_err_t err = adc_oneshot_read(s_adc, s_adc_channel, &raw);
-        if (err != ESP_OK) {
-            return err;
-        }
-        sum += raw;
-    }
-
-    int adc_mv = 0;
-    esp_err_t err = adc_cali_raw_to_voltage(s_adc_cali, sum / BATTERY_ADC_SAMPLES, &adc_mv);
-    if (err == ESP_OK) {
-        *battery_mv = adc_mv * 2;
-    }
-    return err;
-}
-
-static int battery_percent(int battery_mv)
-{
-    const size_t points = sizeof(s_battery_curve) / sizeof(s_battery_curve[0]);
-    if (battery_mv <= s_battery_curve[0].mv) {
-        return 0;
-    }
-    for (size_t i = 1; i < points; ++i) {
-        if (battery_mv < s_battery_curve[i].mv) {
-            const int span_mv = s_battery_curve[i].mv - s_battery_curve[i - 1].mv;
-            const int span_percent = s_battery_curve[i].percent - s_battery_curve[i - 1].percent;
-            return s_battery_curve[i - 1].percent +
-                   (battery_mv - s_battery_curve[i - 1].mv) * span_percent / span_mv;
-        }
-    }
-    return 100;
-}
-
 esp_err_t board_battery_level(int *level_percent)
 {
-    int battery_mv = 0;
-    esp_err_t err = read_battery_mv(&battery_mv);
+    if (!level_percent) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Check shutdown against the latest voltage sample, before capacity smoothing. */
+    float voltage;
+    esp_err_t err = adc_battery_estimation_get_voltage(s_battery_estimator, &voltage);
     if (err != ESP_OK) {
         return err;
     }
 
-    if (battery_mv < BATTERY_CRITICAL_MV) {
-        ++s_low_battery_readings;
-    } else {
+    const int battery_mv = (int)(voltage * 1000.0f + 0.5f);
+    if (battery_mv >= BATTERY_CRITICAL_MV) {
         s_low_battery_readings = 0;
+    } else if (s_low_battery_readings < BATTERY_CRITICAL_READINGS) {
+        ++s_low_battery_readings;
     }
+
+    float capacity;
+    err = adc_battery_estimation_get_capacity(s_battery_estimator, &capacity);
+    if (err != ESP_OK) {
+        return err;
+    }
+
     static int last_percent = -1;
-    *level_percent = battery_percent(battery_mv);
+    *level_percent = (int)(capacity + 0.5f);
     if (last_percent < 0 || abs(*level_percent - last_percent) >= 5) {
         ESP_LOGI(TAG, "battery %d mV (%d%%)", battery_mv, *level_percent);
         last_percent = *level_percent;
@@ -296,8 +328,7 @@ esp_err_t board_usb_powered(bool *usb_powered)
 
 esp_err_t board_battery_charging(bool *charging)
 {
-    /* CHRG floats without VBUS; only trust it while USB is present. */
-    *charging = gpio_get_level(VS_PIN_VBUS_SENSE) == 1 && gpio_get_level(VS_PIN_CHRG) == 0;
+    *charging = battery_is_charging(NULL);
     return ESP_OK;
 }
 

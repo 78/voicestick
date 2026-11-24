@@ -24,12 +24,11 @@
 
 static const char *TAG = "voice_stick";
 
-#define BATTERY_REFRESH_FALLBACK_MS (10 * 1000)
+#define BATTERY_REFRESH_FALLBACK_US (60 * 1000000ULL)
 #define DISPLAY_DIM_TIMEOUT_MS (30 * 1000)
 #define DISPLAY_ACTIVE_BRIGHTNESS 128
 #define DISPLAY_DIM_BRIGHTNESS 32
 #define DISPLAY_DIM_TIMEOUT_US (DISPLAY_DIM_TIMEOUT_MS * 1000ULL)
-#define BATTERY_REFRESH_FALLBACK_US (BATTERY_REFRESH_FALLBACK_MS * 1000ULL)
 #define DEEP_SLEEP_TIMEOUT_US (CONFIG_VOICE_STICK_DEEP_SLEEP_TIMEOUT_S * 1000000ULL)
 #define MAX_BUTTONS 4
 
@@ -833,8 +832,13 @@ static esp_err_t init_battery_refresh_timer(void)
     return esp_timer_start_periodic(s_battery_refresh_timer, BATTERY_REFRESH_FALLBACK_US);
 }
 
-static void IRAM_ATTR power_event_isr_cb(void)
+static void IRAM_ATTR power_event_cb(void)
 {
+    if (!xPortInIsrContext()) {
+        queue_app_event(APP_EVENT_POWER_IRQ);
+        return;
+    }
+
     BaseType_t high_task_woken = pdFALSE;
     queue_app_event_from_isr(APP_EVENT_POWER_IRQ, &high_task_woken);
     if (high_task_woken) {
@@ -917,7 +921,7 @@ void app_main(void)
 
     update_battery_status();
     ESP_ERROR_CHECK(init_battery_refresh_timer());
-    ESP_ERROR_CHECK(board_power_events_init(power_event_isr_cb));
+    ESP_ERROR_CHECK(board_power_events_init(power_event_cb));
 
 #if CONFIG_FREERTOS_USE_TICKLESS_IDLE
     const esp_pm_config_t pm_config = {
