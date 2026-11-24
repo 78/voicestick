@@ -86,6 +86,11 @@ jobs:
           set -euo pipefail
           sudo chown -R "$(id -u):$(id -g)" dist
           version="${{ steps.ver.outputs.version }}"
+          minimum_app_versions="$(jq -ce '
+            select(type == "object" and length > 0)
+            | select(all(keys[]; . == "macos" or . == "windows" or . == "linux"))
+            | select(all(.[]; type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+$")))
+          ' firmware/minimum-app-versions.json)"
           public_base="${ALIYUN_OSS_PUBLIC_BASE_URL:-https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com}"
           prefix="${ALIYUN_OSS_PREFIX:-voicestick/firmwares}"
           public_base="${public_base%/}"
@@ -102,11 +107,13 @@ jobs:
           merged_sha="$(awk '{print $1}' "${merged}.sha256")"
           ota_size="$(wc -c < "${ota}" | tr -d ' ')"
           merged_size="$(wc -c < "${merged}" | tr -d ' ')"
-          python3 - <<PY
+          python3 - "$minimum_app_versions" <<PY
           import json
+          import sys
           manifest = {
               "hardware": "${{ matrix.hardware }}",
               "version": "${version}",
+              "minimum_app_versions": json.loads(sys.argv[1]),
               "ota_url": "${public_base}/${prefix}/${version}/${ota}",
               "ota_sha256": "${ota_sha}",
               "ota_size": int("${ota_size}"),
@@ -351,7 +358,7 @@ jobs:
 
   request-website-deploy:
     name: Request Website Deploy
-    needs: [build-macos, publish-release]
+    needs: publish-release
     runs-on: ubuntu-latest
     steps:
       - name: Trigger website deploy on main

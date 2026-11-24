@@ -69,13 +69,13 @@ cd website
 npm run build
 ```
 
-The generated `dist/` directory is deployed to GitHub Pages. `public/appcast.xml` is copied to `dist/appcast.xml`. The firmware manifest itself is hosted on OSS, not GitHub Pages.
+The generated `dist/` directory is deployed to GitHub Pages. It includes `appcast.xml` and each board's manifest at `firmwares/<board>/latest/manifest.json`. The deployment copies the manifests from OSS into the `m5stack_stick_s3` and `voicestick_c3` directories. The firmware image URLs point to OSS.
 
 ## GitHub Actions
 
-- `.github/workflows/release.yml` runs on `v*` tags or manual dispatch. It builds the macOS app, signs and notarizes the DMG, uploads DMG/ZIP/signature assets to the matching GitHub Release, builds versioned OTA and merged firmware images, publishes the firmware manifest to OSS, rewrites `public/appcast.xml`, builds the Vue site, and deploys `website/dist` to GitHub Pages.
+- `.github/workflows/release.yml` runs on `v*` or `firmware-v*` tags or manual dispatch. It publishes versioned firmware images and manifests to OSS and GitHub Releases. Combined releases also publish the signed macOS app. The release workflow then requests a GitHub Pages deployment.
 - `scripts/build-msi.bat` runs on the local Windows signing machine with the USB signing key inserted. Upload the generated `VoiceStick_<version>.msi` to the matching GitHub Release.
-- `.github/workflows/deploy-website.yml` runs when `website/**` changes on `main` or when manually dispatched after uploading a Windows MSI. Before deploying, it reads the current live appcast and latest GitHub Release, then regenerates `public/appcast.xml` from the latest ZIP/signature and optional MSI assets. If the latest Release has no Windows MSI yet, the previous Windows item is preserved.
+- `.github/workflows/deploy-website.yml` runs on website changes on `main`, after a release, or when manually dispatched after uploading a Windows MSI. It regenerates `public/appcast.xml` from the latest ZIP/signature and MSI assets, copies both OTA manifests, and deploys the built website. The macOS and Windows packages can come from different releases.
 
 Required repository secrets for release builds:
 

@@ -89,6 +89,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController.onForgetDevice = { [weak self] deviceID in
             self?.forgetDevice(deviceID)
         }
+        statusController.onCheckFirmwareDevice = { [weak self] deviceID in
+            self?.checkFirmwareUpdates(for: deviceID)
+        }
         statusController.onUpdateFirmwareDevice = { [weak self] deviceID in
             self?.updateFirmwareFromLatest(for: deviceID)
         }
@@ -276,6 +279,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pairDeviceWindowController = controller
         showDockIconWhileWindowVisible(controller)
         controller.show()
+    }
+
+    private func checkFirmwareUpdates(for deviceID: String) {
+        coordinator?.checkFirmwareUpdatesNow(for: deviceID) { result in
+            let alert = NSAlert()
+            switch result {
+            case .success(let versions):
+                let hasUpdate = FirmwareVersion.isVersion(versions.current, olderThan: versions.latest)
+                alert.messageText = hasUpdate ? "Firmware update available" : "No newer firmware available"
+                alert.informativeText = "VS-\(deviceID) is running firmware \(versions.current). The latest firmware is \(versions.latest)."
+            case .failure(let error):
+                alert.alertStyle = .warning
+                if case FirmwareManifestClient.FirmwareManifestError.appUpdateRequired = error {
+                    alert.messageText = "Update VoiceStick First"
+                } else {
+                    alert.messageText = "Firmware update check failed"
+                }
+                alert.informativeText = error.localizedDescription
+            }
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
     }
 
     private func updateFirmwareFromLatest(for deviceID: String) {

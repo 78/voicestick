@@ -168,9 +168,9 @@ struct AppConfig {
     static let volcengineWebSocketURL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
     static let websiteURL = URL(string: "https://78.github.io/voicestick/")!
     static let firmwareManifestURLs: [String: URL] = {
-        let base = URL(string: "https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/")!
+        let base = websiteURL.appendingPathComponent("firmwares", isDirectory: true)
         return [
-            "stick_s3": base.appendingPathComponent("latest/manifest.json"),
+            "stick_s3": base.appendingPathComponent("m5stack_stick_s3/latest/manifest.json"),
             "voicestick_c3": base.appendingPathComponent("voicestick_c3/latest/manifest.json")
         ]
     }()

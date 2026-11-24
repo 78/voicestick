@@ -76,6 +76,7 @@ final class StatusController {
     var onOpenSettings: (() -> Void)?
     var onPairDevice: (() -> Void)?
     var onForgetDevice: ((String) -> Void)?
+    var onCheckFirmwareDevice: ((String) -> Void)?
     var onUpdateFirmwareDevice: ((String) -> Void)?
     var onSetDeviceThemeColor: ((String, OverlayThemeColor) -> Void)?
     var onSetDeviceOverlayPosition: ((String, OverlayPosition) -> Void)?
@@ -454,12 +455,20 @@ final class StatusController {
         submenu.addItem(currentItem)
 
         if info?.isChecking == true {
-            let checkingItem = NSMenuItem(title: "Checking for Updates", action: nil, keyEquivalent: "")
+            let checkingItem = NSMenuItem(title: "Checking for Firmware Updates…", action: nil, keyEquivalent: "")
             checkingItem.isEnabled = false
             checkingItem.image = Self.symbolImage(named: "arrow.triangle.2.circlepath", accessibilityDescription: "Checking")
             submenu.addItem(checkingItem)
             return
         }
+
+        let checkItem = makeMenuItem(
+            title: "Check for Firmware Updates…",
+            symbolName: "arrow.triangle.2.circlepath",
+            action: #selector(checkFirmwareForDevice)
+        )
+        checkItem.representedObject = deviceID
+        submenu.addItem(checkItem)
 
         if let errorMessage = info?.errorMessage {
             let errorItem = NSMenuItem(title: "Update Check Failed", action: nil, keyEquivalent: "")
@@ -479,11 +488,6 @@ final class StatusController {
             updateItem.representedObject = deviceID
             updateItem.isEnabled = isConnected
             submenu.addItem(updateItem)
-        } else if info?.latestVersion != nil && info?.currentVersion != nil {
-            let upToDateItem = NSMenuItem(title: "Firmware Up to Date", action: nil, keyEquivalent: "")
-            upToDateItem.isEnabled = false
-            upToDateItem.image = Self.symbolImage(named: "checkmark.circle", accessibilityDescription: "Firmware Up to Date")
-            submenu.addItem(upToDateItem)
         }
     }
 
@@ -728,6 +732,11 @@ final class StatusController {
     @objc private func forgetConnectedDevice(_ sender: NSMenuItem) {
         guard let deviceID = sender.representedObject as? String else { return }
         onForgetDevice?(deviceID)
+    }
+
+    @objc private func checkFirmwareForDevice(_ sender: NSMenuItem) {
+        guard let deviceID = sender.representedObject as? String else { return }
+        onCheckFirmwareDevice?(deviceID)
     }
 
     @objc private func updateFirmwareForDevice(_ sender: NSMenuItem) {

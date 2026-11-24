@@ -90,11 +90,36 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Copy firmware manifests for GitHub Pages
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL }}
+          ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
+        run: |
+          set -euo pipefail
+          base="${ALIYUN_OSS_PUBLIC_BASE_URL:-https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com}"
+          prefix="${ALIYUN_OSS_PREFIX:-voicestick/firmwares}"
+          prefix="${prefix#/}"
+          source="${base%/}/${prefix%/}"
+          for hardware in stick_s3 voicestick_c3; do
+            oss_subdir="/$hardware"
+            pages_board="$hardware"
+            if [[ "$hardware" == stick_s3 ]]; then
+              oss_subdir=""
+              pages_board="m5stack_stick_s3"
+            fi
+            target="website/public/firmwares/$pages_board/latest"
+            mkdir -p "$target"
+            curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 -H 'Cache-Control: no-cache' \
+              "$source$oss_subdir/latest/manifest.json" -o "$target/manifest.json"
+            jq -e --arg hardware "$hardware" '.hardware == $hardware and (.version | type == "string")' \
+              "$target/manifest.json" > /dev/null
+          done
+
       - name: Build website
         run: npm run build
         working-directory: website
         env:
-          VITE_FIRMWARE_MANIFEST_URL: https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/manifest.json
+          VITE_FIRMWARE_MANIFEST_URL: ./firmwares/m5stack_stick_s3/latest/manifest.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

@@ -148,11 +148,12 @@ final class VoiceStickCoordinator {
     private var lastRecoverablePeripheralID: UUID?
     private var pairedDeviceIDs: [String]
     private var firmwareInfoByDeviceID: [String: DeviceFirmwareInfo] = [:]
+    private typealias FirmwareFeedCompletion = (Result<FirmwareManifest, Error>) -> Void
     private struct FirmwareFeed {
         var manifest: FirmwareManifest?
         var lastChecked: Date?
         var isChecking = false
-        var showErrors = false
+        var completions: [FirmwareFeedCompletion] = []
         var errorMessage: String?
     }
     private var firmwareFeeds: [String: FirmwareFeed] = [:]
@@ -210,7 +211,7 @@ final class VoiceStickCoordinator {
 
         configureASRCallbacks()
         ble.start()
-        checkFirmwareUpdatesIfNeeded(force: false, showErrors: false)
+        checkFirmwareUpdatesIfNeeded(force: false)
         startFirmwareManifestRefreshTimer()
     }
 
@@ -359,13 +360,22 @@ final class VoiceStickCoordinator {
         ble.cancelFirmwareUpdate()
     }
 
-    func checkFirmwareUpdatesNow() {
-        checkFirmwareUpdatesIfNeeded(force: true, showErrors: true)
+    func checkFirmwareUpdatesNow(for deviceID: String,
+                                 completion: @escaping (Result<(current: String, latest: String), Error>) -> Void) {
+        guard let info = firmwareInfoByDeviceID[deviceID], let current = info.currentVersion,
+              let hardware = info.hardware, let url = AppConfig.firmwareManifestURLs[hardware] else {
+            completion(.failure(FirmwareManifestClient.FirmwareManifestError.deviceInfoUnavailable))
+            return
+        }
+        checkFirmwareFeed(for: hardware, at: url, force: true) { result in
+            completion(result.map { (current, $0.version) })
+        }
+        refreshFirmwareAvailability()
     }
 
     func checkFirmwareAfterPairing(deviceID: String) {
         pendingFirmwareUpdatePromptDeviceIDs.insert(deviceID)
-        checkFirmwareUpdatesIfNeeded(force: true, showErrors: false)
+        checkFirmwareUpdatesIfNeeded(force: true)
         refreshFirmwareAvailability()
     }
 
@@ -1377,7 +1387,7 @@ final class VoiceStickCoordinator {
         }
         firmwareInfoByDeviceID[deviceID] = info
         if let hardware = info.hardware, let url = AppConfig.firmwareManifestURLs[hardware] {
-            checkFirmwareFeed(for: hardware, at: url, force: false, showErrors: false)
+            checkFirmwareFeed(for: hardware, at: url, force: false)
         }
         refreshFirmwareAvailability()
     }
@@ -1385,23 +1395,25 @@ final class VoiceStickCoordinator {
     private func startFirmwareManifestRefreshTimer() {
         firmwareManifestRefreshTimer?.invalidate()
         firmwareManifestRefreshTimer = Timer.scheduledTimer(withTimeInterval: 60 * 60, repeats: true) { [weak self] _ in
-            self?.checkFirmwareUpdatesIfNeeded(force: false, showErrors: false)
+            self?.checkFirmwareUpdatesIfNeeded(force: false)
         }
     }
 
-    private func checkFirmwareUpdatesIfNeeded(force: Bool, showErrors: Bool) {
+    private func checkFirmwareUpdatesIfNeeded(force: Bool) {
         for (hardware, url) in AppConfig.firmwareManifestURLs {
-            checkFirmwareFeed(for: hardware, at: url, force: force, showErrors: showErrors)
+            checkFirmwareFeed(for: hardware, at: url, force: force)
         }
         refreshFirmwareAvailability()
     }
 
-    private func checkFirmwareFeed(for hardware: String, at url: URL, force: Bool, showErrors: Bool) {
+    private func checkFirmwareFeed(for hardware: String, at url: URL, force: Bool,
+                                   completion: FirmwareFeedCompletion? = nil) {
         var feed = firmwareFeeds[hardware] ?? FirmwareFeed()
+        if let completion {
+            feed.completions.append(completion)
+        }
         if feed.isChecking {
-            if showErrors {
-                firmwareFeeds[hardware]?.showErrors = true
-            }
+            firmwareFeeds[hardware] = feed
             return
         }
         if !force, let lastChecked = feed.lastChecked,
@@ -1409,25 +1421,35 @@ final class VoiceStickCoordinator {
             return
         }
         feed.isChecking = true
-        feed.showErrors = showErrors
         feed.errorMessage = nil
         firmwareFeeds[hardware] = feed
         firmwareManifestClient.fetchManifest(at: url, for: hardware) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self, var feed = self.firmwareFeeds[hardware] else { return }
                 feed.isChecking = false
+                let completions = feed.completions
+                feed.completions.removeAll()
                 switch result {
                 case .success(let manifest):
                     feed.manifest = manifest
                     feed.lastChecked = Date()
                 case .failure(let error):
                     NSLog("Firmware manifest check failed for \(hardware): \(error.localizedDescription)")
-                    if feed.showErrors {
+                    switch error {
+                    case FirmwareManifestClient.FirmwareManifestError.appUpdateRequired,
+                         FirmwareManifestClient.FirmwareManifestError.platformNotSupported:
+                        feed.manifest = nil
+                        feed.lastChecked = nil
                         feed.errorMessage = error.localizedDescription
+                    default:
+                        if !completions.isEmpty {
+                            feed.errorMessage = error.localizedDescription
+                        }
                     }
                 }
                 self.firmwareFeeds[hardware] = feed
                 self.refreshFirmwareAvailability()
+                completions.forEach { $0(result) }
             }
         }
     }

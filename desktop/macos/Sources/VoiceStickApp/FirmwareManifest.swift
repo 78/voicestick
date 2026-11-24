@@ -4,6 +4,7 @@ import Foundation
 struct FirmwareManifest: Decodable {
     let hardware: String
     let version: String
+    let minimumAppVersions: [String: String]?
     let otaURL: URL
     let otaSHA256: String
     let otaSize: Int
@@ -14,12 +15,23 @@ struct FirmwareManifest: Decodable {
     enum CodingKeys: String, CodingKey {
         case hardware
         case version
+        case minimumAppVersions = "minimum_app_versions"
         case otaURL = "ota_url"
         case otaSHA256 = "ota_sha256"
         case otaSize = "ota_size"
         case mergedURL = "merged_url"
         case mergedSHA256 = "merged_sha256"
         case mergedSize = "merged_size"
+    }
+
+    func checkMacOSAppVersion(_ appVersion: String?) throws {
+        guard let minimumAppVersions else { return }
+        guard let minimum = minimumAppVersions["macos"] else {
+            throw FirmwareManifestClient.FirmwareManifestError.platformNotSupported
+        }
+        guard FirmwareVersion.meetsMinimum(minimum, current: appVersion) else {
+            throw FirmwareManifestClient.FirmwareManifestError.appUpdateRequired(minimum)
+        }
     }
 }
 
@@ -40,6 +52,13 @@ enum FirmwareVersion {
         return current < latest
     }
 
+    static func meetsMinimum(_ minimum: String, current: String?) -> Bool {
+        guard let current = current.flatMap(ParsedVersion.init), let minimum = ParsedVersion(minimum) else {
+            return false
+        }
+        return current >= minimum
+    }
+
     private struct ParsedVersion: Comparable {
         let numbers: [Int]
         let suffix: String?
@@ -47,16 +66,15 @@ enum FirmwareVersion {
         init?(_ text: String) {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
-            let parts = trimmed.split(separator: "-", maxSplits: 1).map(String.init)
-            let numberParts = parts[0].split(separator: ".").map(String.init)
-            guard !numberParts.isEmpty else { return nil }
+            let parts = trimmed.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            let numberParts = parts[0].split(separator: ".", omittingEmptySubsequences: false)
             var parsedNumbers: [Int] = []
             for part in numberParts {
-                guard let value = Int(part) else { return nil }
+                guard let value = Int(part), value >= 0 else { return nil }
                 parsedNumbers.append(value)
             }
             numbers = parsedNumbers
-            suffix = parts.count > 1 ? parts[1] : nil
+            suffix = parts.count > 1 ? String(parts[1]) : nil
         }
 
         static func < (lhs: ParsedVersion, rhs: ParsedVersion) -> Bool {
@@ -84,13 +102,24 @@ enum FirmwareVersion {
 }
 
 final class FirmwareManifestClient {
+    private let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+
     enum FirmwareManifestError: LocalizedError {
+        case platformNotSupported
+        case appUpdateRequired(String)
+        case deviceInfoUnavailable
         case invalidResponse
         case checksumMismatch
         case sizeMismatch
 
         var errorDescription: String? {
             switch self {
+            case .platformNotSupported:
+                return "This firmware release is unavailable in the macOS app."
+            case .appUpdateRequired(let version):
+                return "Update VoiceStick for macOS to version \(version) or later before installing this firmware."
+            case .deviceInfoUnavailable:
+                return "Connect to the device and wait for its firmware version to appear."
             case .invalidResponse:
                 return "Firmware update server returned an invalid response."
             case .checksumMismatch:
@@ -127,6 +156,7 @@ final class FirmwareManifestClient {
                 guard manifest.hardware == hardware else {
                     throw FirmwareManifestError.invalidResponse
                 }
+                try manifest.checkMacOSAppVersion(self.appVersion)
                 completion(.success(manifest))
             } catch {
                 completion(.failure(error))
@@ -135,6 +165,12 @@ final class FirmwareManifestClient {
     }
 
     func downloadOTA(from manifest: FirmwareManifest, completion: @escaping (Result<Data, Error>) -> Void) {
+        do {
+            try manifest.checkMacOSAppVersion(appVersion)
+        } catch {
+            completion(.failure(error))
+            return
+        }
         URLSession.shared.dataTask(with: manifest.otaURL) { data, response, error in
             if let error {
                 completion(.failure(error))

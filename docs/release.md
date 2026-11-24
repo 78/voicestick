@@ -24,6 +24,13 @@ firmware/version.txt
 
 `VERSION` is used by the desktop packaging scripts and the GitHub release workflow. `firmware/version.txt` is the firmware version reported by the device, so it must match the release version for OTA update detection to work correctly.
 
+Set the minimum supported desktop app version for each compatible platform in
+`firmware/minimum-app-versions.json`. The workflow includes this map as
+`minimum_app_versions` in the OTA manifest. Supported keys are `macos`, `windows`,
+and `linux`. Add a platform once its app supports the firmware and can enforce
+the minimum. All supported platforms share the same firmware files for a given
+board.
+
 For release `0.2.4`, the tag must be:
 
 ```text
@@ -39,8 +46,17 @@ Set the firmware version in `firmware/version.txt` and push the matching
 publishes the OTA and merged images, and updates their OSS manifests. The
 desktop apps keep their separate version and release tags.
 
-Verify that both firmware manifests report the new version and that their OTA
-and merged URLs are reachable.
+For the firmware that introduces BLE bonding, release macOS and firmware together
+with `v0.3.7`. The updated macOS app can connect to older firmware before upgrading
+the device. Test pairing after the upgrade using the device's pairing button.
+
+Each board's `latest/manifest.json` includes the optional
+`minimum_app_versions` field. Apps that understand the field check their
+platform's entry before offering an update. Older apps ignore the field.
+GitHub Pages serves the manifests for current clients. The release also
+updates the existing OSS manifests for installed clients that use those URLs.
+Verify that both Pages manifests report the new firmware and minimum app
+versions and that their OTA and merged URLs are reachable.
 
 ## Standard Flow
 
@@ -74,7 +90,10 @@ voicestick/firmwares/voicestick_c3/<version>/
 voicestick/firmwares/voicestick_c3/latest/
 ```
 
-After publishing the GitHub Release, the workflow requests a website deploy so the appcast is refreshed.
+After publishing a combined or firmware-only GitHub Release, the workflow
+requests a Pages deployment. The deployment refreshes the appcast and copies
+the current manifests from OSS. The firmware image URLs continue pointing to
+OSS.
 
 ## Windows First
 
@@ -143,8 +162,8 @@ Stable update endpoints:
 
 ```text
 https://78.github.io/voicestick/appcast.xml
-https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/manifest.json
-https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/voicestick_c3/latest/manifest.json
+https://78.github.io/voicestick/firmwares/m5stack_stick_s3/latest/manifest.json
+https://78.github.io/voicestick/firmwares/voicestick_c3/latest/manifest.json
 ```
 
 For version `0.2.4`, the appcast should contain:
@@ -165,7 +184,8 @@ Use `HEAD` requests or a browser to confirm every URL returns `200`.
 
 ```powershell
 Invoke-WebRequest -UseBasicParsing https://78.github.io/voicestick/appcast.xml
-Invoke-WebRequest -UseBasicParsing https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/manifest.json
+Invoke-WebRequest -UseBasicParsing https://78.github.io/voicestick/firmwares/m5stack_stick_s3/latest/manifest.json
+Invoke-WebRequest -UseBasicParsing https://78.github.io/voicestick/firmwares/voicestick_c3/latest/manifest.json
 
 Invoke-WebRequest -UseBasicParsing -Method Head https://github.com/78/voicestick/releases/download/v0.2.4/VoiceStick_0.2.4.msi
 Invoke-WebRequest -UseBasicParsing -Method Head https://github.com/78/voicestick/releases/download/v0.2.4/VoiceStick-0.2.4.zip
@@ -182,6 +202,6 @@ The release is complete when:
 
 - macOS appcast entry points to the new Sparkle ZIP.
 - Windows appcast entry points to the new signed MSI.
-- firmware `latest/manifest.json` reports the new version.
+- both `latest/manifest.json` files report the new firmware and minimum app versions.
 - OTA and merged firmware URLs are reachable.
 - the GitHub Release contains all macOS, Windows, and firmware assets.
