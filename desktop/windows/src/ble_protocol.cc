@@ -1,8 +1,11 @@
 #include "ble_protocol.h"
 
+#include "cJSON.h"
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <memory>
 
 namespace voicestick {
 
@@ -82,6 +85,18 @@ std::optional<std::uint32_t> JsonU32Value(std::string_view json, std::string_vie
     return value;
 }
 
+bool IsDeviceUuid(std::string_view uuid) {
+    if (uuid.size() != 36) return false;
+    for (std::size_t index = 0; index < uuid.size(); ++index) {
+        if (index == 8 || index == 13 || index == 18 || index == 23) {
+            if (uuid[index] != '-') return false;
+        } else if (!std::isxdigit(static_cast<unsigned char>(uuid[index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::string JsonEscape(std::string_view text) {
     std::string out;
     out.reserve(text.size() + 8);
@@ -127,6 +142,21 @@ std::optional<StateEvent> BleProtocol::ParseStateEvent(std::span<const std::uint
     event.duration_ms = JsonU32Value(json, "duration_ms");
     event.hardware = JsonStringValue(json, "hardware");
     event.firmware_version = JsonStringValue(json, "firmware_version");
+    if (event.event == "device_info") {
+        auto uuid = JsonStringValue(json, "device_uuid");
+        if (IsDeviceUuid(uuid)) event.device_uuid = Uppercase(std::move(uuid));
+    } else if (event.event == "battery_status") {
+        const std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(cJSON_Parse(json.c_str()), cJSON_Delete);
+        const auto* percent = cJSON_GetObjectItemCaseSensitive(root.get(), "percent");
+        const auto* charging = cJSON_GetObjectItemCaseSensitive(root.get(), "charging");
+        const auto* usb_powered = cJSON_GetObjectItemCaseSensitive(root.get(), "usb_powered");
+        if (!cJSON_IsNumber(percent) || percent->valuedouble < 0 || percent->valuedouble > 100 ||
+            percent->valuedouble != percent->valueint || !cJSON_IsBool(charging) || !cJSON_IsBool(usb_powered)) {
+            return std::nullopt;
+        }
+        event.battery = DeviceBatteryStatus{static_cast<std::uint32_t>(percent->valueint),
+                                           cJSON_IsTrue(charging) != 0, cJSON_IsTrue(usb_powered) != 0};
+    }
     return event;
 }
 

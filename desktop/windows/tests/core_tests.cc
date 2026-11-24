@@ -101,18 +101,15 @@ public:
     void SetDeviceInfo(const DeviceInfo& info) override {
         device_infos.push_back(info);
     }
-    void SetFirmwareInfo(const std::map<std::string, DeviceFirmwareInfo>& info_by_device_id) override {
+    void SetFirmwareInfo(const std::map<std::string, DeviceFirmwareInfo>& info_by_device_id,
+                         std::uint64_t) override {
         firmware_info_by_device_id = info_by_device_id;
+    }
+    void SetDeviceBatteryStatus(const std::string& device_id, const DeviceBatteryStatus& status) override {
+        battery_status_by_device_id[device_id] = status;
     }
     void SetPairingError(const std::string& device_id, const std::string& message) override {
         pairing_errors.push_back(device_id + ":" + message);
-    }
-    void ShowFirmwareUpdatePrompt(const std::string& device_id,
-                                  const std::string& current_version,
-                                  const std::string& latest_version,
-                                  bool is_below_minimum) override {
-        firmware_update_prompts.push_back(device_id + ":" + current_version + ":" + latest_version +
-                                          (is_below_minimum ? ":minimum" : ":latest"));
     }
     void SetPairedDeviceIds(const std::vector<std::string>& ids) override {
         paired_device_ids = ids;
@@ -164,7 +161,7 @@ public:
     std::vector<DeviceInfo> device_infos;
     std::map<std::string, DeviceFirmwareInfo> firmware_info_by_device_id;
     std::vector<std::string> pairing_errors;
-    std::vector<std::string> firmware_update_prompts;
+    std::map<std::string, DeviceBatteryStatus> battery_status_by_device_id;
     std::vector<std::string> paired_device_ids;
     std::vector<std::string> partials;
     std::vector<std::string> cloud_upgrades;
@@ -245,6 +242,39 @@ void TestDeviceIds() {
     assert(BleProtocol::NormalizeDeviceId("09af") == "09AF");
     assert(!BleProtocol::DeviceIdFromName("Other").has_value());
     assert(BleProtocol::DeviceIdFromName("VS-C3D8").value() == "C3D8");
+}
+
+void TestBatteryStatusEvents() {
+    const auto parse = [](std::string_view json) {
+        ByteVector frame{1, 0x10};
+        AppendLe16(frame, static_cast<std::uint16_t>(json.size()));
+        frame.insert(frame.end(), json.begin(), json.end());
+        return BleProtocol::ParseStateEvent(frame);
+    };
+    auto event = parse(R"({"event":"battery_status","percent":73,"charging":true,"usb_powered":true})");
+    assert(event && (event->battery == DeviceBatteryStatus{73, true, true}));
+    event = parse(R"({"event":"battery_status","percent":0,"charging":false,"usb_powered":false})");
+    assert(event && (event->battery == DeviceBatteryStatus{0, false, false}));
+    assert(!parse(R"({"event":"battery_status","percent":101,"charging":false,"usb_powered":false})"));
+    assert(!parse(R"({"event":"battery_status","percent":99.5,"charging":false,"usb_powered":false})"));
+    assert(!parse(R"({"event":"battery_status","percent":99,"charging":"false","usb_powered":true})"));
+    assert(!parse(R"({"event":"battery_status","percent":99,"charging":false})"));
+
+    auto info = parse(R"({"event":"device_info","hardware":"voicestick_c3","firmware_version":"0.4.0",)"
+                      R"("device_uuid":"5a8f3b0e-2c71-4e6b-9d12-7f84b06d3ac1"})");
+    assert(info && info->device_uuid == "5A8F3B0E-2C71-4E6B-9D12-7F84B06D3AC1");
+    info = parse(R"({"event":"device_info","device_uuid":"invalid"})");
+    assert(info && info->device_uuid.empty());
+
+    auto ble = std::make_unique<FakeBleCentral>();
+    auto* ble_ptr = ble.get();
+    FakeUi ui;
+    FakeInputInjector input;
+    VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::make_unique<FakeAsrClient>(),
+                                       &ui, &input);
+    coordinator.Start();
+    ble_ptr->on_state_event("C3D8", *event);
+    assert((ui.battery_status_by_device_id.at("C3D8") == DeviceBatteryStatus{0, false, false}));
 }
 
 void TestAudioFrameParsing() {
@@ -444,6 +474,83 @@ void TestFirmwareManifestParsingAndVersionCompare() {
     assert(IsFirmwareHardwareCompatible("sticks3", "0.1.2", "stick_s3"));
     assert(IsFirmwareHardwareCompatible("", "0.1.2", "stick_s3"));
     assert(IsFirmwareHardwareCompatible("", "", "stick_s3"));
+    const auto stick_url = FirmwareManifestClient::ManifestUrlForHardware("stick_s3");
+    const auto c3_url = FirmwareManifestClient::ManifestUrlForHardware("voicestick_c3");
+    assert(stick_url.ends_with("/m5stack_stick_s3/latest/manifest.json"));
+    assert(c3_url.ends_with("/voicestick_c3/latest/manifest.json"));
+    assert(FirmwareManifestClient::ManifestUrlForHardware("sticks3") == stick_url);
+    assert(FirmwareManifestClient::ManifestUrlForHardware("m5stack_stick_s3") == stick_url);
+    assert(FirmwareManifestClient::ManifestUrlForHardware("").empty());
+    assert(FirmwareManifestClient::ManifestUrlForHardware("unknown").empty());
+    assert(!IsFirmwareHardwareCompatible("voicestick_c3", "0.3.7", "stick_s3"));
+    assert(!IsFirmwareHardwareCompatible("stick_s3", "0.3.7", "voicestick_c3"));
+}
+
+void TestFirmwareWindowsAppVersionRequirement() {
+    const std::string required_fields =
+        R"("hardware":"sticks3","version":"1.0.0","ota_url":"https://example.test/ota.bin",)"
+        R"("ota_sha256":"abc","ota_size":123)";
+    const auto legacy_manifest = ParseFirmwareManifest("{" + required_fields + "}");
+    assert(legacy_manifest);
+    assert(legacy_manifest->CheckWindowsAppVersion("") == FirmwareAppCompatibility::kSupported);
+
+    for (const auto* versions : {R"({"macos":"0.3.7"})", R"({})", R"(null)"}) {
+        const auto manifest = ParseFirmwareManifest("{" + required_fields + ",\"minimum_app_versions\":" +
+                                                    versions + "}");
+        assert(manifest);
+        assert(manifest->CheckWindowsAppVersion("0.1.0") == FirmwareAppCompatibility::kSupported);
+    }
+    for (const auto* versions : {R"("0.3.7")", R"({"windows":123})",
+                                 R"({"windows":null})", R"({"windows":""})", R"({"windows":"invalid"})"}) {
+        const auto manifest = ParseFirmwareManifest("{" + required_fields + ",\"minimum_app_versions\":" +
+                                                    versions + "}");
+        assert(!manifest);
+    }
+
+    const auto manifest = ParseFirmwareManifest(
+        "{" + required_fields + R"(,"minimum_app_versions":{"macos":"0.3.5","windows":"0.3.7"}})");
+    assert(manifest);
+    assert(manifest->minimum_windows_app_version == "0.3.7");
+    assert(manifest->CheckWindowsAppVersion("0.3.6") == FirmwareAppCompatibility::kAppUpdateRequired);
+    assert(manifest->CheckWindowsAppVersion("0.3.7-beta") == FirmwareAppCompatibility::kAppUpdateRequired);
+    assert(manifest->CheckWindowsAppVersion("") == FirmwareAppCompatibility::kAppUpdateRequired);
+    assert(manifest->CheckWindowsAppVersion("0.3.7") == FirmwareAppCompatibility::kSupported);
+    assert(manifest->CheckWindowsAppVersion("0.3.10") == FirmwareAppCompatibility::kSupported);
+}
+
+void TestFirmwareAvailabilityForDeviceMenuAndReminders() {
+    DeviceFirmwareInfo device;
+    device.hardware = "voicestick_c3";
+    device.current_version = "0.3.7";
+    device.reported_on_connection = true;
+    FirmwareManifest manifest;
+    manifest.hardware = "voicestick_c3";
+    manifest.version = "0.4.0";
+
+    auto result = EvaluateFirmwareAvailability(device, &manifest, {}, false, "0.1.0");
+    assert(result.latest_version == "0.4.0" && result.update_available);
+    assert(result.required_app_version.empty());
+
+    manifest.minimum_windows_app_version = "0.4.0";
+    result = EvaluateFirmwareAvailability(device, &manifest, {}, false, "0.3.7");
+    assert(result.required_app_version == "0.4.0" && !result.update_available);
+
+    result = EvaluateFirmwareAvailability(device, &manifest, {}, false, "0.4.0");
+    assert(result.required_app_version.empty() && result.update_available);
+
+    result = EvaluateFirmwareAvailability(device, &manifest, {}, true, "0.4.0");
+    assert(result.is_checking && !result.update_available && result.latest_version.empty());
+
+    result = EvaluateFirmwareAvailability(device, &manifest, "Connection failed.", false, "0.4.0");
+    assert(result.error_message == "Connection failed." && !result.update_available);
+
+    device.current_version = "0.4.0";
+    result = EvaluateFirmwareAvailability(device, &manifest, {}, false, "0.4.0");
+    assert(result.required_app_version.empty() && !result.update_available);
+
+    manifest.hardware = "stick_s3";
+    result = EvaluateFirmwareAvailability(device, &manifest, {}, false, "0.4.0");
+    assert(!result.error_message.empty() && !result.update_available);
 }
 
 void TestCoordinatorCancelsShortPrimaryPress() {
@@ -869,42 +976,11 @@ void TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError() {
     assert(!ui.cloud_upgrades.empty());
 }
 
-void TestFirmwareWindowsAppVersionRequirement() {
-    const std::string required_fields =
-        R"("hardware":"sticks3","version":"1.0.0","ota_url":"https://example.test/ota.bin",)"
-        R"("ota_sha256":"abc","ota_size":123)";
-    const auto legacy_manifest = ParseFirmwareManifest("{" + required_fields + "}");
-    assert(legacy_manifest);
-    assert(legacy_manifest->CheckWindowsAppVersion("") == FirmwareAppCompatibility::kSupported);
-
-    for (const auto* versions : {R"({"macos":"0.3.7"})", R"({})", R"(null)"}) {
-        const auto manifest = ParseFirmwareManifest("{" + required_fields + ",\"minimum_app_versions\":" +
-                                                    versions + "}");
-        assert(manifest);
-        assert(manifest->CheckWindowsAppVersion("0.1.0") == FirmwareAppCompatibility::kSupported);
-    }
-    for (const auto* versions : {R"("0.3.7")", R"({"windows":123})",
-                                 R"({"windows":null})", R"({"windows":""})", R"({"windows":"invalid"})"}) {
-        const auto manifest = ParseFirmwareManifest("{" + required_fields + ",\"minimum_app_versions\":" +
-                                                    versions + "}");
-        assert(!manifest);
-    }
-
-    const auto manifest = ParseFirmwareManifest(
-        "{" + required_fields + R"(,"minimum_app_versions":{"macos":"0.3.5","windows":"0.3.7"}})");
-    assert(manifest);
-    assert(manifest->minimum_windows_app_version == "0.3.7");
-    assert(manifest->CheckWindowsAppVersion("0.3.6") == FirmwareAppCompatibility::kAppUpdateRequired);
-    assert(manifest->CheckWindowsAppVersion("0.3.7-beta") == FirmwareAppCompatibility::kAppUpdateRequired);
-    assert(manifest->CheckWindowsAppVersion("") == FirmwareAppCompatibility::kAppUpdateRequired);
-    assert(manifest->CheckWindowsAppVersion("0.3.7") == FirmwareAppCompatibility::kSupported);
-    assert(manifest->CheckWindowsAppVersion("0.3.10") == FirmwareAppCompatibility::kSupported);
-}
-
 } // namespace
 
 int main() {
     TestDeviceIds();
+    TestBatteryStatusEvents();
     TestAudioFrameParsing();
     TestStateParsing();
     TestOggMuxer();
@@ -912,6 +988,7 @@ int main() {
     TestAppConfig();
     TestFirmwareManifestParsingAndVersionCompare();
     TestFirmwareWindowsAppVersionRequirement();
+    TestFirmwareAvailabilityForDeviceMenuAndReminders();
     TestCoordinatorCancelsShortPrimaryPress();
     TestCoordinatorPrimaryDuringFinalizingRefreshesThinking();
     TestCoordinatorSecondaryCancelsFinalizing();

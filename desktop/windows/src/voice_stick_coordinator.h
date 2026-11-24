@@ -15,7 +15,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -26,6 +25,7 @@ namespace voicestick {
 struct ConnectedDevice {
     std::string id;
     std::string name;
+    bool supports_firmware_update = false;
 };
 
 struct DeviceInfo {
@@ -91,12 +91,10 @@ public:
     virtual void SetStatus(const std::string& status) = 0;
     virtual void SetConnectedDevices(const std::vector<ConnectedDevice>& devices) = 0;
     virtual void SetDeviceInfo(const DeviceInfo& info) = 0;
-    virtual void SetFirmwareInfo(const std::map<std::string, DeviceFirmwareInfo>& info_by_device_id) = 0;
+    virtual void SetDeviceBatteryStatus(const std::string& device_id, const DeviceBatteryStatus& status) = 0;
+    virtual void SetFirmwareInfo(const std::map<std::string, DeviceFirmwareInfo>& info_by_device_id,
+                                 std::uint64_t revision) = 0;
     virtual void SetPairingError(const std::string& device_id, const std::string& message) = 0;
-    virtual void ShowFirmwareUpdatePrompt(const std::string& device_id,
-                                          const std::string& current_version,
-                                          const std::string& latest_version,
-                                          bool is_below_minimum) = 0;
     virtual void SetPairedDeviceIds(const std::vector<std::string>& ids) = 0;
     virtual void SetHasRecoverableInput(bool has_recoverable_input) = 0;
     virtual void ShowListening(const std::optional<std::string>& device_id) = 0;
@@ -127,7 +125,7 @@ public:
 class VoiceStickCoordinator {
 public:
     VoiceStickCoordinator(AppConfig config,
-                          std::unique_ptr<BleCentral> ble,
+                          std::shared_ptr<BleCentral> ble,
                           std::unique_ptr<AsrClient> asr,
                           VoiceStickUi* ui,
                           InputInjector* input_injector,
@@ -142,12 +140,13 @@ public:
                              std::uint64_t bluetooth_address,
                              BluetoothAddressKind address_kind,
                              const std::string& name);
-    void ConfirmPairedDeviceIds(const std::vector<std::string>& device_ids);
+    void ConfirmPairedDeviceIds(const std::vector<std::string>& device_ids, const std::string& device_id);
     void RemovePairedDevice(const std::string& device_id);
     void CancelPendingConnect(const std::string& device_id);
     bool RestoreLastInputConfirmation();
-    void CheckFirmwareUpdatesNow();
-    void CheckFirmwareAfterPairing(const std::string& device_id);
+    void CheckFirmwareUpdates();
+    void CheckDeviceFirmwareUpdates(const std::string& device_id, std::function<void(DeviceFirmwareInfo)> completion);
+    bool IsIdleForFirmwareReminder() const;
     void UpdateFirmwareFromLatest(const std::string& device_id,
                                   std::function<void(FirmwareUpdateProgress)> progress,
                                   std::function<void(bool, std::string)> completion);
@@ -256,11 +255,9 @@ private:
     void CancelActiveCycleIfDeviceDisconnected();
     void FinishRecognitionCycle();
     void UpdateDeviceFirmwareInfo(const StateEvent& event, const std::string& device_id);
-    void CheckFirmwareUpdatesIfNeeded(bool force, bool show_errors);
+    using FirmwareFeedCompletion = std::function<void(const FirmwareManifest*, std::string_view)>;
+    void CheckFirmwareFeed(std::string_view hardware, bool force, FirmwareFeedCompletion completion = {});
     void RefreshFirmwareAvailability();
-    void SetFirmwareChecking(bool is_checking);
-    bool ShouldShowFirmwareUpdatePromptAfterPairing(const std::string& device_id,
-                                                    const DeviceFirmwareInfo& info);
     bool IsWaitingForFinalText() const;
     void SetSessionState(SessionState state, std::string_view reason);
     void EnterReady(std::string_view reason, bool hide_overlay = true);
@@ -276,7 +273,7 @@ private:
     double CurrentRecordingDurationSeconds() const;
 
     AppConfig config_;
-    std::unique_ptr<BleCentral> ble_;
+    std::shared_ptr<BleCentral> ble_;
     std::unique_ptr<AsrClient> asr_;
     std::function<std::unique_ptr<AsrClient>(const AppConfig&)> asr_factory_;
     LLMTranslationClient translator_;
@@ -302,15 +299,22 @@ private:
     std::optional<std::string> last_recoverable_device_id_;
     std::vector<std::string> paired_device_ids_;
     std::map<std::string, DeviceFirmwareInfo> firmware_info_by_device_id_;
-    std::optional<FirmwareManifest> latest_firmware_manifest_;
-    std::chrono::steady_clock::time_point last_firmware_manifest_check_at_{};
-    bool has_last_firmware_manifest_check_at_ = false;
-    bool firmware_manifest_check_in_flight_ = false;
-    std::set<std::string> pending_firmware_update_prompt_device_ids_;
-    FirmwareManifestClient firmware_manifest_client_;
+    struct FirmwareFeed {
+        std::optional<FirmwareManifest> manifest;
+        std::chrono::steady_clock::time_point next_check{};
+        bool is_checking = false;
+        std::string error_message;
+        std::vector<FirmwareFeedCompletion> completions;
+        std::thread worker;
+    };
+    std::map<std::string_view, FirmwareFeed> firmware_feeds_;
+    std::uint64_t firmware_info_revision_ = 0;
     std::mutex firmware_mutex_;
     std::shared_ptr<std::atomic_bool> alive_{std::make_shared<std::atomic_bool>(true)};
-    std::thread firmware_manifest_thread_;
+    std::thread firmware_download_thread_;
+    std::mutex firmware_transfer_mutex_;
+    bool firmware_download_in_flight_ = false;
+    bool firmware_download_cancelled_ = false;
     bool is_showing_asr_error_ = false;
     bool is_shutdown_ = false;
     std::map<std::pair<std::string, std::uint32_t>, std::unique_ptr<SubtitleCycle>> subtitle_cycles_;
@@ -318,6 +322,7 @@ private:
     static constexpr double kMinimumRecordingDurationSeconds = 0.5;
     static constexpr std::chrono::milliseconds kAudioEndTimeout{1000};
     static constexpr std::chrono::hours kFirmwareManifestCacheDuration{24};
+    static constexpr std::chrono::minutes kFirmwareManifestRetryDelay{5};
 };
 
 } // namespace voicestick

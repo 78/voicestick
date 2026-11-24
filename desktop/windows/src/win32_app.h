@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -28,12 +29,10 @@ public:
     void SetStatus(const std::string& status) override;
     void SetConnectedDevices(const std::vector<ConnectedDevice>& devices) override;
     void SetDeviceInfo(const DeviceInfo& info) override;
-    void SetFirmwareInfo(const std::map<std::string, DeviceFirmwareInfo>& info_by_device_id) override;
+    void SetDeviceBatteryStatus(const std::string& device_id, const DeviceBatteryStatus& status) override;
+    void SetFirmwareInfo(const std::map<std::string, DeviceFirmwareInfo>& info_by_device_id,
+                         std::uint64_t revision) override;
     void SetPairingError(const std::string& device_id, const std::string& message) override;
-    void ShowFirmwareUpdatePrompt(const std::string& device_id,
-                                  const std::string& current_version,
-                                  const std::string& latest_version,
-                                  bool is_below_minimum) override;
     void SetPairedDeviceIds(const std::vector<std::string>& ids) override;
     void SetHasRecoverableInput(bool has_recoverable_input) override;
     void ShowListening(const std::optional<std::string>& device_id) override;
@@ -72,7 +71,12 @@ private:
     void SaveDeviceOverlayPosition(const std::string& device_id, OverlayPosition position);
     void SaveDeviceOutputProfile(const std::string& device_id, OutputProfile profile);
     void ApplyOverlayStyle(const std::optional<std::string>& device_id);
-    void StartFirmwareUpdate(const std::string& device_id);
+    void StartFirmwareUpdate(const std::string& device_id, std::string_view expected_version = {});
+    void CheckDeviceFirmwareUpdates(std::string device_id);
+    void CheckFirmwareReminders();
+    bool RecordFirmwareReminder(const std::string& device_key, const std::string& version);
+    void ShowFirmwareUpdatePrompt(std::string device_id, std::string current_version, std::string latest_version);
+    void ShowAppUpdateRequiredForFirmware(const std::string& minimum_version);
     void PairDevice(const std::string& device_id, std::uint64_t bluetooth_address,
                     BluetoothAddressKind address_kind, const std::string& name);
     void HandlePairingCompleted(const std::string& device_id, std::optional<DeviceInfo> info);
@@ -99,10 +103,16 @@ private:
     std::vector<ConnectedDevice> connected_devices_;
     std::vector<std::string> paired_device_ids_;
     std::map<std::string, DeviceInfo> device_info_map_;
+    std::map<std::string, DeviceBatteryStatus> battery_status_by_device_id_;
     std::map<std::string, DeviceFirmwareInfo> firmware_info_map_;
+    std::uint64_t firmware_info_revision_ = 0;
+    std::optional<std::string> manual_firmware_check_device_;
+    std::set<std::pair<std::string, std::string>> seen_firmware_reminders_;
     std::optional<PairedDeviceEntry> pending_pairing_entry_;
     bool has_recoverable_input_ = false;
     bool is_shutting_down_ = false;
+    bool is_tray_menu_open_ = false;
+    bool is_showing_firmware_prompt_ = false;
 };
 
 } // namespace voicestick

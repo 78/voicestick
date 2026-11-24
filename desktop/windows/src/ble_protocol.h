@@ -19,6 +19,14 @@ struct AudioFrame {
     bool IsEnd() const { return (flags & 0x02) != 0; }
 };
 
+struct DeviceBatteryStatus {
+    std::uint32_t percent;
+    bool charging;
+    bool usb_powered;
+
+    bool operator==(const DeviceBatteryStatus&) const = default;
+};
+
 struct StateEvent {
     std::string event;
     std::string button;
@@ -26,6 +34,8 @@ struct StateEvent {
     std::optional<std::uint32_t> duration_ms;
     std::string hardware;
     std::string firmware_version;
+    std::string device_uuid;
+    std::optional<DeviceBatteryStatus> battery;
 };
 
 struct FirmwareOtaStateEvent {

@@ -16,6 +16,7 @@ public:
     ~FirmwareUpdateDialog();
 
     void Show();
+    HWND hwnd() const { return hwnd_; }
     void UpdateProgress(const FirmwareUpdateProgress& progress);
     void Finish(bool success, const std::string& message);
 

@@ -7,6 +7,7 @@
 #include <winrt/Windows.Devices.Enumeration.h>
 #include <winrt/Windows.Foundation.Metadata.h>
 #include <winrt/Windows.Devices.Radios.h>
+#include <winrt/Windows.Foundation.Metadata.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/base.h>
 
@@ -22,6 +23,8 @@ namespace {
 using winrt::Windows::Devices::Bluetooth::BluetoothAddressType;
 using winrt::Windows::Devices::Bluetooth::BluetoothConnectionStatus;
 using winrt::Windows::Devices::Bluetooth::BluetoothLEDevice;
+using winrt::Windows::Devices::Bluetooth::BluetoothLEPreferredConnectionParameters;
+using winrt::Windows::Devices::Bluetooth::BluetoothLEPreferredConnectionParametersRequest;
 using winrt::Windows::Devices::Bluetooth::BluetoothCacheMode;
 using winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementReceivedEventArgs;
 using winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher;
@@ -49,6 +52,16 @@ constexpr std::chrono::milliseconds kConnectionSettleDelay{300};
 // remote refuses or rolled its keys. We special-case it to suggest unpairing.
 constexpr std::int32_t kErrorBadCommand = static_cast<std::int32_t>(0x80070016);
 constexpr std::int32_t kErrorTimeout = static_cast<std::int32_t>(0x800705B4);
+
+struct OtaConnectionPreference {
+    BluetoothLEPreferredConnectionParametersRequest request{nullptr};
+
+    ~OtaConnectionPreference() {
+        if (request) {
+            try { request.Close(); } catch (...) {}
+        }
+    }
+};
 
 BluetoothAddressType ToBluetoothAddressType(BluetoothAddressKind kind) {
     switch (kind) {
@@ -182,12 +195,14 @@ BleCentralWin::BleCentralWin(std::vector<std::string> paired_device_ids, HWND di
       paired_device_ids_(paired_device_ids.begin(), paired_device_ids.end()) {}
 
 void BleCentralWin::DispatchToUiThread(std::function<void()> callback) {
+    if (shutting_down_) return;
     if (!dispatch_hwnd_) {
         callback();
         return;
     }
     {
         std::lock_guard lock(dispatch_mutex_);
+        if (shutting_down_) return;
         dispatch_queue_.push(std::move(callback));
     }
     PostMessage(dispatch_hwnd_, WM_BLE_DISPATCH, 0, 0);
@@ -199,7 +214,7 @@ void BleCentralWin::ProcessDispatchedCallbacks() {
         std::lock_guard lock(dispatch_mutex_);
         pending.swap(dispatch_queue_);
     }
-    while (!pending.empty()) {
+    while (!pending.empty() && !shutting_down_) {
         pending.front()();
         pending.pop();
     }
@@ -214,20 +229,19 @@ void BleCentralWin::Start() {
 }
 
 void BleCentralWin::Shutdown() {
+    if (shutting_down_.exchange(true)) return;
     StopScan();
-
-    std::vector<std::shared_ptr<DeviceSession>> sessions;
     {
         std::lock_guard lock(mutex_);
-        for (const auto& [_, session] : sessions_by_device_id_) {
-            if (session && session->ready) sessions.push_back(session);
-        }
         connecting_addresses_.clear();
         cancelled_device_ids_.clear();
     }
-
+    CancelFirmwareUpdate();
     CloseSessions();
-    PublishConnections();
+    {
+        std::lock_guard lock(dispatch_mutex_);
+        dispatch_queue_ = {};
+    }
 }
 
 void BleCentralWin::UpdatePairedDeviceIds(const std::vector<std::string>& ids) {
@@ -335,6 +349,7 @@ void BleCentralWin::UpdateFirmware(ByteVector image,
                                    std::function<void(FirmwareUpdateProgress)> progress,
                                    std::function<void(bool, std::string)> completion) {
     std::shared_ptr<DeviceSession> session;
+    std::shared_ptr<FirmwareUpdateSession> update_session;
     {
         std::lock_guard lock(mutex_);
         if (firmware_update_session_) {
@@ -342,7 +357,7 @@ void BleCentralWin::UpdateFirmware(ByteVector image,
             return;
         }
         auto it = sessions_by_device_id_.find(device_id);
-        if (it == sessions_by_device_id_.end() || !it->second->ready) {
+        if (shutting_down_ || it == sessions_by_device_id_.end() || !it->second->ready) {
             completion(false, "No VoiceStick is connected.");
             return;
         }
@@ -355,18 +370,23 @@ void BleCentralWin::UpdateFirmware(ByteVector image,
             completion(false, "Firmware image is larger than the OTA partition.");
             return;
         }
-        firmware_update_session_ = std::make_shared<FirmwareUpdateSession>();
-        firmware_update_session_->device_id = device_id;
-        firmware_update_session_->transfer_id = RandomTransferId();
-        firmware_update_session_->image = std::move(image);
-        firmware_update_session_->progress = std::move(progress);
-        firmware_update_session_->completion = std::move(completion);
+        update_session = std::make_shared<FirmwareUpdateSession>();
+        update_session->device_id = device_id;
+        update_session->transfer_id = RandomTransferId();
+        update_session->image = std::move(image);
+        update_session->progress = std::move(progress);
+        update_session->completion = std::move(completion);
+        firmware_update_session_ = update_session;
     }
-    if (firmware_update_session_->progress) {
-        firmware_update_session_->progress(FirmwareUpdateProgress{
-            0, static_cast<int>(firmware_update_session_->image.size()), true});
+    if (update_session->progress) {
+        update_session->progress(FirmwareUpdateProgress{
+            0, static_cast<int>(update_session->image.size()), true});
     }
-    UpdateFirmwareAsync(std::move(session), firmware_update_session_);
+    DispatchToUiThread([this, session = std::move(session), update_session = std::move(update_session)] {
+        if (update_session->finished) return;
+        StopScan();
+        UpdateFirmwareAsync(session, update_session);
+    });
 }
 
 void BleCentralWin::CancelFirmwareUpdate() {
@@ -376,7 +396,7 @@ void BleCentralWin::CancelFirmwareUpdate() {
         std::lock_guard lock(mutex_);
         update_session = firmware_update_session_;
         if (!update_session) return;
-        update_session->cancel_requested = true;
+        update_session->finished = true;
         auto it = sessions_by_device_id_.find(update_session->device_id);
         if (it != sessions_by_device_id_.end()) device_session = it->second;
     }
@@ -397,10 +417,12 @@ void BleCentralWin::CancelPendingConnect(const std::string& device_id) {
 }
 
 void BleCentralWin::StartScan() {
+    if (shutting_down_) return;
     StopScan();
     bool has_paired_devices = false;
     {
         std::lock_guard lock(mutex_);
+        if (firmware_update_session_) return;
         has_paired_devices = !paired_device_ids_.empty();
     }
     if (!has_paired_devices) {
@@ -1009,7 +1031,7 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
                 }
             });
         session->state_value_changed_token = session->state_characteristic.ValueChanged(
-            [this, device_id](const GattCharacteristic&, const auto& args) {
+            [this, device_id, weak_session = std::weak_ptr<DeviceSession>(session)](const GattCharacteristic&, const auto& args) {
                 auto bytes = BytesFromBuffer(args.CharacteristicValue());
                 LogBleLine("state notify VS-" + device_id +
                            " len=" + std::to_string(bytes.size()) +
@@ -1023,7 +1045,19 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
                            (event->firmware_version.empty()
                                 ? std::string()
                                 : " firmware=" + event->firmware_version));
-                DispatchToUiThread([this, device_id, e = std::move(*event)]() {
+                DispatchToUiThread([this, device_id, weak_session, e = std::move(*event)]() {
+                    const auto current = weak_session.lock();
+                    if (!current) return;
+                    {
+                        std::lock_guard lock(mutex_);
+                        if (!current->ready) {
+                            if (e.event == "device_info") current->pending_device_info = e;
+                            if (e.event == "battery_status") current->pending_battery_status = e;
+                            return;
+                        }
+                        const auto session_it = sessions_by_device_id_.find(device_id);
+                        if (session_it == sessions_by_device_id_.end() || session_it->second != current) return;
+                    }
                     if (on_state_event) on_state_event(device_id, e);
                 });
             });
@@ -1092,13 +1126,21 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
         session->audio_subscribed = true;
         session->state_subscribed = true;
         session->ota_state_subscribed = session->ota_state_characteristic != nullptr;
-        session->ready = true;
+        session->device.supports_firmware_update =
+            session->ota_rx_characteristic && session->ota_state_subscribed;
+        std::optional<StateEvent> device_info;
+        std::optional<StateEvent> battery_status;
         {
             std::lock_guard lock(mutex_);
+            session->ready = true;
             sessions_by_device_id_[device_id] = session;
             connecting_addresses_.erase(bluetooth_address);
+            device_info = std::move(session->pending_device_info);
+            battery_status = std::move(session->pending_battery_status);
         }
         PublishConnections();
+        if (device_info && on_state_event) on_state_event(device_id, *device_info);
+        if (battery_status && on_state_event) on_state_event(device_id, *battery_status);
         LogBleLine("connected VS-" + device_id);
         SendUiState("ready", "", device_id);
     } catch (const winrt::hresult_error& error) {
@@ -1130,18 +1172,54 @@ winrt::fire_and_forget BleCentralWin::WriteControlPayloadAsync(std::shared_ptr<D
 winrt::fire_and_forget BleCentralWin::UpdateFirmwareAsync(
     std::shared_ptr<DeviceSession> session,
     std::shared_ptr<FirmwareUpdateSession> update_session) {
+    const auto self = shared_from_this();
+    std::size_t offset = 0;
     try {
         if (!session || !update_session || !session->ota_rx_characteristic) {
             FinishFirmwareUpdate(update_session, false, "The connected firmware does not expose BLE OTA.");
             co_return;
         }
+        if (update_session->finished || shutting_down_) co_return;
 
-        auto write_payload = [&](const ByteVector& payload, GattWriteOption option)
-            -> winrt::Windows::Foundation::IAsyncOperation<GattCommunicationStatus> {
-            return session->ota_rx_characteristic.WriteValueAsync(BufferFromBytes(payload), option);
+        // ATT Write uses three bytes and the VoiceStick OTA data frame uses twelve.
+        const std::size_t max_pdu = session->gatt_session ? session->gatt_session.MaxPduSize() : 23;
+        constexpr std::size_t packet_overhead = 15;
+        if (max_pdu <= packet_overhead) {
+            FinishFirmwareUpdate(update_session, false, "The Bluetooth link cannot carry a firmware packet.");
+            co_return;
+        }
+        const auto chunk_size = std::min<std::size_t>(max_pdu - packet_overhead, 244);
+
+        const auto ota_rx = session->ota_rx_characteristic;
+        const auto ble_device = session->ble_device;
+        const auto write_payload = [&ota_rx](const ByteVector& payload,
+                                            GattWriteOption option = GattWriteOption::WriteWithResponse) {
+            return ota_rx.WriteValueAsync(BufferFromBytes(payload), option);
         };
-        const bool ota_supports_write_without_response =
-            HasWriteWithoutResponse(session->ota_rx_characteristic);
+
+        co_await winrt::resume_background();
+        if (update_session->finished || shutting_down_) co_return;
+        OtaConnectionPreference preference;
+        using winrt::Windows::Foundation::Metadata::ApiInformation;
+        if (ble_device && ApiInformation::IsMethodPresent(
+                L"Windows.Devices.Bluetooth.BluetoothLEDevice", L"RequestPreferredConnectionParameters")) {
+            try {
+                const auto previous = ble_device.GetConnectionParameters();
+                preference.request = ble_device.RequestPreferredConnectionParameters(
+                    BluetoothLEPreferredConnectionParameters::ThroughputOptimized());
+                co_await winrt::resume_after(std::chrono::milliseconds(250));
+                if (update_session->finished || shutting_down_) co_return;
+                const auto current = ble_device.GetConnectionParameters();
+                LogBleLine("OTA connection VS-" + update_session->device_id +
+                           " throughput_status=" + std::to_string(static_cast<int>(preference.request.Status())) +
+                           " previous_interval_us=" + std::to_string(previous.ConnectionInterval() * 1250) +
+                           " interval_us=" + std::to_string(current.ConnectionInterval() * 1250) +
+                           " timeout_ms=" + std::to_string(current.LinkTimeout() * 10));
+            } catch (const winrt::hresult_error& error) {
+                LogBleLine("OTA throughput request unavailable VS-" + update_session->device_id +
+                           " hr=" + FormatHresult(error.code()));
+            }
+        }
 
         LogBleLine("OTA begin VS-" + update_session->device_id +
                    " transfer=" + std::to_string(update_session->transfer_id) +
@@ -1149,90 +1227,98 @@ winrt::fire_and_forget BleCentralWin::UpdateFirmwareAsync(
         auto begin = BleProtocol::OtaBeginPayload(
             static_cast<std::uint32_t>(update_session->image.size()),
             update_session->transfer_id);
-        auto status = co_await write_payload(begin, GattWriteOption::WriteWithResponse);
+        auto status = co_await write_payload(begin);
+        if (update_session->finished || shutting_down_) co_return;
         if (status != GattCommunicationStatus::Success) {
             FinishFirmwareUpdate(update_session, false, "BLE OTA begin failed: " + GattStatusName(status));
             co_return;
         }
 
-        const std::size_t max_pdu = session->gatt_session ? session->gatt_session.MaxPduSize() : 247;
-        const std::size_t chunk_size = std::max<std::size_t>(
-            20, std::min<std::size_t>(max_pdu > 15 ? max_pdu - 15 : 20, 244));
-        const std::size_t max_in_flight = 48 * 1024;
+        // Limit outstanding commands by ending each batch with a write request.
+        // The firmware rejects that request unless it has written every earlier offset.
+        constexpr int kPacketsPerBatch = 3;
+        const int packets_per_ack = HasWriteWithoutResponse(ota_rx) ? kPacketsPerBatch : 1;
         LogBleLine("OTA data VS-" + update_session->device_id +
                    " chunk_size=" + std::to_string(chunk_size) +
                    " max_pdu=" + std::to_string(max_pdu) +
-                   " write_without_response=" +
-                   (ota_supports_write_without_response ? "true" : "false"));
-        std::size_t offset = 0;
+                   " packets_per_ack=" + std::to_string(packets_per_ack));
         std::size_t last_progress = 0;
+        int packets_since_ack = 0;
+        const auto data_started = std::chrono::steady_clock::now();
         while (offset < update_session->image.size()) {
-            if (update_session->cancel_requested) co_return;
-            if (ota_supports_write_without_response &&
-                offset > update_session->device_confirmed_written.load() + max_in_flight) {
-                co_await winrt::resume_after(std::chrono::milliseconds(20));
-                continue;
-            }
+            if (update_session->finished || shutting_down_) co_return;
             const auto end = std::min(offset + chunk_size, update_session->image.size());
+            const bool acknowledge = ++packets_since_ack == packets_per_ack || end == update_session->image.size();
             auto payload = BleProtocol::OtaDataPayload(
                 update_session->transfer_id,
                 static_cast<std::uint32_t>(offset),
                 std::span<const std::uint8_t>(update_session->image.data() + offset, end - offset));
-            status = co_await write_payload(
-                payload,
-                ota_supports_write_without_response
-                    ? GattWriteOption::WriteWithoutResponse
-                    : GattWriteOption::WriteWithResponse);
+            status = co_await write_payload(payload, acknowledge
+                ? GattWriteOption::WriteWithResponse : GattWriteOption::WriteWithoutResponse);
+            if (update_session->finished || shutting_down_) co_return;
             if (status != GattCommunicationStatus::Success) {
                 LogBleLine("OTA write failed VS-" + update_session->device_id +
                            " offset=" + std::to_string(offset) +
                            " status=" + GattStatusName(status));
-                FinishFirmwareUpdate(update_session, false, "BLE OTA write failed: " + GattStatusName(status));
+                FinishFirmwareUpdate(update_session, false, "BLE OTA write failed at offset " +
+                                     std::to_string(offset) + ": " + GattStatusName(status));
                 co_return;
             }
             offset = end;
-            if (offset - last_progress >= 64 * 1024 || offset == update_session->image.size()) {
+            if (!acknowledge) continue;
+            packets_since_ack = 0;
+            update_session->confirmed_bytes = offset;
+            if (offset - last_progress >= 32 * 1024 || offset == update_session->image.size()) {
                 last_progress = offset;
-                LogBleLine("OTA sent VS-" + update_session->device_id +
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - data_started).count();
+                LogBleLine("OTA write confirmed VS-" + update_session->device_id +
                            " written=" + std::to_string(offset) +
-                           "/" + std::to_string(update_session->image.size()));
+                           "/" + std::to_string(update_session->image.size()) +
+                           " elapsed_ms=" + std::to_string(elapsed));
                 if (update_session->progress) {
                     update_session->progress(FirmwareUpdateProgress{
                         static_cast<int>(offset),
                         static_cast<int>(update_session->image.size()),
-                        false});
+                        true});
                 }
             }
         }
 
-        auto final_wait_started = std::chrono::steady_clock::now();
-        while (update_session->device_confirmed_written.load() < update_session->image.size()) {
-            if (update_session->cancel_requested) co_return;
-            if (std::chrono::steady_clock::now() - final_wait_started > std::chrono::seconds(10)) {
-                LogBleLine("OTA final device progress timed out VS-" + update_session->device_id +
-                           " confirmed=" +
-                           std::to_string(update_session->device_confirmed_written.load()) +
-                           "/" + std::to_string(update_session->image.size()));
-                FinishFirmwareUpdate(update_session, false,
-                                     "Device stopped confirming OTA progress.");
-                co_return;
-            }
-            co_await winrt::resume_after(std::chrono::milliseconds(20));
-        }
-
+        if (update_session->finished || shutting_down_) co_return;
         LogBleLine("OTA end VS-" + update_session->device_id +
                    " transfer=" + std::to_string(update_session->transfer_id) +
                    " size=" + std::to_string(update_session->image.size()));
         auto end = BleProtocol::OtaEndPayload(
             update_session->transfer_id,
             static_cast<std::uint32_t>(update_session->image.size()));
-        status = co_await write_payload(end, GattWriteOption::WriteWithResponse);
+        status = co_await write_payload(end);
+        if (update_session->finished || shutting_down_) co_return;
         if (status != GattCommunicationStatus::Success) {
             LogBleLine("OTA end failed VS-" + update_session->device_id +
                        " status=" + GattStatusName(status));
             FinishFirmwareUpdate(update_session, false, "BLE OTA end failed: " + GattStatusName(status));
+            co_return;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!update_session->finished && !shutting_down_ &&
+               std::chrono::steady_clock::now() < deadline) {
+            co_await winrt::resume_after(std::chrono::milliseconds(100));
+        }
+        if (!update_session->finished && !shutting_down_) {
+            FinishFirmwareUpdate(update_session, false, "The device did not confirm that the firmware update completed.");
         }
     } catch (const winrt::hresult_error& error) {
+        if (!update_session || update_session->finished || shutting_down_) co_return;
+        LogBleLine("OTA Bluetooth exception VS-" + update_session->device_id +
+                   " offset=" + std::to_string(offset) +
+                   " confirmed=" + std::to_string(update_session->confirmed_bytes.load()) +
+                   " hr=" + FormatHresult(error.code()));
+        if (error.code() == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+            FinishFirmwareUpdate(update_session, false, "Windows interrupted the Bluetooth firmware transfer.");
+            co_return;
+        }
         FinishFirmwareUpdate(update_session, false,
                              "BLE OTA failed: " + FormatHresult(error.code()) +
                                  ": " + winrt::to_string(error.message()));
@@ -1248,19 +1334,14 @@ void BleCentralWin::HandleFirmwareOtaStateEvent(const std::string& device_id,
         std::lock_guard lock(mutex_);
         update_session = firmware_update_session_;
     }
-    if (!update_session || update_session->device_id != device_id) return;
+    if (!update_session || update_session->finished || update_session->device_id != device_id) return;
     if (event.transfer_id.has_value() && *event.transfer_id != update_session->transfer_id) return;
 
     if (event.event == "progress") {
-        if (event.written.has_value() && event.size.has_value() && update_session->progress) {
-            update_session->device_confirmed_written.store(*event.written);
+        if (event.written.has_value() && event.size.has_value()) {
             LogBleLine("OTA device progress VS-" + device_id +
                        " written=" + std::to_string(*event.written) +
                        "/" + std::to_string(*event.size));
-            update_session->progress(FirmwareUpdateProgress{
-                static_cast<int>(*event.written),
-                static_cast<int>(*event.size),
-                true});
         }
     } else if (event.event == "done") {
         LogBleLine("OTA device done VS-" + device_id);
@@ -1286,13 +1367,13 @@ void BleCentralWin::FinishFirmwareUpdate(std::shared_ptr<FirmwareUpdateSession> 
     {
         std::lock_guard lock(mutex_);
         if (firmware_update_session_ != update_session) return;
+        update_session->finished = true;
         firmware_update_session_.reset();
     }
-    if (update_session->completion) {
-        DispatchToUiThread([completion = std::move(update_session->completion), success, message] {
-            completion(success, message);
-        });
-    }
+    DispatchToUiThread([this, completion = std::move(update_session->completion), success, message] {
+        StartScan();
+        if (completion) completion(success, message);
+    });
 }
 
 void BleCentralWin::HandleDeviceDisconnected(const std::string& device_id,
@@ -1315,13 +1396,16 @@ void BleCentralWin::HandleDeviceDisconnected(const std::string& device_id,
         }
     }
     if (update_session) {
+        LogBleLine("OTA link lost VS-" + device_id +
+                   " confirmed=" + std::to_string(update_session->confirmed_bytes.load()) +
+                   "/" + std::to_string(update_session->image.size()));
         FinishFirmwareUpdate(update_session, false, "Device disconnected during firmware update.");
     }
     if (removed) CloseSession(std::move(removed));
     LogBleLine("device disconnected VS-" + device_id + "; restarting scan for reconnection");
-    DispatchToUiThread([this] {
+    DispatchToUiThread([this, restart_scan = !update_session] {
         PublishConnections();
-        StartScan();
+        if (restart_scan) StartScan();
     });
 }
 

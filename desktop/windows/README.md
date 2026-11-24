@@ -18,8 +18,9 @@ Current scope:
 - Core VoiceStick protocol parsing, Ogg Opus muxing, ASR binary framing, and coordinator state machine.
 - Text insertion through clipboard plus `SendInput`.
 - App self-update checks through WinSparkle, using the same appcast feed as the macOS Sparkle updater.
-
-Full BLE GATT characteristic I/O is intentionally left for follow-up hardware validation work.
+- StickS3 and VoiceStick C3 use separate firmware manifests. An optional `minimum_app_versions.windows` entry sets the minimum Windows app version for BLE updates. When it is present, older app versions are prompted to update VoiceStick first.
+- C3 battery and charging status appear in the device menu and in the tray tooltip when a single device is connected.
+- The device menu offers **Check for Firmware Updates** or **Update to** when an eligible update is available. A connected device can prompt for a firmware update when voice input is idle. VoiceStick remembers each device and target version already shown, including updates seen through a manual check.
 
 ## Build
 

@@ -15,6 +15,7 @@ public:
     ~SettingsDialog();
 
     void Show();
+    HWND hwnd() const { return hwnd_; }
 
     std::function<void(AppConfig)> on_config_changed;
 

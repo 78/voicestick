@@ -44,7 +44,7 @@ std::string NormalizedHardwareName(std::string_view hardware) {
             normalized.push_back(static_cast<char>(std::tolower(ch)));
         }
     }
-    return normalized;
+    return normalized == "m5stacksticks3" ? "sticks3" : normalized;
 }
 
 struct ParsedVersion {
@@ -131,6 +131,7 @@ std::string DownloadText(const std::string& url, std::string& error) {
         error = "Failed to open HTTP session.";
         return {};
     }
+    WinHttpSetTimeouts(session, 5000, 10000, 10000, 15000);
     HINTERNET connect = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
     if (!connect) {
         WinHttpCloseHandle(session);
@@ -205,11 +206,18 @@ std::string Sha256Hex(std::span<const std::uint8_t> data) {
 
 } // namespace
 
-FirmwareManifestClient::FirmwareManifestClient(std::string manifest_url)
-    : manifest_url_(std::move(manifest_url)) {}
+FirmwareManifestClient::FirmwareManifestClient(std::string_view manifest_url)
+    : manifest_url_(manifest_url) {}
 
-std::string FirmwareManifestClient::DefaultManifestUrl() {
-    return "https://78.github.io/voicestick/firmwares/m5stack_stick_s3/latest/manifest.json";
+std::string_view FirmwareManifestClient::ManifestUrlForHardware(std::string_view hardware) {
+    const auto normalized = NormalizedHardwareName(hardware);
+    if (normalized == "sticks3") {
+        return "https://78.github.io/voicestick/firmwares/m5stack_stick_s3/latest/manifest.json";
+    }
+    if (normalized == "voicestickc3") {
+        return "https://78.github.io/voicestick/firmwares/voicestick_c3/latest/manifest.json";
+    }
+    return {};
 }
 
 void FirmwareManifestClient::FetchManifest(ManifestCallback callback) const {
@@ -304,6 +312,31 @@ bool IsFirmwareHardwareCompatible(std::string_view device_hardware,
         return true;
     }
     return NormalizedHardwareName(device_hardware) == NormalizedHardwareName(manifest_hardware);
+}
+
+DeviceFirmwareInfo EvaluateFirmwareAvailability(DeviceFirmwareInfo info,
+                                               const FirmwareManifest* manifest,
+                                               std::string_view error,
+                                               bool is_checking,
+                                               std::string_view app_version) {
+    info.latest_version.clear();
+    info.required_app_version.clear();
+    info.is_checking = is_checking;
+    info.update_available = false;
+    info.error_message = error;
+    if (is_checking || !error.empty() || !manifest) return info;
+    if (info.hardware.empty() ||
+        !IsFirmwareHardwareCompatible(info.hardware, info.current_version, manifest->hardware)) {
+        info.error_message = "Firmware manifest does not match the device model.";
+        return info;
+    }
+    info.latest_version = manifest->version;
+    if (manifest->CheckWindowsAppVersion(app_version) == FirmwareAppCompatibility::kAppUpdateRequired) {
+        info.required_app_version = manifest->minimum_windows_app_version;
+    } else {
+        info.update_available = FirmwareVersion::IsOlderThan(info.current_version, info.latest_version);
+    }
+    return info;
 }
 
 } // namespace voicestick

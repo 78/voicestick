@@ -20,7 +20,7 @@
 
 namespace voicestick {
 
-class BleCentralWin : public BleCentral {
+class BleCentralWin : public BleCentral, public std::enable_shared_from_this<BleCentralWin> {
 public:
     explicit BleCentralWin(std::vector<std::string> paired_device_ids, HWND dispatch_hwnd = nullptr);
     ~BleCentralWin() override;
@@ -65,7 +65,9 @@ private:
         bool audio_subscribed = false;
         bool state_subscribed = false;
         bool ota_state_subscribed = false;
-        bool ready = false;
+        std::atomic_bool ready{false};
+        std::optional<StateEvent> pending_device_info;
+        std::optional<StateEvent> pending_battery_status;
     };
 
     struct FirmwareUpdateSession {
@@ -74,8 +76,8 @@ private:
         ByteVector image;
         std::function<void(FirmwareUpdateProgress)> progress;
         std::function<void(bool, std::string)> completion;
-        std::atomic<std::uint32_t> device_confirmed_written{0};
-        bool cancel_requested = false;
+        std::atomic_size_t confirmed_bytes{0};
+        std::atomic_bool finished{false};
     };
 
     void StartScan();
@@ -102,6 +104,7 @@ private:
     void DispatchToUiThread(std::function<void()> callback);
 
     HWND dispatch_hwnd_ = nullptr;
+    std::atomic_bool shutting_down_{false};
     mutable std::mutex mutex_;
     std::mutex dispatch_mutex_;
     std::queue<std::function<void()>> dispatch_queue_;
