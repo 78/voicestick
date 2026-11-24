@@ -1,0 +1,10 @@
+(fp_lib_table
+	(version 7)
+	(lib
+		(name "VoiceStickSF32")
+		(type "KiCad")
+		(uri "${KIPRJMOD}/VoiceStickSF32.pretty")
+		(options "")
+		(descr "VoiceStick SiFli project library")
+	)
+)

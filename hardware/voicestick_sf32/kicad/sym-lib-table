@@ -1,0 +1,10 @@
+(sym_lib_table
+	(version 7)
+	(lib
+		(name "VoiceStickSF32")
+		(type "KiCad")
+		(uri "${KIPRJMOD}/VoiceStickSF32.kicad_sym")
+		(options "")
+		(descr "VoiceStick SiFli project library")
+	)
+)

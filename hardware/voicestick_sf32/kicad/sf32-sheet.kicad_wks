@@ -1,0 +1,5 @@
+(kicad_wks (version 20231118) (generator "pl_editor")
+  (setup (textsize 1.5 1.5) (linewidth 0.24) (textlinewidth 0.15)
+    (left_margin 10.16) (right_margin 9.8) (top_margin 6.985) (bottom_margin 7.25))
+  (rect (name "Page frame") (start 0 0 ltcorner) (end 0 0 rbcorner) (linewidth 0.24))
+)

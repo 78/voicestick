@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "filename": "VoiceStick.json",
+    "name": "VoiceStick",
+    "version": 5
+  },
+  "schematic": {
+    "override_item_colors": false,
+    "background": "rgba(250, 249, 244, 1.000)",
+    "component_body": "rgba(255, 252, 242, 1.000)",
+    "component_outline": "rgba(134, 76, 67, 1.000)",
+    "pin": "rgba(137, 89, 79, 1.000)",
+    "pin_name": "rgba(52, 62, 65, 1.000)",
+    "pin_number": "rgba(128, 90, 76, 1.000)",
+    "reference": "rgba(105, 70, 61, 1.000)",
+    "value": "rgba(53, 66, 70, 1.000)",
+    "fields": "rgba(66, 82, 82, 1.000)",
+    "junction": "rgba(40, 107, 96, 1.000)",
+    "wire": "rgba(67, 134, 123, 1.000)",
+    "label_global": "rgba(41, 79, 98, 1.000)",
+    "label_local": "rgba(41, 79, 98, 1.000)",
+    "no_connect": "rgba(112, 124, 128, 1.000)",
+    "note": "rgba(71, 89, 89, 1.000)",
+    "worksheet": "rgba(130, 150, 142, 1.000)"
+  }
+}

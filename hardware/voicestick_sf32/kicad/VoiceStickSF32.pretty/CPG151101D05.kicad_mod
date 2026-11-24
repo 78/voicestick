@@ -1,0 +1,59 @@
+(footprint "CPG151101D05"
+	(version 20260206)
+	(generator "voicestick_c3_v1")
+	(layer "F.Cu")
+	(descr "CPG151101D05 PCB-mount mechanical switch; tail 2.85 mm below seating plane")
+	(property "Reference" "REF**"
+		(at 0 -8.85 0)
+		(layer "F.SilkS")
+		(effects
+			(font (size 0.8 0.8) (thickness 0.12))
+		)
+	)
+	(property "Value" "CPG151101D05"
+		(at 0 8.85 0)
+		(layer "F.Fab")
+		(effects
+			(font (size 0.8 0.8) (thickness 0.12))
+		)
+	)
+	(attr through_hole)
+	(fp_rect
+		(start -7.6 -7.85)
+		(end 7.6 7.85)
+		(stroke (width 0.1) (type default))
+		(fill no)
+		(layer "F.Fab")
+	)
+	(fp_rect
+		(start -7.85 -8.1)
+		(end 7.85 8.1)
+		(stroke (width 0.05) (type default))
+		(fill no)
+		(layer "F.CrtYd")
+	)
+	(pad "" np_thru_hole circle
+		(at 0 0)
+		(size 4.1 4.1)
+		(drill 4.1)
+		(layers "*.Cu" "*.Mask")
+	)
+	(pad "1" thru_hole circle
+		(at 2.54 -5.08)
+		(size 2.4 2.4)
+		(drill 1.5)
+		(layers "*.Cu" "*.Mask")
+	)
+	(pad "2" thru_hole circle
+		(at -3.8 -2.54)
+		(size 2.4 2.4)
+		(drill 1.5)
+		(layers "*.Cu" "*.Mask")
+	)
+	(model "${KIPRJMOD}/../../voicestick_c3/kicad/3dmodels/CPG151101D05.step"
+		(offset (xyz 0 0 0))
+		(scale (xyz 1 1 1))
+		(rotate (xyz 0 0 0))
+	)
+	(embedded_fonts no)
+)

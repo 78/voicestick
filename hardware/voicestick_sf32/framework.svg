@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1060" viewBox="0 0 1500 1060" role="img" aria-labelledby="title desc">
+  <title id="title">VoiceStick 思澈语音棒 · 系统框图</title>
+  <desc id="desc">上半图展示 USB-C 或单节电池经 BQ25185 产生系统电源 SYS。SYS 给主控和 RGB 电路供电，主控的可控 3.3 V 给麦克风供电。下半图展示按键输入、麦克风时钟、PDM 音频数据、蓝牙传输及 RGB 控制的方向。</desc>
+  <defs>
+    <marker id="power-tip" viewBox="0 0 12 12" refX="11.5" refY="6" markerWidth="10.5" markerHeight="10.5" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M0 0 12 6 0 12 2.8 6Z" fill="#317260"/>
+    </marker>
+    <marker id="signal-tip" viewBox="0 0 12 12" refX="11.5" refY="6" markerWidth="10.5" markerHeight="10.5" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M0 0 12 6 0 12 2.8 6Z" fill="#365e78"/>
+    </marker>
+    <style>
+      text {font-family:"Hiragino Sans GB","Noto Sans CJK SC","Noto Sans SC","Microsoft YaHei",sans-serif;fill:#263a39}
+      .head {font-size:43px;font-weight:700;letter-spacing:.2px}
+      .kicker {font-size:17px;fill:#4b615c}
+      .rev {font-size:18px;font-weight:700;fill:#4a6260;letter-spacing:1.2px}
+      .section {font-size:23px;font-weight:700}
+      .idx {font-size:18px;font-weight:700;fill:#397565}
+      .heading {font-size:23px;font-weight:700}
+      .detail {font-size:17px;fill:#445752}
+      .minor {font-size:15px;fill:#55645f}
+      .net {font-size:17px;font-weight:700;fill:#2b6958}
+      .signal {font-size:17px;font-weight:700;fill:#365e78}
+      .tag {font-size:15px;font-weight:700;letter-spacing:.35px;fill:#386457}
+      .box {fill:#fffef9;stroke:#a3b2a7;stroke-width:1.4}
+      .core {fill:#e4efe7;stroke:#548270;stroke-width:1.8}
+      .frame {fill:#fffefa;stroke:#a5b2a8;stroke-width:1.2}
+      .strip {fill:#e8f0e7;stroke:#a5b2a8;stroke-width:1.2}
+      .divider {stroke:#c7cfc5;stroke-width:1}
+      .p {fill:none;stroke:#317260;stroke-width:3.1;stroke-linecap:round;stroke-linejoin:round;marker-end:url(#power-tip)}
+      .s {fill:none;stroke:#365e78;stroke-width:2.7;stroke-linecap:round;stroke-linejoin:round;marker-end:url(#signal-tip)}
+    </style>
+  </defs>
+
+  <rect width="1500" height="1060" fill="#f9f8f2"/>
+  <rect x="12" y="12" width="1476" height="1036" fill="none" stroke="#a4b1a7"/>
+  <g id="page-heading">
+    <text x="40" y="65" class="head">VoiceStick 思澈语音棒 · 系统框图</text>
+    <text x="42" y="97" class="kicker">SF32LB52-MOD-1-N16R8　/　嘉立创 C42924267</text>
+    <text x="1457" y="55" text-anchor="end" class="rev">HARDWARE  /  A0</text>
+    <path d="M1104 89H1149" class="p"/><text x="1157" y="95" class="detail">供电方向</text>
+    <path d="M1287 89H1332" class="s"/><text x="1340" y="95" class="detail">信号方向</text>
+  </g>
+
+  <g id="power">
+    <rect x="32" y="119" width="1436" height="339" class="frame"/>
+    <rect x="32" y="119" width="1436" height="45" class="strip"/>
+    <text x="48" y="148" class="idx">01</text><text x="90" y="149" class="section">电从哪里来</text>
+    <text x="1448" y="147" text-anchor="end" class="minor">输入电源 → 电源管理 → 主控与外设</text>
+
+    <g id="usb-power">
+      <rect x="60" y="188" width="222" height="79" rx="4" class="box"/>
+      <text x="76" y="222" class="heading">底部 USB-C</text>
+      <text x="76" y="250" class="detail">J1 · 5 V 输入</text>
+    </g>
+    <g id="battery">
+      <rect x="60" y="308" width="222" height="82" rx="4" class="box"/>
+      <text x="76" y="342" class="heading">带保护板锂电池</text>
+      <text x="76" y="371" class="detail">J2 · 单节，250 mAh</text>
+    </g>
+    <g id="power-path">
+      <rect x="422" y="202" width="245" height="158" rx="4" class="box"/>
+      <text x="440" y="230" class="tag">U2 · BQ25185</text>
+      <text x="440" y="266" class="heading">充电与电源切换</text>
+      <path d="M440 281H649" class="divider"/>
+      <text x="440" y="311" class="detail">充满电压　4.20 V</text>
+      <text x="440" y="337" class="detail">标称快充　90.9 mA</text>
+    </g>
+    <path class="p" d="M283 229H360V247H421"/><text x="304" y="217" class="net">VBUS</text>
+    <path class="p" d="M283 348H360V327H421" marker-start="url(#power-tip)"/>
+    <text x="293" y="336" class="net">BAT_P</text><text x="292" y="372" class="minor">充电 / 放电</text>
+
+    <g id="module-supply">
+      <rect x="838" y="188" width="224" height="82" rx="4" class="core"/>
+      <text x="854" y="222" class="heading">思澈主控模组</text>
+      <text x="854" y="250" class="detail">U1 · 27 脚 VSYS 输入</text>
+    </g>
+    <g id="microphone-supply">
+      <rect x="1248" y="188" width="196" height="82" rx="4" class="box"/>
+      <text x="1264" y="222" class="heading">数字麦克风</text>
+      <text x="1264" y="250" class="detail">U5 · ZTS6538SE</text>
+    </g>
+    <g id="rgb-supply">
+      <rect x="838" y="308" width="295" height="82" rx="4" class="box"/>
+      <text x="854" y="342" class="heading">RGB 缓冲器与灯珠</text>
+      <text x="854" y="371" class="detail">U3 和 D2 共用 SYS</text>
+    </g>
+    <path class="p" d="M668 247H706V229H837"/>
+    <circle cx="749" cy="229" r="4.7" fill="#317260"/>
+    <path class="p" d="M749 229V349H837"/>
+    <text x="755" y="215" class="net">SYS</text>
+    <text x="758" y="337" class="net">SYS</text>
+    <path class="p" d="M1063 229H1247"/>
+    <text x="1155" y="214" text-anchor="middle" class="net">可控 3.3 V</text>
+    <text x="1155" y="253" text-anchor="middle" class="minor">17 脚 · VOUT2</text>
+    <text x="1164" y="337" class="tag">电池电压采样</text>
+    <text x="1164" y="365" class="detail">BAT_P → U1 的 61 脚</text>
+    <path d="M53 408H1447" class="divider"/>
+    <text x="61" y="439" class="net">插入 USB</text><text x="158" y="439" class="detail">优先给系统供电，有余量时给电池充电。</text>
+    <text x="754" y="439" class="net">拔下 USB</text><text x="850" y="439" class="detail">电池经 BQ25185 继续给 SYS 供电。</text>
+  </g>
+
+  <g id="signals">
+    <rect x="32" y="476" width="1436" height="355" class="frame"/>
+    <rect x="32" y="476" width="1436" height="44" class="strip"/>
+    <text x="48" y="505" class="idx">02</text><text x="90" y="506" class="section">按键、录音与传输</text>
+    <text x="1448" y="505" text-anchor="end" class="minor">左侧是输入，右侧是语音输出和指示灯</text>
+    <g id="microphone">
+      <rect x="60" y="549" width="250" height="95" rx="4" class="box"/>
+      <text x="77" y="586" class="heading">顶部进音麦克风</text>
+      <text x="77" y="617" class="detail">U5 · ZTS6538SE</text>
+    </g>
+    <g id="keys">
+      <rect x="60" y="690" width="250" height="100" rx="4" class="box"/>
+      <text x="77" y="727" class="heading">主键与三枚侧键</text>
+      <text x="77" y="757" class="detail">录音 / 翻页 / 取消或复位</text>
+    </g>
+    <g id="controller">
+      <rect x="587" y="541" width="332" height="255" rx="5" class="core"/>
+      <text x="609" y="576" class="tag">U1 · SF32LB52-MOD-1-N16R8</text>
+      <text x="609" y="620" class="heading" style="font-size:31px">思澈主控模组</text>
+      <text x="609" y="659" class="detail">PDM1 硬件将麦克风数据转为 PCM</text>
+      <path d="M609 682H898" class="divider"/>
+      <text x="609" y="717" class="detail">模组内置蓝牙与 PCB 天线</text>
+      <text x="609" y="749" class="detail">16 MB Flash · 8 MB PSRAM</text>
+    </g>
+    <g id="host">
+      <rect x="1180" y="549" width="264" height="95" rx="4" class="box"/>
+      <text x="1197" y="586" class="heading">电脑端 VoiceStick</text>
+      <text x="1197" y="617" class="detail">接收蓝牙语音</text>
+    </g>
+    <g id="status-light">
+      <rect x="1180" y="690" width="264" height="100" rx="4" class="box"/>
+      <text x="1197" y="727" class="heading">RGB 状态灯</text>
+      <text x="1197" y="757" class="detail">U3 电平转换 → D2 灯珠</text>
+    </g>
+    <path class="s" d="M586 573H311"/><text x="448" y="561" text-anchor="middle" class="signal">PA07 · 麦克风时钟</text>
+    <path class="s" d="M311 626H586"/><text x="448" y="614" text-anchor="middle" class="signal">PDM 数据 · PA08</text>
+    <path class="s" d="M311 741H586"/><text x="448" y="727" text-anchor="middle" class="signal">按键输入 · GPIO</text>
+    <path class="s" d="M920 597H1179"/><text x="1050" y="581" text-anchor="middle" class="signal">BLE 语音上行</text>
+    <text x="1050" y="624" text-anchor="middle" class="minor">新固件目标</text>
+    <path class="s" d="M920 741H1179"/><text x="1050" y="727" text-anchor="middle" class="signal">PA32 · 灯珠数据</text>
+  </g>
+
+  <g id="secondary-interfaces">
+    <rect x="32" y="849" width="1436" height="143" class="frame"/>
+    <rect x="32" y="849" width="1436" height="41" class="strip"/>
+    <text x="48" y="877" class="idx">03</text><text x="90" y="877" class="section">主控的其他连接</text>
+    <path d="M503 906V978M1001 906V978" class="divider"/>
+    <text x="59" y="921" class="heading" style="font-size:20px">USB 通信与插入检测</text>
+    <text x="59" y="949" class="detail">J1 ↔ U1 · D+ / D− 经 U6 静电保护</text>
+    <text x="59" y="974" class="minor">PA35 / PA36 传数据，PA44 检测 VBUS。</text>
+    <text x="530" y="921" class="heading" style="font-size:20px">充电反馈与控制</text>
+    <text x="530" y="949" class="detail">U2 → U1 · PA40 读充电，PA39 读故障</text>
+    <text x="530" y="974" class="minor">PA11 可暂停充电。D3 单独显示充电状态。</text>
+    <text x="1027" y="921" class="heading" style="font-size:20px">烧录与调试</text>
+    <text x="1027" y="949" class="detail">TP1 / TP2 ↔ U1 · PA19 / PA18</text>
+    <text x="1027" y="974" class="minor">UART 与 SWD 共用这对测试焊盘。</text>
+  </g>
+  <text x="40" y="1027" class="minor">器件编号与思澈 A0 单页原理图一致。</text>
+  <text x="1458" y="1027" text-anchor="end" class="minor">VOICESTICK SF32　 /　 SYSTEM BLOCK DIAGRAM</text>
+</svg>

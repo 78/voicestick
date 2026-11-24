@@ -1,0 +1,7 @@
+(version 1)
+(rule "Plated via drill to foreign trace"
+  (condition "(A.Type == 'Via' && B.Type == 'Track') || (B.Type == 'Via' && A.Type == 'Track')")
+  (constraint hole_clearance (min 0.20mm)))
+(rule "Plated component drill to foreign track"
+  (condition "(A.Type == 'Pad' && A.Pad_Type == 'Through-hole' && B.Type == 'Track') || (B.Type == 'Pad' && B.Pad_Type == 'Through-hole' && A.Type == 'Track')")
+  (constraint hole_clearance (min 0.28mm)))
