@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_ota_ops.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -49,6 +50,7 @@ static uint16_t s_state_attr_handle;
 static uint16_t s_ota_state_attr_handle;
 static char s_device_id[5] = "0000";
 static char s_device_name[8] = VOICE_BLE_DEVICE_NAME_PREFIX "-0000";
+static char s_device_uuid[37];
 static voice_ble_connection_cb_t s_connection_cb;
 static voice_ble_pairing_cb_t s_pairing_cb;
 static voice_ble_control_cb_t s_control_cb;
@@ -1003,6 +1005,39 @@ static esp_err_t init_device_identity(void)
     return ESP_OK;
 }
 
+static esp_err_t init_device_uuid(void)
+{
+    const char *key = "device_uuid";
+    nvs_handle_t store;
+    ESP_RETURN_ON_ERROR(nvs_open("voice_identity", NVS_READWRITE, &store),
+                        TAG, "device identity storage open failed");
+
+    uint8_t uuid[16];
+    size_t size = sizeof(uuid);
+    esp_err_t err = nvs_get_blob(store, key, uuid, &size);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        esp_fill_random(uuid, sizeof(uuid));
+        uuid[6] = (uuid[6] & 0x0f) | 0x40;
+        uuid[8] = (uuid[8] & 0x3f) | 0x80;
+        err = nvs_set_blob(store, key, uuid, sizeof(uuid));
+        if (err == ESP_OK) {
+            err = nvs_commit(store);
+        }
+    } else if (err == ESP_OK && size != sizeof(uuid)) {
+        err = ESP_ERR_INVALID_SIZE;
+    }
+    nvs_close(store);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    snprintf(s_device_uuid, sizeof(s_device_uuid),
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
+             uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+    return ESP_OK;
+}
+
 esp_err_t voice_ble_init(void)
 {
     ESP_RETURN_ON_ERROR(init_device_identity(), TAG, "device identity init failed");
@@ -1024,6 +1059,12 @@ esp_err_t voice_ble_init(void)
     }
 
     ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "nimble init failed");
+
+    /* The Bluetooth controller is enabled before the first UUID needs entropy. */
+    err = init_device_uuid();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "device UUID unavailable: %s", esp_err_to_name(err));
+    }
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -1268,8 +1309,14 @@ esp_err_t voice_ble_send_device_info(void)
 
     const board_button_t *buttons = NULL;
     size_t button_count = board_buttons(&buttons);
-    /* The host reads device_info from a single notification: drop trailing
-     * buttons until the frame (4-byte header + JSON) fits the ATT payload. */
+    char uuid_field[sizeof(",\"device_uuid\":\"\"") + sizeof(s_device_uuid) - 1] = "";
+    if (s_device_uuid[0] != '\0') {
+        snprintf(uuid_field, sizeof(uuid_field), ",\"device_uuid\":\"%s\"", s_device_uuid);
+    }
+    const char *interaction_modes = ",\"interaction_modes\":[\"hold_to_talk\",\"click_to_talk\"]";
+    const char *ui_states = ",\"ui_states\":[\"ready\",\"recording\",\"thinking\","
+                            "\"pending_confirmation\",\"error\"]";
+    /* Keep device identity and button roles ahead of optional capabilities. */
     const size_t max_json = ble_att_mtu(s_conn_handle) - 3 - 4;
     char json[320];
     while (true) {
@@ -1281,18 +1328,22 @@ esp_err_t voice_ble_send_device_info(void)
         }
         const int len = snprintf(json, sizeof(json),
                                  "{\"event\":\"device_info\",\"hardware\":\"%s\","
-                                 "\"firmware_version\":\"%s\","
-                                 "\"buttons\":[%s],"
-                                 "\"interaction_modes\":[\"hold_to_talk\",\"click_to_talk\"],"
-                                 "\"ui_states\":[\"ready\",\"recording\",\"thinking\","
-                                 "\"pending_confirmation\",\"error\"]}",
-                                 board_hardware_name(), version, button_list);
-        if ((size_t)len <= max_json || button_count == 0) {
-            break;
+                                 "\"firmware_version\":\"%s\",\"buttons\":[%s]%s%s%s}",
+                                 board_hardware_name(), version, button_list, uuid_field,
+                                 interaction_modes, ui_states);
+        if (len >= 0 && (size_t)len < sizeof(json) && (size_t)len <= max_json) {
+            return send_state_json(json);
         }
-        button_count--;
+        if (*ui_states) {
+            ui_states = "";
+        } else if (*interaction_modes) {
+            interaction_modes = "";
+        } else if (button_count > 0) {
+            button_count--;
+        } else {
+            return ESP_ERR_INVALID_SIZE;
+        }
     }
-    return send_state_json(json);
 }
 
 esp_err_t voice_ble_send_button_down(const char *button, uint32_t session_id)
