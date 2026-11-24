@@ -30,7 +30,7 @@ Characteristics:
 | `ota_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105` | StickS3 -> Mac | notify |
 | `authorized` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5108` | VoiceStick -> desktop | encrypted read, returns `0x01` after authorization |
 
-A three-second hold of the `secondary` button advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106` for pairing. The window closes after 60 seconds or a successful encrypted BLE bond. Each VoiceStick keeps one authorized host in persistent storage. Outside the window, a VoiceStick with an authorized host advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5107` for reconnection. Both advertisements lead to the same GATT service above. The previous firmware advertised the service UUID directly.
+With no active BLE link, a three-second hold of the `secondary` button advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106` for pairing. The window closes after 60 seconds or a successful encrypted BLE bond. Each VoiceStick keeps one authorized host in persistent storage. Outside the window, a VoiceStick with an authorized host advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5107` for reconnection. Both advertisements lead to the same GATT service above. The previous firmware advertised the service UUID directly.
 
 The Mac app uses the pairing advertisement in the device picker and checks the encrypted `authorized` characteristic before saving the device. Background scanning uses the reconnect and legacy advertisements and matches the local `VS-XXXX` list. The firmware also validates the saved host bond before accepting control or OTA writes or sending audio and state. The Mac app can connect to multiple VoiceSticks.
 

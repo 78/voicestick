@@ -41,6 +41,11 @@ static bool s_ota_pm_locked;
 static bool s_battery_charging;
 static bool s_usb_powered;
 static esp_pm_lock_handle_t s_cpu_freq_lock;
+#if CONFIG_IDF_TARGET_ESP32C3
+static esp_pm_lock_handle_t s_button_no_light_sleep;
+/* Each held button owns one reference to the same PM lock. */
+static bool s_button_pm_locked[MAX_BUTTONS];
+#endif
 static esp_timer_handle_t s_display_dim_timer;
 static esp_timer_handle_t s_deep_sleep_timer;
 static esp_timer_handle_t s_battery_refresh_timer;
@@ -53,6 +58,9 @@ static button_handle_t s_button_handles[MAX_BUTTONS];
 static int64_t s_button_down_us[MAX_BUTTONS];
 static int64_t s_primary_down_us;
 static uint32_t s_primary_session_id;
+/* Both cancel-button fields are used only by the button timer callbacks. */
+static int64_t s_cancel_down_us;
+static bool s_cancel_long_press;
 
 typedef enum {
     APP_UI_STATE_READY,
@@ -93,6 +101,7 @@ typedef enum {
     APP_EVENT_PRIMARY_UP,
     APP_EVENT_BUTTON_DOWN,
     APP_EVENT_BUTTON_UP,
+    APP_EVENT_CANCEL_CLICK,
     APP_EVENT_PAIRING_HOLD,
     APP_EVENT_UI_STATE,
     APP_EVENT_BLE_CONNECTED,
@@ -110,11 +119,11 @@ typedef enum {
 } app_event_type_t;
 
 static bool s_pairing_open;
-static bool s_pairing_hold_handled;
 
 typedef struct {
     app_event_type_t type;
     uint32_t button;
+    uint32_t button_hold_ms;
     uint32_t written;
     uint32_t size;
     char state[32];
@@ -148,7 +157,11 @@ static esp_err_t init_power_management(void)
     if (err != ESP_OK) {
         return err;
     }
+#if CONFIG_IDF_TARGET_ESP32C3
+    return esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "button_held", &s_button_no_light_sleep);
+#else
     return ESP_OK;
+#endif
 }
 
 static esp_err_t acquire_recording_pm_locks(void)
@@ -439,12 +452,13 @@ static void queue_ui_state_event(const char *state, const char *text)
     }
 }
 
-static void queue_button_event(app_event_type_t type, uint32_t button)
+static void queue_button_event(app_event_type_t type, uint32_t button, uint32_t hold_ms)
 {
     if (s_app_event_queue) {
         app_event_t event = {
             .type = type,
             .button = button,
+            .button_hold_ms = hold_ms,
         };
         (void)xQueueSend(s_app_event_queue, &event, 0);
     }
@@ -454,21 +468,52 @@ static void button_down_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     const uint32_t button = (uint32_t)(uintptr_t)usr_data;
-    queue_button_event(button == 0 ? APP_EVENT_PRIMARY_DOWN : APP_EVENT_BUTTON_DOWN, button);
+#if CONFIG_IDF_TARGET_ESP32C3
+    /* Avoid repeated light-sleep cycles between scans while a key is held. */
+    if (!s_button_pm_locked[button]) {
+        esp_err_t err = esp_pm_lock_acquire(s_button_no_light_sleep);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(err);
+        s_button_pm_locked[button] = err == ESP_OK;
+    }
+#endif
+    if (strcmp(s_buttons[button].name, "secondary") == 0) {
+        s_cancel_down_us = esp_timer_get_time();
+        s_cancel_long_press = false;
+        return;
+    }
+    queue_button_event(button == 0 ? APP_EVENT_PRIMARY_DOWN : APP_EVENT_BUTTON_DOWN, button, 0);
 }
 
 static void button_up_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     const uint32_t button = (uint32_t)(uintptr_t)usr_data;
-    queue_button_event(button == 0 ? APP_EVENT_PRIMARY_UP : APP_EVENT_BUTTON_UP, button);
+#if CONFIG_IDF_TARGET_ESP32C3
+    if (s_button_pm_locked[button]) {
+        esp_err_t err = esp_pm_lock_release(s_button_no_light_sleep);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(err);
+        s_button_pm_locked[button] = err != ESP_OK;
+    }
+#endif
+    if (strcmp(s_buttons[button].name, "secondary") == 0) {
+        const uint32_t hold_ms = elapsed_button_ms(s_cancel_down_us);
+        if (s_cancel_down_us != 0 && !s_cancel_long_press && hold_ms < PAIRING_HOLD_MS) {
+            queue_button_event(APP_EVENT_CANCEL_CLICK, button, hold_ms);
+        }
+        s_cancel_down_us = 0;
+        return;
+    }
+    queue_button_event(button == 0 ? APP_EVENT_PRIMARY_UP : APP_EVENT_BUTTON_UP, button, 0);
 }
 
 static void pairing_hold_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     (void)usr_data;
-    queue_app_event(APP_EVENT_PAIRING_HOLD);
+    s_cancel_long_press = true;
+    if (!voice_ble_has_active_link()) {
+        queue_app_event(APP_EVENT_PAIRING_HOLD);
+    }
 }
 
 static void ble_connection_cb(bool connected)
@@ -655,17 +700,16 @@ static void app_event_task(void *arg)
         case APP_EVENT_BUTTON_UP:
             ESP_LOGI(TAG, "button %s up", s_buttons[event.button].name);
             note_activity();
-            if (s_pairing_hold_handled && strcmp(s_buttons[event.button].name, "secondary") == 0) {
-                s_pairing_hold_handled = false;
-            } else {
-                voice_ble_send_button_click(s_buttons[event.button].name,
-                                            elapsed_button_ms(s_button_down_us[event.button]), 0);
-            }
+            voice_ble_send_button_click(s_buttons[event.button].name,
+                                        elapsed_button_ms(s_button_down_us[event.button]), 0);
             s_button_down_us[event.button] = 0;
+            break;
+        case APP_EVENT_CANCEL_CLICK:
+            note_activity();
+            voice_ble_send_button_click(s_buttons[event.button].name, event.button_hold_ms, 0);
             break;
         case APP_EVENT_PAIRING_HOLD:
             if (!s_recording && !s_ota_updating) {
-                s_pairing_hold_handled = true;
                 voice_ble_open_pairing();
             }
             break;

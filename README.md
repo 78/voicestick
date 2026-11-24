@@ -300,10 +300,12 @@ Supported Volcengine `resource_id` values:
 
 Do not commit API keys.
 
-## Pairing Flow
+## Pairing a New Computer
 
-1. Turn on the VoiceStick and start the macOS desktop app.
-2. Hold the C3 cancel button or the StickS3 side button for three seconds. The device accepts pairing for 60 seconds. The C3 flashes blue during that window.
+VoiceStick reconnects automatically to its paired computer, including after a firmware update. Use these steps when pairing for the first time or switching to a different computer.
+
+1. Turn on the VoiceStick and start the macOS app on the computer you want to pair.
+2. If you are switching computers, disconnect the VoiceStick from the old computer. Hold the C3 cancel button or the StickS3 side button for three seconds. The device accepts pairing for 60 seconds. The C3 flashes blue during that window.
 3. Open `Pair Device...` from the menu bar, select the matching `VS-XXXX`, and click `Pair`.
 4. Confirm the Bluetooth connection in macOS if prompted. The app reconnects automatically after pairing.
 

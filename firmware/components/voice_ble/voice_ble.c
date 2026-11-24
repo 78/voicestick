@@ -14,7 +14,6 @@
 #include "esp_ota_ops.h"
 #include "esp_random.h"
 #include "esp_system.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -38,14 +37,13 @@ static const char *TAG = "voice_ble";
 
 #define OTA_PROGRESS_NOTIFY_BYTES (32 * 1024)
 #define PAIRING_WINDOW_MS (60 * 1000)
-#define PAIRING_START_TIMEOUT_US (8 * 1000000ULL)
 #define BONDED_SECURITY_GRACE_MS 1500
 
 static atomic_bool s_connected;
 static bool s_audio_subscribed;
 static atomic_bool s_state_subscribed;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static uint16_t s_link_handle = BLE_HS_CONN_HANDLE_NONE;
+static atomic_uint_least16_t s_link_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t s_own_addr_type;
 static uint16_t s_audio_attr_handle;
 static uint16_t s_state_attr_handle;
@@ -61,8 +59,6 @@ static atomic_bool s_ble_initialized;
 
 /* The NimBLE host task owns pairing changes and bond storage. */
 static atomic_bool s_pairing_open;
-static atomic_bool s_pairing_start_pending;
-static esp_timer_handle_t s_pairing_start_timer;
 static bool s_has_owner;
 static ble_addr_t s_owner;
 static nvs_handle_t s_owner_store;
@@ -262,22 +258,6 @@ static void terminate_link(void)
     }
 }
 
-static void pairing_start_timeout_cb(void *arg)
-{
-    (void)arg;
-    if (atomic_exchange(&s_pairing_start_pending, false)) {
-        ESP_LOGE(TAG, "BLE stalled before pairing advertisement; restarting");
-        esp_restart();
-    }
-}
-
-static void stop_pairing_start_timer(void)
-{
-    if (atomic_exchange(&s_pairing_start_pending, false)) {
-        (void)esp_timer_stop(s_pairing_start_timer);
-    }
-}
-
 static void set_pairing_open(bool open)
 {
     if (s_pairing_open == open) {
@@ -288,7 +268,6 @@ static void set_pairing_open(bool open)
         ble_npl_callout_reset(&s_pairing_timeout, pdMS_TO_TICKS(PAIRING_WINDOW_MS));
     } else {
         ble_npl_callout_stop(&s_pairing_timeout);
-        stop_pairing_start_timer();
     }
     ESP_LOGI(TAG, "pairing window %s", open ? "opened" : "closed");
     if (s_pairing_cb) {
@@ -310,24 +289,17 @@ static void open_pairing_event_cb(struct ble_npl_event *event)
         return;
     }
 
-    /* On C3 with ESP-IDF c43d665a96c, a disconnect hung in the controller's
-     * API_vhci_host_send_packet while waiting for a semaphore. The cause of
-     * that wait is still unknown. Run recovery outside the NimBLE host task
-     * so a stuck GAP command cannot block both pairing timers.
+    /* On C3 with ESP-IDF c43d665a96c, terminating the old link here hung in
+     * API_vhci_host_send_packet while waiting for a controller semaphore.
+     * Require the computer to disconnect before opening the pairing window.
      */
-    s_pairing_start_pending = true;
-    esp_err_t err = esp_timer_start_once(s_pairing_start_timer, PAIRING_START_TIMEOUT_US);
-    if (err != ESP_OK) {
-        s_pairing_start_pending = false;
-        ESP_LOGE(TAG, "could not start pairing transition timer: %s", esp_err_to_name(err));
+    if (s_link_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGI(TAG, "disconnect the current computer before entering pairing mode");
         return;
     }
+
     set_pairing_open(true);
-    if (s_link_handle != BLE_HS_CONN_HANDLE_NONE) {
-        terminate_link();
-    } else {
-        restart_advertising();
-    }
+    restart_advertising();
 }
 
 static void pairing_timeout_cb(struct ble_npl_event *event)
@@ -984,9 +956,6 @@ static void start_advertising(void)
         return;
     }
 
-    if (s_pairing_open) {
-        stop_pairing_start_timer();
-    }
     ESP_LOGI(TAG, "advertising as %s for %s", s_device_name,
              s_pairing_open ? "pairing" : "reconnection");
 }
@@ -1095,12 +1064,6 @@ esp_err_t voice_ble_init(void)
         ESP_LOGW(TAG, "could not read pairing owner: %s", esp_err_to_name(err));
     }
 
-    const esp_timer_create_args_t pairing_start_timer_args = {
-        .callback = pairing_start_timeout_cb,
-        .name = "ble_pair_start",
-    };
-    ESP_RETURN_ON_ERROR(esp_timer_create(&pairing_start_timer_args, &s_pairing_start_timer),
-                        TAG, "pairing transition timer init failed");
     ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "nimble init failed");
 
     /* The Bluetooth controller is enabled before the first UUID needs entropy. */
@@ -1166,7 +1129,7 @@ void voice_ble_set_pairing_callback(voice_ble_pairing_cb_t callback)
 
 void voice_ble_open_pairing(void)
 {
-    if (s_ble_initialized) {
+    if (s_ble_initialized && !voice_ble_has_active_link()) {
         ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_open_pairing_event);
     }
 }
@@ -1184,6 +1147,11 @@ void voice_ble_set_ota_callback(voice_ble_ota_cb_t callback)
 bool voice_ble_is_connected(void)
 {
     return s_connected;
+}
+
+bool voice_ble_has_active_link(void)
+{
+    return s_link_handle != BLE_HS_CONN_HANDLE_NONE;
 }
 
 bool voice_ble_is_ready(void)
