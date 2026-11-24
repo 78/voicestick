@@ -43,7 +43,7 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - Display: 135 x 240 ST7789P3 portrait screen
 - LCD backlight: GPIO38 PWM
 
-Main pin definitions live in `firmware/boards/m5stick_s3/components/stick_s3_board/include/stick_s3_board.h`.
+Main pin definitions live in `firmware/boards/m5stack_stick_s3/components/stick_s3_board/include/stick_s3_board.h`.
 
 VoiceStick C3 v1 (`hardware/voicestick_c3`, board `voicestick_c3`):
 

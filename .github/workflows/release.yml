@@ -26,8 +26,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: StickS3
-            board: m5stick_s3
+          - label: M5Stack StickS3
+            board: m5stack_stick_s3
             chip: esp32s3
             hardware: stick_s3
             slug: sticks3

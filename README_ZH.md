@@ -21,13 +21,13 @@ Voice Stick 是一个适用于 macOS、Windows 和 Linux 的蓝牙语音输入�
 
 | | M5Stack StickS3 | VoiceStick C3 v1 |
 | --- | --- | --- |
-| 固件构建目标 | `m5stick_s3`（默认） | `voicestick_c3` |
+| 固件构建目标 | `m5stack_stick_s3`（默认） | `voicestick_c3` |
 | 主控与音频 | ESP32-S3-PICO-1-N8R8，ES8311 的 I2S 接口输出 16 kHz 单声道 PCM | ESP32-C3、外挂 8 MB Flash，SD18OB371 PDM 麦克风默认 1.536 MHz，经 CIC3 抽取得到 16 kHz PCM |
 | 按键 | 主键 GPIO11，侧键 GPIO12 | 主键 GPIO4、取消 GPIO9、上一页 GPIO8、下一页 GPIO21 |
 | 状态显示 | ST7789P3 竖屏，135 × 240，GPIO38 控制背光 | GPIO20 驱动 WS2812B 状态灯 |
 | 电源与唤醒 | PMIC 中断 GPIO13，电池供电空闲 5 分钟进入深睡 | GPIO2 控制外设供电，GPIO3 采样电池，GPIO10 读充电状态。正常深睡可由主键或插 USB 唤醒 |
 
-StickS3 的引脚见[板级头文件](firmware/boards/m5stick_s3/components/stick_s3_board/include/stick_s3_board.h)。自研板的晶振、麦克风、电源和完整引脚表见 [C3 v1 电路说明](hardware/voicestick_c3/README_ZH.md)。
+StickS3 的引脚见[板级头文件](firmware/boards/m5stack_stick_s3/components/stick_s3_board/include/stick_s3_board.h)。自研板的晶振、麦克风、电源和完整引脚表见 [C3 v1 电路说明](hardware/voicestick_c3/README_ZH.md)。
 
 ## 录音、确认与配对
 
