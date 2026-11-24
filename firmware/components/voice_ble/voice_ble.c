@@ -14,6 +14,7 @@
 #include "esp_ota_ops.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -37,6 +38,7 @@ static const char *TAG = "voice_ble";
 
 #define OTA_PROGRESS_NOTIFY_BYTES (32 * 1024)
 #define PAIRING_WINDOW_MS (60 * 1000)
+#define PAIRING_START_TIMEOUT_US (8 * 1000000ULL)
 #define BONDED_SECURITY_GRACE_MS 1500
 
 static atomic_bool s_connected;
@@ -57,8 +59,10 @@ static voice_ble_control_cb_t s_control_cb;
 static voice_ble_ota_cb_t s_ota_cb;
 static atomic_bool s_ble_initialized;
 
-/* Pairing state and bond storage are owned by the NimBLE host task. */
-static bool s_pairing_open;
+/* The NimBLE host task owns pairing changes and bond storage. */
+static atomic_bool s_pairing_open;
+static atomic_bool s_pairing_start_pending;
+static esp_timer_handle_t s_pairing_start_timer;
 static bool s_has_owner;
 static ble_addr_t s_owner;
 static nvs_handle_t s_owner_store;
@@ -258,6 +262,22 @@ static void terminate_link(void)
     }
 }
 
+static void pairing_start_timeout_cb(void *arg)
+{
+    (void)arg;
+    if (atomic_exchange(&s_pairing_start_pending, false)) {
+        ESP_LOGE(TAG, "BLE stalled before pairing advertisement; restarting");
+        esp_restart();
+    }
+}
+
+static void stop_pairing_start_timer(void)
+{
+    if (atomic_exchange(&s_pairing_start_pending, false)) {
+        (void)esp_timer_stop(s_pairing_start_timer);
+    }
+}
+
 static void set_pairing_open(bool open)
 {
     if (s_pairing_open == open) {
@@ -268,6 +288,7 @@ static void set_pairing_open(bool open)
         ble_npl_callout_reset(&s_pairing_timeout, pdMS_TO_TICKS(PAIRING_WINDOW_MS));
     } else {
         ble_npl_callout_stop(&s_pairing_timeout);
+        stop_pairing_start_timer();
     }
     ESP_LOGI(TAG, "pairing window %s", open ? "opened" : "closed");
     if (s_pairing_cb) {
@@ -286,6 +307,19 @@ static void open_pairing_event_cb(struct ble_npl_event *event)
 {
     (void)event;
     if (s_ota.active || s_pairing_open || !ble_hs_synced()) {
+        return;
+    }
+
+    /* On C3 with ESP-IDF c43d665a96c, a disconnect hung in the controller's
+     * API_vhci_host_send_packet while waiting for a semaphore. The cause of
+     * that wait is still unknown. Run recovery outside the NimBLE host task
+     * so a stuck GAP command cannot block both pairing timers.
+     */
+    s_pairing_start_pending = true;
+    esp_err_t err = esp_timer_start_once(s_pairing_start_timer, PAIRING_START_TIMEOUT_US);
+    if (err != ESP_OK) {
+        s_pairing_start_pending = false;
+        ESP_LOGE(TAG, "could not start pairing transition timer: %s", esp_err_to_name(err));
         return;
     }
     set_pairing_open(true);
@@ -950,6 +984,9 @@ static void start_advertising(void)
         return;
     }
 
+    if (s_pairing_open) {
+        stop_pairing_start_timer();
+    }
     ESP_LOGI(TAG, "advertising as %s for %s", s_device_name,
              s_pairing_open ? "pairing" : "reconnection");
 }
@@ -1058,6 +1095,12 @@ esp_err_t voice_ble_init(void)
         ESP_LOGW(TAG, "could not read pairing owner: %s", esp_err_to_name(err));
     }
 
+    const esp_timer_create_args_t pairing_start_timer_args = {
+        .callback = pairing_start_timeout_cb,
+        .name = "ble_pair_start",
+    };
+    ESP_RETURN_ON_ERROR(esp_timer_create(&pairing_start_timer_args, &s_pairing_start_timer),
+                        TAG, "pairing transition timer init failed");
     ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "nimble init failed");
 
     /* The Bluetooth controller is enabled before the first UUID needs entropy. */
@@ -1145,7 +1188,7 @@ bool voice_ble_is_connected(void)
 
 bool voice_ble_is_ready(void)
 {
-    return s_connected && s_audio_subscribed && s_state_subscribed;
+    return !s_pairing_open && s_connected && s_audio_subscribed && s_state_subscribed;
 }
 
 bool voice_ble_ota_is_active(void)
@@ -1210,7 +1253,7 @@ esp_err_t voice_ble_send_audio(uint32_t session_id, uint32_t seq, uint8_t flags,
 
 esp_err_t voice_ble_request_fast_interval(void)
 {
-    if (!s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+    if (s_pairing_open || !s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         return ESP_ERR_INVALID_STATE;
     }
     s_itvl_target = CONN_ITVL_FAST;
@@ -1239,7 +1282,7 @@ esp_err_t voice_ble_request_fast_interval(void)
 
 esp_err_t voice_ble_request_slow_interval(void)
 {
-    if (!s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+    if (s_pairing_open || !s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         return ESP_ERR_INVALID_STATE;
     }
     s_itvl_target = CONN_ITVL_SLOW;
@@ -1268,6 +1311,9 @@ esp_err_t voice_ble_request_slow_interval(void)
 
 static esp_err_t send_state_json(const char *json)
 {
+    if (s_pairing_open) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!s_connected || !s_state_subscribed || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         ESP_LOGW(TAG, "send_state_json gated: connected=%d state_sub=%d conn=%u",
                  s_connected, s_state_subscribed, s_conn_handle);
