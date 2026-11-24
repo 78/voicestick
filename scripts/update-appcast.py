@@ -69,7 +69,7 @@ def main() -> None:
         sparkle:os="windows"
         sparkle:version="{windows_version}"
         sparkle:shortVersionString="{windows_version}"
-        sparkle:installerArguments="/passive"
+        sparkle:installerArguments="/qb!+ /norestart VOICESTICK_RELAUNCH=1"
         length="{args.msi_length}"
         type="application/octet-stream"
       />

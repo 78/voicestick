@@ -10,6 +10,7 @@
 #include <winrt/base.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <exception>
@@ -49,6 +50,14 @@ constexpr UINT kMenuTranslationsPerDevice = 24;
 #ifndef VOICESTICK_APPCAST_URL
 #define VOICESTICK_APPCAST_URL "https://78.github.io/voicestick/appcast.xml"
 #endif
+
+std::atomic<HWND> updater_window{nullptr};
+
+void RequestShutdownForAppUpdate() {
+    if (const HWND hwnd = updater_window.load()) {
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    }
+}
 
 void LogLine(std::string_view message) {
     voicestick::LogApp(message);
@@ -155,6 +164,8 @@ int Win32App::Run() {
         win_sparkle_set_appcast_url(VOICESTICK_APPCAST_URL);
         win_sparkle_set_automatic_check_for_updates(1);
         win_sparkle_set_update_check_interval(86400);
+        updater_window.store(hwnd_);
+        win_sparkle_set_shutdown_request_callback(RequestShutdownForAppUpdate);
         win_sparkle_init();
         LogLine("WinSparkle initialized");
 
@@ -522,7 +533,11 @@ LRESULT Win32App::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
             return 0;
         }
         }
+    case WM_CLOSE:
+        ShutdownAndQuit();
+        return 0;
     case WM_DESTROY:
+        updater_window.store(nullptr);
         pair_device_dialog_.reset();
         ble_central_ = nullptr;
         coordinator_.reset();

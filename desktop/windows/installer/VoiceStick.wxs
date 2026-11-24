@@ -27,6 +27,17 @@
                Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
     </UI>
 
+    <Property Id="VOICESTICK_RELAUNCH" Secure="yes" />
+    <SetProperty Id="WixUnelevatedShellExecTarget" Value="[#VoiceStickExeFile]"
+                 Before="RelaunchAfterUpdate" Sequence="execute"
+                 Condition="VOICESTICK_RELAUNCH = 1" />
+    <CustomAction Id="RelaunchAfterUpdate" DllEntry="WixUnelevatedShellExec"
+                  BinaryRef="Wix4UtilCA_X64" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RelaunchAfterUpdate" After="InstallFinalize"
+              Condition="VOICESTICK_RELAUNCH = 1 AND WIX_UPGRADE_DETECTED AND NOT Installed AND UILevel &gt;= 3 AND UILevel &lt; 5" />
+    </InstallExecuteSequence>
+
     <Icon Id="VoiceStickIcon" SourceFile="$(var.ProjectDir)\desktop\windows\resources\app.ico" />
     <Property Id="ARPPRODUCTICON" Value="VoiceStickIcon" />
 

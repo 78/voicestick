@@ -49,7 +49,7 @@ $env:SIGNING_SHA1 = "YOUR_CERT_THUMBPRINT"
 scripts\build-msi.bat
 ```
 
-Upload `desktop\windows\build-msi-x64\VoiceStick_<version>.msi` to the matching GitHub Release, then manually run the `Deploy Website to GitHub Pages` workflow. The MSI is the WinSparkle update package; the appcast entry records the GitHub Release MSI URL, byte length, version, Windows OS marker, and `/passive` installer argument.
+Upload `desktop\windows\build-msi-x64\VoiceStick_<version>.msi` to the matching GitHub Release, then manually run the `Deploy Website to GitHub Pages` workflow. WinSparkle passes `/qb!+ /norestart VOICESTICK_RELAUNCH=1` to the MSI. Windows Installer shows the installation result and relaunches VoiceStick for the signed-in user after a successful upgrade.
 
 If an older `desktop\windows\build` directory was configured from the wrong Visual Studio environment, delete it or ignore it. Mixing an x86 CMake cache with x64 SDK libraries causes link errors.
 
