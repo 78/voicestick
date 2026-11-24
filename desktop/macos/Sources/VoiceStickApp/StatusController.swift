@@ -462,6 +462,18 @@ final class StatusController {
             return
         }
 
+        if info?.errorMessage == nil, info?.updateAvailable == true, let latestVersion = info?.latestVersion {
+            let updateItem = makeMenuItem(
+                title: "Update to \(latestVersion)...",
+                symbolName: "square.and.arrow.down",
+                action: #selector(updateFirmwareForDevice)
+            )
+            updateItem.representedObject = deviceID
+            updateItem.isEnabled = isConnected
+            submenu.addItem(updateItem)
+            return
+        }
+
         let checkItem = makeMenuItem(
             title: "Check for Firmware Updates…",
             symbolName: "arrow.triangle.2.circlepath",
@@ -476,18 +488,6 @@ final class StatusController {
             errorItem.isEnabled = false
             errorItem.image = Self.symbolImage(named: "exclamationmark.triangle", accessibilityDescription: "Update Check Failed")
             submenu.addItem(errorItem)
-            return
-        }
-
-        if info?.updateAvailable == true, let latestVersion = info?.latestVersion {
-            let updateItem = makeMenuItem(
-                title: "Update to \(latestVersion)...",
-                symbolName: "square.and.arrow.down",
-                action: #selector(updateFirmwareForDevice)
-            )
-            updateItem.representedObject = deviceID
-            updateItem.isEnabled = isConnected
-            submenu.addItem(updateItem)
         }
     }
 

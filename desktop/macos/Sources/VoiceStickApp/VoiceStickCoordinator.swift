@@ -135,7 +135,11 @@ final class VoiceStickCoordinator {
     private let audioEndTimeout: TimeInterval = 1.0
     private let firmwareManifestCacheDuration: TimeInterval = 24 * 60 * 60
 
-    private var mainInputState = MainInputState.ready
+    private var mainInputState = MainInputState.ready {
+        didSet {
+            if !mainInputState.isBusy { scheduleFirmwareUpdatePrompt() }
+        }
+    }
     private var receivedAudioFrames = 0
     private var bufferedOggChunks: [Data] = []
     private var asrStarted = false
@@ -148,6 +152,7 @@ final class VoiceStickCoordinator {
     private var lastRecoverablePeripheralID: UUID?
     private var pairedDeviceIDs: [String]
     private var firmwareInfoByDeviceID: [String: DeviceFirmwareInfo] = [:]
+    private var firmwareReportingPeripherals: [String: UUID] = [:]
     private typealias FirmwareFeedCompletion = (Result<FirmwareManifest, Error>) -> Void
     private struct FirmwareFeed {
         var manifest: FirmwareManifest?
@@ -158,11 +163,22 @@ final class VoiceStickCoordinator {
     }
     private var firmwareFeeds: [String: FirmwareFeed] = [:]
     private var firmwareManifestRefreshTimer: Timer?
-    private var pendingFirmwareUpdatePromptDeviceIDs: Set<String> = []
+    private static let firmwareReminderHistoryKey = "firmwareUpdateReminderHistory"
+    private var firmwareUpdatePromptScheduled = false
+    private var isShowingFirmwareUpdatePrompt = false
     private var errorRecoveryToken = 0
     private var isShowingASRError = false
-    private var subtitleCycles: [SubtitleCycleKey: SubtitleCycle] = [:]
+    private var subtitleCycles: [SubtitleCycleKey: SubtitleCycle] = [:] {
+        didSet {
+            if subtitleCycles.isEmpty { scheduleFirmwareUpdatePrompt() }
+        }
+    }
     private var activeSubtitleSessions: [UUID: UInt32] = [:]
+    var isFirmwareUpdateWindowOpen = false {
+        didSet {
+            if !isFirmwareUpdateWindowOpen { scheduleFirmwareUpdatePrompt() }
+        }
+    }
     var onFirmwareUpdatePrompt: ((String, String, String, Bool) -> Void)?
 
     init(config: AppConfig, statusController: StatusController) {
@@ -182,6 +198,9 @@ final class VoiceStickCoordinator {
         ble.onConnectionChange = { [weak self] connectedDevices in
             guard let self else { return }
             self.statusController.setConnectedDevices(connectedDevices)
+            self.firmwareReportingPeripherals = self.firmwareReportingPeripherals.filter {
+                self.ble.isConnected($0.value)
+            }
             self.cancelActiveCycleIfDeviceDisconnected()
             self.refreshFirmwareAvailability()
             if case .pausedConfirmation = self.mainInputState {
@@ -367,16 +386,20 @@ final class VoiceStickCoordinator {
             completion(.failure(FirmwareManifestClient.FirmwareManifestError.deviceInfoUnavailable))
             return
         }
-        checkFirmwareFeed(for: hardware, at: url, force: true) { result in
+        let reportingPeripheral = firmwareReportingPeripherals[deviceID]
+        checkFirmwareFeed(for: hardware, at: url, force: true) { [weak self] result in
+            if case .success(let manifest) = result, let reportingPeripheral,
+               FirmwareVersion.isVersion(current, olderThan: manifest.version) {
+                _ = self?.recordFirmwareReminder(for: reportingPeripheral, version: manifest.version)
+            }
             completion(result.map { (current, $0.version) })
+            self?.scheduleFirmwareUpdatePrompt()
         }
         refreshFirmwareAvailability()
     }
 
-    func checkFirmwareAfterPairing(deviceID: String) {
-        pendingFirmwareUpdatePromptDeviceIDs.insert(deviceID)
+    func checkFirmwareAfterPairing() {
         checkFirmwareUpdatesIfNeeded(force: true)
-        refreshFirmwareAvailability()
     }
 
     func updateFirmwareFromLatest(for deviceID: String,
@@ -1379,6 +1402,9 @@ final class VoiceStickCoordinator {
     private func updateDeviceFirmwareInfo(event: StateEvent, peripheralID: UUID) {
         guard let deviceID = ble.deviceID(for: peripheralID) else { return }
         var info = firmwareInfoByDeviceID[deviceID] ?? DeviceFirmwareInfo()
+        if event.hardware != nil, event.firmwareVersion != nil, ble.isConnected(peripheralID) {
+            firmwareReportingPeripherals[deviceID] = peripheralID
+        }
         if let hardware = event.hardware {
             info.hardware = hardware
         }
@@ -1469,31 +1495,56 @@ final class VoiceStickCoordinator {
             info.updateAvailable = FirmwareVersion.isVersion(currentVersion, olderThan: manifest.version)
             firmwareInfoByDeviceID[deviceID] = info
             NSLog("Firmware availability VS-\(deviceID) hardware=\(manifest.hardware) current=\(currentVersion) latest=\(manifest.version) update=\(info.updateAvailable)")
-            maybeShowFirmwareUpdatePromptAfterPairing(deviceID: deviceID, info: info)
         }
         statusController.setFirmwareInfo(firmwareInfoByDeviceID)
+        scheduleFirmwareUpdatePrompt()
     }
 
-    private func maybeShowFirmwareUpdatePromptAfterPairing(deviceID: String, info: DeviceFirmwareInfo) {
-        guard
-            pendingFirmwareUpdatePromptDeviceIDs.contains(deviceID),
-            let currentVersion = info.currentVersion,
-            let latestVersion = info.latestVersion
-        else {
+    private func scheduleFirmwareUpdatePrompt() {
+        guard !firmwareUpdatePromptScheduled else { return }
+        firmwareUpdatePromptScheduled = true
+        // Connection and input callbacks may still be updating the device state.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.firmwareUpdatePromptScheduled = false
+            self.showFirmwareUpdatePromptIfReady()
+        }
+    }
+
+    private func showFirmwareUpdatePromptIfReady() {
+        guard !mainInputState.isBusy, subtitleCycles.isEmpty, !isFirmwareUpdateWindowOpen,
+              !isShowingFirmwareUpdatePrompt, NSApp.modalWindow == nil,
+              let onFirmwareUpdatePrompt else { return }
+
+        for deviceID in pairedDeviceIDs {
+            guard let info = firmwareInfoByDeviceID[deviceID], info.updateAvailable,
+                  !info.isChecking, info.errorMessage == nil,
+                  let currentVersion = info.currentVersion, let latestVersion = info.latestVersion,
+                  let peripheralID = firmwareReportingPeripherals[deviceID], ble.isConnected(peripheralID),
+                  recordFirmwareReminder(for: peripheralID, version: latestVersion) else { continue }
+
+            let isBelowMinimum = FirmwareVersion.isVersion(
+                currentVersion,
+                olderThan: AppConfig.minimumCompatibleFirmwareVersion
+            )
+            isShowingFirmwareUpdatePrompt = true
+            onFirmwareUpdatePrompt(deviceID, currentVersion, latestVersion, isBelowMinimum)
+            isShowingFirmwareUpdatePrompt = false
+            scheduleFirmwareUpdatePrompt()
             return
         }
-        guard info.updateAvailable else {
-            pendingFirmwareUpdatePromptDeviceIDs.remove(deviceID)
-            return
-        }
-        pendingFirmwareUpdatePromptDeviceIDs.remove(deviceID)
-        let isBelowMinimum = FirmwareVersion.isVersion(
-            currentVersion,
-            olderThan: AppConfig.minimumCompatibleFirmwareVersion
-        )
-        DispatchQueue.main.async { [onFirmwareUpdatePrompt] in
-            onFirmwareUpdatePrompt?(deviceID, currentVersion, latestVersion, isBelowMinimum)
-        }
+    }
+
+    @discardableResult
+    private func recordFirmwareReminder(for peripheralID: UUID, version: String) -> Bool {
+        let defaults = UserDefaults.standard
+        let key = Self.firmwareReminderHistoryKey
+        var history = defaults.dictionary(forKey: key) as? [String: [String]] ?? [:]
+        let deviceKey = peripheralID.uuidString
+        guard history[deviceKey]?.contains(version) != true else { return false }
+        history[deviceKey, default: []].append(version)
+        defaults.set(history, forKey: key)
+        return true
     }
 
     private var activeSessionID: UInt32? {

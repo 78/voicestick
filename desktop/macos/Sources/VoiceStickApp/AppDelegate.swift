@@ -271,7 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusController?.setDeviceThemeColors(config.deviceThemeColors)
                 self?.statusController?.setDeviceOverlayPositions(config.deviceOverlayPositions)
                 self?.coordinator?.updatePairedDeviceIDs(config.pairedDeviceIDs)
-                self?.coordinator?.checkFirmwareAfterPairing(deviceID: deviceID)
+                self?.coordinator?.checkFirmwareAfterPairing()
             } catch {
                 self?.statusController?.setStatus("Pair save failed")
             }
@@ -305,11 +305,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateFirmwareFromLatest(for deviceID: String) {
+        if let window = firmwareUpdateWindowController?.window, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
         let updateWindow = FirmwareUpdateWindowController(fileName: "VS-\(deviceID)")
         updateWindow.onCancel = { [weak self] in
             self?.coordinator?.cancelFirmwareUpdate()
         }
         firmwareUpdateWindowController = updateWindow
+        coordinator?.isFirmwareUpdateWindowOpen = true
         showDockIconWhileWindowVisible(updateWindow)
         updateWindow.show()
 
@@ -333,6 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = "VS-\(deviceID) is running firmware \(currentVersion). The latest firmware is \(latestVersion)."
         alert.addButton(withTitle: "Update Firmware")
         alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
             updateFirmwareFromLatest(for: deviceID)
         }
@@ -356,6 +362,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func windowWillCloseForDockIcon(_ notification: Notification) {
         if let window = notification.object as? NSWindow {
             dockIconWindowIDs.remove(ObjectIdentifier(window))
+            if window === firmwareUpdateWindowController?.window {
+                firmwareUpdateWindowController = nil
+                coordinator?.isFirmwareUpdateWindowOpen = false
+            }
         }
         NotificationCenter.default.removeObserver(
             self,
