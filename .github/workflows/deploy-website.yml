@@ -19,11 +19,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      artifact_id: ${{ steps.pages-artifact.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -133,10 +132,17 @@ jobs:
         with:
           path: website/dist
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Wait for the uploaded Pages artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ARTIFACT_ID: ${{ steps.pages-artifact.outputs.artifact_id }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
         run: |
           set -euo pipefail
           : "${ARTIFACT_ID:?Missing Pages artifact ID}"
