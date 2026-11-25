@@ -367,6 +367,7 @@ jobs:
   request-website-deploy:
     name: Request Website Deploy
     needs: publish-release
+    if: ${{ !cancelled() && needs.publish-release.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Trigger website deploy on main
