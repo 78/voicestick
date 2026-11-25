@@ -168,7 +168,11 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
         lv_obj_set_height(s_hint_label, LV_SIZE_CONTENT);
         lv_label_set_long_mode(s_hint_label, s_compact ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_WRAP);
     }
-    lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, s_compact ? 0 : -10);
+    if (s_compact && scene != UI_STATUS_ICON_ERROR) {
+        lv_obj_align_to(s_hint_label, s_status_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    } else {
+        lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, s_compact ? 0 : -10);
+    }
 
     const bool resting = scene == UI_STATUS_ICON_RESTING;
     const bool pairing = scene == UI_STATUS_ICON_PAIRING || scene == UI_STATUS_ICON_BOOT;
@@ -226,7 +230,7 @@ static void create_status_ui(int width)
     if (s_compact) {
         lv_image_set_pivot(s_icons.root, 56, 56);
         lv_image_set_scale(s_icons.root, LV_SCALE_NONE / 2);
-        lv_obj_align(s_icons.root, LV_ALIGN_TOP_MID, 0, -14);
+        lv_obj_align(s_icons.root, LV_ALIGN_TOP_MID, 0, -9);
     }
 
     s_status_label = lv_label_create(s_screen);
@@ -236,7 +240,7 @@ static void create_status_ui(int width)
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x3f3440), 0);
     lv_obj_set_width(s_status_label, width - 16);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, s_compact ? 72 : 168);
+    lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, s_compact ? 77 : 168);
 
     s_hint_label = lv_label_create(s_screen);
     lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
