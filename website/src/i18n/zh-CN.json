@@ -35,13 +35,16 @@
     "body": "VoiceStick 把 M5Stack StickS3 变成一个独立的语音输入按钮。它可以挂在桌边、放进口袋，或者随笔记本一起带走；需要输入时按住说话，识别结果就回到当前光标位置。"
   },
   "flasher": {
-    "eyebrow": "浏览器直连 StickS3",
     "title": "在线烧录固件",
-    "body": "使用 Chrome 或 Edge 通过 USB 串口把最新 Release 固件写入 M5Stack StickS3。固件来自 GitHub Release，不需要安装本地烧录工具。",
+    "body": "使用桌面版 Chrome 或 Edge，通过 USB 为 M5Stack StickS3 或 VoiceStick C3 v1 烧录固件。",
+    "board": "硬件型号",
     "steps": {
-      "usb": "用 USB-C 连接 StickS3 和电脑。",
-      "boot": "如果连接失败，按住侧边复位键直到内部绿色 LED 闪烁，再松开。",
-      "flash": "点击开始烧录，选择 StickS3 的 USB 串口。"
+      "usb": "用支持数据传输的 USB-C 线将 {board} 连接到电脑。",
+      "flash": "点击开始烧录，选择设备的 USB 串口。"
+    },
+    "boot": {
+      "stick_s3": "如果连接失败，按住侧边复位键直到内部绿色 LED 闪烁，松开后重试。",
+      "voicestick_c3": "如果连接失败，按住取消键（BOOT）并重启设备，进入下载模式后松开，再重试。"
     },
     "button": {
       "start": "开始烧录",
@@ -58,26 +61,23 @@
       "error": "烧录失败",
       "unsupported": "浏览器不支持"
     },
-    "meta": {
-      "target": "ESP32-S3 / StickS3"
-    },
     "firmware": {
-      "latest": "将从最新 GitHub Release 获取 VoiceStick StickS3 固件。",
-      "ready": "固件已加载：{size}"
+      "version": "固件版本 {version}"
     },
     "unsupported": "当前浏览器不支持 Web Serial。请使用桌面版 Chrome 或 Edge 打开此页面。",
     "log": {
       "empty": "日志会显示在这里。",
       "selectPort": "等待选择 USB 串口...",
-      "connecting": "正在同步 ESP32-S3 bootloader...",
+      "connecting": "正在连接设备的引导程序...",
       "downloading": "正在下载 Release 固件...",
       "downloaded": "固件下载完成：{size}",
       "flashing": "开始写入 merged 固件到 0x0...",
       "done": "烧录完成，已发送设备重启信号。"
     },
     "error": {
+      "manifestUnavailable": "暂时无法加载所选型号的固件清单。",
       "downloadFailed": "固件下载失败，HTTP {status}",
-      "wrongChip": "检测到 {chip}，请连接 M5Stack StickS3。"
+      "wrongChip": "检测到 {chip}。所选型号 {board} 使用 {expected}，请确认型号和串口后重试。"
     }
   },
   "download": {

@@ -35,13 +35,16 @@
     "body": "VoiceStick turns M5Stack StickS3 into a dedicated voice input button. Keep it near your keyboard, slip it into a pocket, or carry it with your laptop. Hold to talk, and the recognized text comes back to your cursor."
   },
   "flasher": {
-    "eyebrow": "Direct browser connection",
     "title": "Flash firmware online",
-    "body": "Use Chrome or Edge to write the latest Release firmware to M5Stack StickS3 over USB serial. The firmware comes from GitHub Releases, so no local flashing tools are required.",
+    "body": "Use desktop Chrome or Edge to flash your M5Stack StickS3 or VoiceStick C3 v1 over USB.",
+    "board": "Hardware model",
     "steps": {
-      "usb": "Connect the StickS3 to your computer with USB-C.",
-      "boot": "If connection fails, hold the side reset button until the internal green LED blinks, then release it.",
-      "flash": "Click start and choose the StickS3 USB serial port."
+      "usb": "Connect your {board} to your computer with a USB-C data cable.",
+      "flash": "Click Start flashing and choose the device’s USB serial port."
+    },
+    "boot": {
+      "stick_s3": "If the connection fails, hold the side reset button until the internal green LED blinks, then release it and try again.",
+      "voicestick_c3": "If the connection fails, hold the cancel (BOOT) button while restarting the device. Release it once the device enters download mode, then try again."
     },
     "button": {
       "start": "Start flashing",
@@ -58,26 +61,23 @@
       "error": "Flash failed",
       "unsupported": "Unsupported browser"
     },
-    "meta": {
-      "target": "ESP32-S3 / StickS3"
-    },
     "firmware": {
-      "latest": "VoiceStick StickS3 firmware will be fetched from the latest GitHub Release.",
-      "ready": "Firmware loaded: {size}"
+      "version": "Firmware version {version}"
     },
     "unsupported": "This browser does not support Web Serial. Open this page in desktop Chrome or Edge.",
     "log": {
       "empty": "Logs will appear here.",
       "selectPort": "Waiting for USB serial port selection...",
-      "connecting": "Syncing ESP32-S3 bootloader...",
+      "connecting": "Connecting to the device bootloader...",
       "downloading": "Downloading Release firmware...",
       "downloaded": "Firmware downloaded: {size}",
       "flashing": "Writing merged firmware to 0x0...",
       "done": "Flashing complete. A reset signal was sent to the device."
     },
     "error": {
+      "manifestUnavailable": "Could not load the firmware manifest for the selected model.",
       "downloadFailed": "Firmware download failed, HTTP {status}",
-      "wrongChip": "Detected {chip}. Please connect an M5Stack StickS3."
+      "wrongChip": "Detected {chip}. The selected {board} uses {expected}. Check the model and serial port, then try again."
     }
   },
   "download": {

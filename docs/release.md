@@ -59,6 +59,13 @@ updates the existing OSS manifests for installed clients that use those URLs.
 Verify that both Pages manifests report the new firmware and minimum app
 versions and that their OTA and merged URLs are reachable.
 
+## macOS-Only Release
+
+Set `VERSION` to the macOS release version, commit and push the release commit,
+then push a matching `macos-v<version>` tag. For example, `macos-v0.4.2`
+builds, signs, notarizes, and publishes the macOS packages. The release workflow
+then redeploys the website. Verify the macOS DMG link and Sparkle appcast entry.
+
 ## Windows-Only Release
 
 Set `VERSION` to the Windows release version, then build and verify the signed

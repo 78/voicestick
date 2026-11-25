@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ESPLoader, Transport } from 'esptool-js'
 import { setLocale } from './i18n'
@@ -7,15 +7,27 @@ import productPhoto from './assets/sticks3.png'
 import packageInfo from '../package.json'
 
 const { locale, t } = useI18n()
-const releaseUrl = 'https://github.com/78/voicestick/releases/latest'
 const githubUrl = 'https://github.com/78/voicestick'
-const releaseVersion = import.meta.env.VITE_RELEASE_VERSION || packageInfo.version
-const releaseDownloadBase = `${githubUrl}/releases/download/v${releaseVersion}`
-const macDownloadUrl = `${releaseDownloadBase}/VoiceStick-${releaseVersion}.dmg`
-const windowsDownloadUrl = import.meta.env.VITE_WINDOWS_DOWNLOAD_URL || `${githubUrl}/releases/download/v${packageInfo.version}/VoiceStick_${packageInfo.version}.msi`
-const defaultFirmwareUrl = `https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/voicestick-firmware-sticks3-merged-${releaseVersion}.bin`
-const firmwareManifestUrl = import.meta.env.VITE_FIRMWARE_MANIFEST_URL || 'https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares/latest/manifest.json'
-const firmwareUrl = ref(import.meta.env.VITE_FIRMWARE_URL || defaultFirmwareUrl)
+const releaseUrl = `${githubUrl}/releases`
+const macVersion = import.meta.env.VITE_RELEASE_VERSION || packageInfo.version
+const windowsVersion = import.meta.env.VITE_WINDOWS_RELEASE_VERSION || packageInfo.version
+const macDownloadUrl = import.meta.env.VITE_MAC_DOWNLOAD_URL || `${releaseUrl}/download/v${macVersion}/VoiceStick-${macVersion}.dmg`
+const windowsDownloadUrl = import.meta.env.VITE_WINDOWS_DOWNLOAD_URL || `${releaseUrl}/download/v${windowsVersion}/VoiceStick_${windowsVersion}.msi`
+const firmwareBase = 'https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/voicestick/firmwares'
+const boards = {
+  stick_s3: {
+    name: 'M5Stack StickS3',
+    chip: 'ESP32-S3',
+    manifestUrl: import.meta.env.VITE_FIRMWARE_MANIFEST_URL || `${firmwareBase}/latest/manifest.json`,
+    flashFreq: '80m',
+  },
+  voicestick_c3: {
+    name: 'VoiceStick C3 v1',
+    chip: 'ESP32-C3',
+    manifestUrl: import.meta.env.VITE_C3_FIRMWARE_MANIFEST_URL || `${firmwareBase}/voicestick_c3/latest/manifest.json`,
+    flashFreq: 'keep',
+  },
+}
 const appResetSequence = 'D0|R1|W100|R0|W500|D0'
 
 const languageLabel = computed(() => (locale.value === 'zh-CN' ? t('language.en') : t('language.zh')))
@@ -28,7 +40,21 @@ const flashStatus = ref('idle')
 const flashProgress = ref(0)
 const flashLog = ref([])
 const connectedChip = ref('')
-const firmwareSize = ref('')
+const selectedBoardID = ref('stick_s3')
+const selectedBoard = computed(() => boards[selectedBoardID.value])
+const manifests = ref({})
+const manifestRequests = new Map()
+const firmwareManifest = computed(() => manifests.value[selectedBoardID.value])
+
+watch(selectedBoardID, (boardID) => {
+  flashStatus.value = 'idle'
+  flashProgress.value = 0
+  flashLog.value = []
+  connectedChip.value = ''
+  loadFirmwareManifest(boardID).catch(() => {
+    manifests.value[boardID] = null
+  })
+}, { immediate: true })
 
 const terminal = {
   clean() {
@@ -71,36 +97,46 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-async function fetchFirmware() {
+async function fetchFirmware(boardID) {
   flashStatus.value = 'downloading'
   appendLog(t('flasher.log.downloading'))
 
-  await resolveFirmwareUrl()
-  const response = await fetch(firmwareUrl.value, { cache: 'no-store' })
+  const manifest = await loadFirmwareManifest(boardID)
+  const response = await fetch(manifest.merged_url, { cache: 'no-store' })
   if (!response.ok) {
     throw new Error(t('flasher.error.downloadFailed', { status: response.status }))
   }
 
   const firmware = new Uint8Array(await response.arrayBuffer())
-  firmwareSize.value = formatBytes(firmware.byteLength)
-  appendLog(t('flasher.log.downloaded', { size: firmwareSize.value }))
+  appendLog(t('flasher.log.downloaded', { size: formatBytes(firmware.byteLength) }))
   return firmware
 }
 
-async function resolveFirmwareUrl() {
-  if (!firmwareManifestUrl) {
-    return
+function loadFirmwareManifest(boardID) {
+  const cached = manifests.value[boardID]
+  if (cached) {
+    return Promise.resolve(cached)
   }
-
-  const response = await fetch(firmwareManifestUrl, { cache: 'no-store' })
-  if (!response.ok) {
-    return
+  if (!manifestRequests.has(boardID)) {
+    const request = fetch(boards[boardID].manifestUrl, { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error()
+        }
+        const manifest = await response.json()
+        if (manifest?.hardware !== boardID || !manifest.version || !manifest.merged_url) {
+          throw new Error()
+        }
+        manifests.value[boardID] = manifest
+        return manifest
+      })
+      .catch(() => {
+        throw new Error(t('flasher.error.manifestUnavailable'))
+      })
+      .finally(() => manifestRequests.delete(boardID))
+    manifestRequests.set(boardID, request)
   }
-
-  const manifest = await response.json()
-  if (manifest?.merged_url) {
-    firmwareUrl.value = manifest.merged_url
-  }
+  return manifestRequests.get(boardID)
 }
 
 async function flashFirmware() {
@@ -110,13 +146,14 @@ async function flashFirmware() {
   }
 
   let transport
+  const boardID = selectedBoardID.value
+  const board = boards[boardID]
 
   try {
     flashing.value = true
     flashStatus.value = 'connecting'
     flashProgress.value = 0
     connectedChip.value = ''
-    firmwareSize.value = ''
     flashLog.value = []
     appendLog(t('flasher.log.selectPort'))
 
@@ -133,18 +170,18 @@ async function flashFirmware() {
     const chip = await loader.main('default_reset')
     connectedChip.value = chip
 
-    if (!chip.toLowerCase().includes('esp32-s3')) {
-      throw new Error(t('flasher.error.wrongChip', { chip }))
+    if (loader.chip.CHIP_NAME !== board.chip) {
+      throw new Error(t('flasher.error.wrongChip', { chip, board: board.name, expected: board.chip }))
     }
 
-    const firmware = await fetchFirmware()
+    const firmware = await fetchFirmware(boardID)
 
     flashStatus.value = 'flashing'
     appendLog(t('flasher.log.flashing'))
     await loader.writeFlash({
       fileArray: [{ data: firmware, address: 0x0 }],
       flashMode: 'dio',
-      flashFreq: '80m',
+      flashFreq: board.flashFreq,
       flashSize: '8MB',
       eraseAll: false,
       compress: true,
@@ -164,7 +201,6 @@ async function flashFirmware() {
       appendLog(error?.message || String(error))
     }
   } finally {
-    flashing.value = false
     if (transport) {
       try {
         await transport.disconnect()
@@ -172,6 +208,7 @@ async function flashFirmware() {
         // The device may already have reset and closed the stream.
       }
     }
+    flashing.value = false
   }
 }
 </script>
@@ -200,8 +237,12 @@ async function flashFirmware() {
         <h1>{{ t('hero.title') }}</h1>
         <p class="lead">{{ t('hero.lead') }}</p>
         <div class="actions">
-          <a class="button primary mac" :href="macDownloadUrl">{{ t('hero.downloadMac') }}</a>
-          <a class="button primary windows" :href="windowsDownloadUrl">{{ t('hero.downloadWindows') }}</a>
+          <a class="button primary mac" :href="macDownloadUrl">
+            {{ t('hero.downloadMac') }} <span class="download-version">{{ macVersion }}</span>
+          </a>
+          <a class="button primary windows" :href="windowsDownloadUrl">
+            {{ t('hero.downloadWindows') }} <span class="download-version">{{ windowsVersion }}</span>
+          </a>
         </div>
       </div>
       <div class="product-visual" :aria-label="t('hero.imageAlt')">
@@ -239,21 +280,25 @@ async function flashFirmware() {
     <section class="flasher" id="flash">
       <div class="section-inner flasher-grid">
         <div class="flasher-copy">
-          <p class="eyebrow">{{ t('flasher.eyebrow') }}</p>
           <h2>{{ t('flasher.title') }}</h2>
           <p>{{ t('flasher.body') }}</p>
           <ol class="flash-steps">
-            <li>{{ t('flasher.steps.usb') }}</li>
-            <li>{{ t('flasher.steps.boot') }}</li>
+            <li>{{ t('flasher.steps.usb', { board: selectedBoard.name }) }}</li>
             <li>{{ t('flasher.steps.flash') }}</li>
+            <li>{{ t(`flasher.boot.${selectedBoardID}`) }}</li>
           </ol>
         </div>
 
-        <div class="flasher-panel" aria-live="polite">
+        <div class="flasher-panel">
+          <div class="flasher-board">
+            <label for="flash-board">{{ t('flasher.board') }}</label>
+            <select id="flash-board" v-model="selectedBoardID" :disabled="flashing">
+              <option v-for="(board, id) in boards" :key="id" :value="id">{{ board.name }}</option>
+            </select>
+          </div>
           <div class="flasher-meta">
-            <span>{{ t(`flasher.status.${flashStatus}`) }}</span>
-            <span v-if="connectedChip">{{ connectedChip }}</span>
-            <span v-else>{{ t('flasher.meta.target') }}</span>
+            <span role="status">{{ t(`flasher.status.${flashStatus}`) }}</span>
+            <span>{{ connectedChip || selectedBoard.chip }}</span>
           </div>
 
           <div class="progress-track" aria-hidden="true">
@@ -264,13 +309,15 @@ async function flashFirmware() {
             <button class="button primary" type="button" :disabled="!canFlash" @click="flashFirmware">
               {{ flashing ? t('flasher.button.flashing') : t('flasher.button.start') }}
             </button>
-            <a class="button secondary" :href="firmwareUrl">{{ t('flasher.button.download') }}</a>
+            <a v-if="firmwareManifest" class="button secondary" :href="firmwareManifest.merged_url">
+              {{ t('flasher.button.download') }}
+            </a>
+            <button v-else class="button secondary" type="button" disabled>{{ t('flasher.button.download') }}</button>
           </div>
 
           <p v-if="!serialSupported" class="browser-warning">{{ t('flasher.unsupported') }}</p>
-          <p v-else class="firmware-note">
-            {{ firmwareSize ? t('flasher.firmware.ready', { size: firmwareSize }) : t('flasher.firmware.latest') }}
-          </p>
+          <p v-if="firmwareManifest" class="firmware-note">{{ t('flasher.firmware.version', { version: firmwareManifest.version }) }}</p>
+          <p v-else-if="firmwareManifest === null" class="firmware-note">{{ t('flasher.error.manifestUnavailable') }}</p>
 
           <div class="flash-log">
             <p v-if="flashLog.length === 0">{{ t('flasher.log.empty') }}</p>

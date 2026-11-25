@@ -46,16 +46,17 @@ jobs:
             def asset($name): first(.assets[] | select(.name == $name and .size > 0)) // null;
             add
             | map(select((.draft or .prerelease) | not)
-                | select(.tag_name | test("^(windows-)?v[0-9]+[.][0-9]+[.][0-9]+$")))
-            | map((.tag_name | sub("^(windows-)?v"; "")) as $version | {
+                | select(.tag_name | test("^((macos|windows)-)?v[0-9]+[.][0-9]+[.][0-9]+$")))
+            | map((.tag_name | sub("^((macos|windows)-)?v"; "")) as $version | {
                 tag: .tag_name, version: $version, notes: (.body // ""),
+                dmg: asset("VoiceStick-" + $version + ".dmg"),
                 zip: asset("VoiceStick-" + $version + ".zip"),
                 signature: asset("VoiceStick-" + $version + ".signature"),
                 msi: asset("VoiceStick_" + $version + ".msi")
               })
             | sort_by(.version | split(".") | map(tonumber)) | reverse
             | {
-                mac: (first(.[] | select((.tag | startswith("v")) and .zip and .signature)) // null),
+                mac: (first(.[] | select((.tag | test("^(macos-)?v")) and .dmg and .zip and .signature)) // null),
                 windows: (first(.[] | select(.msi)) // null)
               }
           ')"
@@ -81,12 +82,15 @@ jobs:
           fi
           python3 scripts/update-appcast.py "${args[@]}"
           echo "VITE_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "VITE_MAC_DOWNLOAD_URL=$(jq -er '.mac.dmg.browser_download_url' <<< "$releases")" >> "$GITHUB_ENV"
           python3 - <<'PYTHON' >> "$GITHUB_ENV"
           import xml.etree.ElementTree as ET
           feed = ET.parse("website/public/appcast.xml")
-          windows = feed.find(".//enclosure[@sparkle:os='windows']", {"sparkle": "http://www.andymatuschak.org/xml-namespaces/sparkle"})
+          sparkle = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+          windows = feed.find(".//enclosure[@sparkle:os='windows']", {"sparkle": sparkle})
           if windows is not None:
               print("VITE_WINDOWS_DOWNLOAD_URL=" + windows.attrib["url"])
+              print("VITE_WINDOWS_RELEASE_VERSION=" + windows.attrib[f"{{{sparkle}}}shortVersionString"])
           PYTHON
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -121,6 +125,7 @@ jobs:
         working-directory: website
         env:
           VITE_FIRMWARE_MANIFEST_URL: ./firmwares/m5stack_stick_s3/latest/manifest.json
+          VITE_C3_FIRMWARE_MANIFEST_URL: ./firmwares/voicestick_c3/latest/manifest.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

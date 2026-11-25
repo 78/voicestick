@@ -2,11 +2,11 @@ name: Release Build
 
 on:
   push:
-    tags: ["v*", "firmware-v*"]
+    tags: ["v*", "firmware-v*", "macos-v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.1.0 or firmware-v0.1.0."
+        description: "Release tag, for example v0.1.0, firmware-v0.1.0, or macos-v0.1.0."
         required: true
 
 permissions:
@@ -22,6 +22,7 @@ concurrency:
 jobs:
   build-firmware:
     name: Build ${{ matrix.label }} Firmware
+    if: ${{ !startsWith(inputs.tag || github.ref_name, 'macos-v') }}
     strategy:
       fail-fast: false
       matrix:
@@ -155,7 +156,7 @@ jobs:
               tag="${GITHUB_REF_NAME}"
           fi
           version="$(cat VERSION | head -n1 | tr -d '[:space:]')"
-          if [ "v${version}" != "${tag}" ]; then
+          if [ "v${version}" != "${tag#macos-}" ]; then
               echo "::error ::tag ${tag} does not match VERSION (${version})."
               exit 1
           fi
@@ -248,7 +249,8 @@ jobs:
     name: Publish GitHub Release
     needs: [build-firmware, build-macos]
     if: >-
-      ${{ !cancelled() && needs.build-firmware.result == 'success' &&
+      ${{ !cancelled() &&
+          (needs.build-firmware.result == 'success' || startsWith(inputs.tag || github.ref_name, 'macos-v')) &&
           (needs.build-macos.result == 'success' || startsWith(inputs.tag || github.ref_name, 'firmware-v')) }}
     runs-on: ubuntu-latest
     outputs:
@@ -265,25 +267,24 @@ jobs:
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#firmware-}"
+          version="${version#macos-}"
           version="${version#v}"
-          files=(
-              "dist/voicestick-firmware-sticks3-ota-${version}.bin"
-              "dist/voicestick-firmware-sticks3-ota-${version}.bin.sha256"
-              "dist/voicestick-firmware-sticks3-merged-${version}.bin"
-              "dist/voicestick-firmware-sticks3-merged-${version}.bin.sha256"
-              "dist/manifest.json"
-              "dist/voicestick_c3/voicestick-firmware-c3-ota-${version}.bin"
-              "dist/voicestick_c3/voicestick-firmware-c3-ota-${version}.bin.sha256"
-              "dist/voicestick_c3/voicestick-firmware-c3-merged-${version}.bin"
-              "dist/voicestick_c3/voicestick-firmware-c3-merged-${version}.bin.sha256"
-              "dist/voicestick_c3/manifest-voicestick_c3.json"
-          )
-          if [[ "$RELEASE_TAG" == firmware-v* ]]; then
-              name="VoiceStick Firmware ${version}"
-              make_latest=false
-          else
-              name="VoiceStick ${version}"
-              make_latest=
+          files=()
+          if [[ "$RELEASE_TAG" != macos-v* ]]; then
+              files+=(
+                  "dist/voicestick-firmware-sticks3-ota-${version}.bin"
+                  "dist/voicestick-firmware-sticks3-ota-${version}.bin.sha256"
+                  "dist/voicestick-firmware-sticks3-merged-${version}.bin"
+                  "dist/voicestick-firmware-sticks3-merged-${version}.bin.sha256"
+                  "dist/manifest.json"
+                  "dist/voicestick_c3/voicestick-firmware-c3-ota-${version}.bin"
+                  "dist/voicestick_c3/voicestick-firmware-c3-ota-${version}.bin.sha256"
+                  "dist/voicestick_c3/voicestick-firmware-c3-merged-${version}.bin"
+                  "dist/voicestick_c3/voicestick-firmware-c3-merged-${version}.bin.sha256"
+                  "dist/voicestick_c3/manifest-voicestick_c3.json"
+              )
+          fi
+          if [[ "$RELEASE_TAG" != firmware-v* ]]; then
               files+=(
                   "dist/VoiceStick-${version}.dmg"
                   "dist/VoiceStick-${version}.dmg.sha256"
@@ -292,6 +293,12 @@ jobs:
                   "dist/VoiceStick-${version}.signature"
               )
           fi
+          make_latest=
+          case "$RELEASE_TAG" in
+              firmware-v*) name="VoiceStick Firmware ${version}"; make_latest=false ;;
+              macos-v*) name="VoiceStick macOS ${version}" ;;
+              *) name="VoiceStick ${version}" ;;
+          esac
           {
               echo "tag=${RELEASE_TAG}"
               echo "version=${version}"
@@ -310,6 +317,7 @@ jobs:
           merge-multiple: true
 
       - name: Upload firmware to Aliyun OSS
+        if: ${{ !startsWith(inputs.tag || github.ref_name, 'macos-v') }}
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
