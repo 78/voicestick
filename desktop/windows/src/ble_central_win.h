@@ -7,6 +7,7 @@
 #include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Devices.Enumeration.h>
+#include <winrt/Windows.Devices.Radios.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 
@@ -86,6 +87,10 @@ private:
 
     void StartScan();
     void StopScan();
+    // A scan cannot start while the radio is off, so restart it once
+    // Bluetooth is turned back on.
+    winrt::fire_and_forget WatchBluetoothRadioAsync();
+    static winrt::fire_and_forget RestartScanAfterRadioOn(std::weak_ptr<BleCentralWin> weak_self);
     void HandleAdvertisement(const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher& watcher,
                               const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementReceivedEventArgs& args);
     void StartDirectConnect(const std::string& device_id,
@@ -130,6 +135,9 @@ private:
     std::set<std::string> cancelled_device_ids_;
     winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher watcher_{nullptr};
     winrt::event_token received_token_{};
+    std::mutex radio_mutex_;
+    winrt::Windows::Devices::Radios::Radio bluetooth_radio_{nullptr};
+    winrt::event_token radio_state_token_{};
 
 public:
     static constexpr UINT WM_BLE_DISPATCH = WM_APP + 100;
