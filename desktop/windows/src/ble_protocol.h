@@ -55,6 +55,9 @@ public:
     static constexpr const wchar_t* control_uuid = L"8f2f0b84-6e6f-4b23-88f7-3a3ceafc5103";
     static constexpr const wchar_t* ota_rx_uuid = L"8f2f0b84-6e6f-4b23-88f7-3a3ceafc5104";
     static constexpr const wchar_t* ota_state_uuid = L"8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105";
+    static constexpr const wchar_t* pairing_advertisement_uuid = L"8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106";
+    static constexpr const wchar_t* reconnect_advertisement_uuid = L"8f2f0b84-6e6f-4b23-88f7-3a3ceafc5107";
+    static constexpr const wchar_t* authorized_uuid = L"8f2f0b84-6e6f-4b23-88f7-3a3ceafc5108";
     static constexpr std::uint8_t ota_type_begin = 0x20;
     static constexpr std::uint8_t ota_type_data = 0x21;
     static constexpr std::uint8_t ota_type_end = 0x22;

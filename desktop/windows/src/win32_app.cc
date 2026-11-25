@@ -1158,7 +1158,7 @@ void Win32App::PairDevice(const std::string& device_id, std::uint64_t bluetooth_
                           BluetoothAddressKind address_kind, const std::string& name) {
     if (coordinator_) {
         pending_pairing_entry_ = PairedDeviceEntry{device_id, bluetooth_address, address_kind, name};
-        coordinator_->ConnectPairedDevice(device_id, bluetooth_address, address_kind, name);
+        coordinator_->PairDevice(device_id, bluetooth_address, address_kind, name);
         LogLine("Pairing device VS-" + device_id);
     }
 }

@@ -176,6 +176,13 @@ void VoiceStickCoordinator::ConnectPairedDevice(const std::string& device_id,
     ble_->ConnectPairedDevice(device_id, bluetooth_address, address_kind, name);
 }
 
+void VoiceStickCoordinator::PairDevice(const std::string& device_id,
+                                       std::uint64_t bluetooth_address,
+                                       BluetoothAddressKind address_kind,
+                                       const std::string& name) {
+    ble_->PairDevice(device_id, bluetooth_address, address_kind, name);
+}
+
 void VoiceStickCoordinator::CancelPendingConnect(const std::string& device_id) {
     ble_->CancelPendingConnect(device_id);
 }

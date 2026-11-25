@@ -49,6 +49,14 @@ public:
                                      std::uint64_t bluetooth_address,
                                      BluetoothAddressKind address_kind,
                                      const std::string& name) = 0;
+    // Connects while the device is in its pairing window and may replace
+    // this computer's Bluetooth bond.
+    virtual void PairDevice(const std::string& device_id,
+                            std::uint64_t bluetooth_address,
+                            BluetoothAddressKind address_kind,
+                            const std::string& name) {
+        ConnectPairedDevice(device_id, bluetooth_address, address_kind, name);
+    }
     virtual void SendUiState(const std::string& state,
                                const std::string& text,
                                const std::optional<std::string>& device_id) = 0;
@@ -140,6 +148,10 @@ public:
                              std::uint64_t bluetooth_address,
                              BluetoothAddressKind address_kind,
                              const std::string& name);
+    void PairDevice(const std::string& device_id,
+                    std::uint64_t bluetooth_address,
+                    BluetoothAddressKind address_kind,
+                    const std::string& name);
     void ConfirmPairedDeviceIds(const std::vector<std::string>& device_ids, const std::string& device_id);
     void RemovePairedDevice(const std::string& device_id);
     void CancelPendingConnect(const std::string& device_id);

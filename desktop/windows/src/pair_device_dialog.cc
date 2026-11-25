@@ -89,6 +89,19 @@ BluetoothAddressKind AddressKindFromArgs(
     return BluetoothAddressKind::kUnspecified;
 }
 
+// True for the pairing advertisement, false for the reconnect advertisement,
+// and nullopt for reports that carry neither, such as scan responses.
+std::optional<bool> AdvertisesPairingWindow(
+    const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementReceivedEventArgs& args) {
+    static const winrt::guid pairing_uuid{BleProtocol::pairing_advertisement_uuid};
+    static const winrt::guid reconnect_uuid{BleProtocol::reconnect_advertisement_uuid};
+    for (const auto& uuid : args.Advertisement().ServiceUuids()) {
+        if (uuid == pairing_uuid) return true;
+        if (uuid == reconnect_uuid) return false;
+    }
+    return std::nullopt;
+}
+
 void AlignDialogData(std::vector<BYTE>* buffer, std::size_t alignment) {
     while (buffer->size() % alignment != 0) buffer->push_back(0);
 }
@@ -435,13 +448,25 @@ void PairDeviceDialog::StopScan() {
 void PairDeviceDialog::HandleAdvertisement(
     const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher&,
     const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementReceivedEventArgs& args) {
+    bool in_pairing_window = false;
+    {
+        std::lock_guard lock(mutex_);
+        if (const auto pairing_window = AdvertisesPairingWindow(args)) {
+            if (*pairing_window) {
+                pairing_window_addresses_.insert(args.BluetoothAddress());
+            } else {
+                pairing_window_addresses_.erase(args.BluetoothAddress());
+            }
+        }
+        in_pairing_window = pairing_window_addresses_.contains(args.BluetoothAddress());
+    }
+
     const auto name = Utf8FromHstring(args.Advertisement().LocalName());
     auto device_id = BleProtocol::DeviceIdFromName(name);
     if (!device_id.has_value()) return;
-    // Already-paired devices belong to the auto-reconnect path, not the
-    // pairing list; surfacing them here lets the user accidentally pair the
-    // same device a second time.
-    if (IsExistingDevice(*device_id)) return;
+    // Already-paired devices belong to the auto-reconnect path unless the
+    // user opened the device's pairing window, e.g. after it lost its bond.
+    if (IsExistingDevice(*device_id) && !in_pairing_window) return;
 
     PairingDevice device;
     device.bluetooth_address = args.BluetoothAddress();

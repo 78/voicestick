@@ -12,6 +12,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -84,6 +85,9 @@ private:
     std::function<void(std::string, std::optional<DeviceInfo>)> on_pair_completed_;
     bool pairing_finalized_ = false;
     std::vector<PairingDevice> devices_;
+    // The service UUID and the device name arrive in separate advertising
+    // reports, so remember which addresses are in their pairing window.
+    std::set<std::uint64_t> pairing_window_addresses_;
     std::mutex mutex_;
     winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher watcher_{nullptr};
     winrt::event_token received_token_{};

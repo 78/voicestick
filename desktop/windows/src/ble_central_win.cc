@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <random>
 #include <utility>
 
@@ -44,6 +45,7 @@ constexpr int kServiceDiscoveryAttempts = 6;
 constexpr std::chrono::milliseconds kServiceDiscoveryRetryDelay{1000};
 constexpr std::chrono::milliseconds kServiceDiscoveryTimeout{8000};
 constexpr std::chrono::milliseconds kCharacteristicDiscoveryTimeout{5000};
+constexpr std::chrono::milliseconds kAuthorizationReadTimeout{10000};
 constexpr std::chrono::milliseconds kDeviceReopenDelay{800};
 constexpr std::chrono::milliseconds kConnectionSettleDelay{300};
 
@@ -144,6 +146,18 @@ bool CanReadAdvertisementAddressType() {
             L"Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementReceivedEventArgs",
             L"BluetoothAddressType");
     return available;
+}
+
+// True for the pairing advertisement, false for the reconnect advertisement,
+// and nullopt for reports that carry neither, such as scan responses.
+std::optional<bool> AdvertisesPairingWindow(const BluetoothLEAdvertisementReceivedEventArgs& args) {
+    static const winrt::guid pairing_uuid{BleProtocol::pairing_advertisement_uuid};
+    static const winrt::guid reconnect_uuid{BleProtocol::reconnect_advertisement_uuid};
+    for (const auto& uuid : args.Advertisement().ServiceUuids()) {
+        if (uuid == pairing_uuid) return true;
+        if (uuid == reconnect_uuid) return false;
+    }
+    return std::nullopt;
 }
 
 std::string ScanStartFailureMessage(const winrt::hresult_error& error) {
@@ -260,6 +274,21 @@ void BleCentralWin::ConnectPairedDevice(const std::string& device_id,
                                         std::uint64_t bluetooth_address,
                                         BluetoothAddressKind address_kind,
                                         const std::string& name) {
+    StartDirectConnect(device_id, bluetooth_address, address_kind, name, false);
+}
+
+void BleCentralWin::PairDevice(const std::string& device_id,
+                               std::uint64_t bluetooth_address,
+                               BluetoothAddressKind address_kind,
+                               const std::string& name) {
+    StartDirectConnect(device_id, bluetooth_address, address_kind, name, true);
+}
+
+void BleCentralWin::StartDirectConnect(const std::string& device_id,
+                                       std::uint64_t bluetooth_address,
+                                       BluetoothAddressKind address_kind,
+                                       const std::string& name,
+                                       bool pairing) {
     {
         std::lock_guard lock(mutex_);
         paired_device_ids_.insert(device_id);
@@ -274,11 +303,11 @@ void BleCentralWin::ConnectPairedDevice(const std::string& device_id,
         }
         connecting_addresses_.insert(bluetooth_address);
     }
-    LogBleLine("direct connect requested VS-" + device_id + " address=" +
-               FormatBluetoothAddress(bluetooth_address) +
+    LogBleLine(std::string(pairing ? "pairing" : "direct") + " connect requested VS-" + device_id +
+               " address=" + FormatBluetoothAddress(bluetooth_address) +
                " kind=" + AddressKindName(address_kind));
     ConnectDeviceAsync(bluetooth_address, address_kind,
-                       name.empty() ? "VS-" + device_id : name, device_id);
+                       name.empty() ? "VS-" + device_id : name, device_id, pairing);
 }
 
 void BleCentralWin::SendUiState(const std::string& state,
@@ -480,11 +509,20 @@ void BleCentralWin::StopScan() {
 
 void BleCentralWin::HandleAdvertisement(const BluetoothLEAdvertisementWatcher&,
                                         const BluetoothLEAdvertisementReceivedEventArgs& args) {
+    const auto bluetooth_address = args.BluetoothAddress();
+    if (const auto pairing_window = AdvertisesPairingWindow(args)) {
+        std::lock_guard lock(mutex_);
+        if (*pairing_window) {
+            pairing_window_addresses_.insert(bluetooth_address);
+        } else {
+            pairing_window_addresses_.erase(bluetooth_address);
+        }
+    }
+
     const auto local_name = Utf8FromHstring(args.Advertisement().LocalName());
     auto device_id = BleProtocol::DeviceIdFromName(local_name);
     if (!device_id.has_value()) return;
 
-    const auto bluetooth_address = args.BluetoothAddress();
     BluetoothAddressKind address_kind = BluetoothAddressKind::kUnspecified;
     if (CanReadAdvertisementAddressType()) {
         try {
@@ -509,13 +547,15 @@ void BleCentralWin::HandleAdvertisement(const BluetoothLEAdvertisementWatcher&,
         if (!paired_device_ids_.contains(*device_id)) return;
         if (sessions_by_device_id_.contains(*device_id)) return;
         if (connecting_addresses_.contains(bluetooth_address)) return;
+        // A device in its pairing window is waiting for the pairing dialog.
+        if (pairing_window_addresses_.contains(bluetooth_address)) return;
         connecting_addresses_.insert(bluetooth_address);
     }
 
     LogBleLine("advertisement matched VS-" + *device_id + " address=" +
                FormatBluetoothAddress(bluetooth_address) +
                " kind=" + AddressKindName(address_kind));
-    ConnectDeviceAsync(bluetooth_address, address_kind, local_name, *device_id);
+    ConnectDeviceAsync(bluetooth_address, address_kind, local_name, *device_id, false);
 }
 
 namespace {
@@ -566,6 +606,66 @@ winrt::Windows::Foundation::IAsyncOperation<bool> TryUnpairAsync(winrt::hstring 
     } catch (...) {
         LogBleLine("unpair: unknown exception");
         co_return false;
+    }
+}
+
+// Pairs without user interaction; the device has no input or output.
+winrt::Windows::Foundation::IAsyncOperation<bool> TryPairAsync(winrt::hstring device_id) {
+    using winrt::Windows::Devices::Enumeration::DeviceInformationCustomPairing;
+    using winrt::Windows::Devices::Enumeration::DevicePairingKinds;
+    using winrt::Windows::Devices::Enumeration::DevicePairingProtectionLevel;
+    using winrt::Windows::Devices::Enumeration::DevicePairingRequestedEventArgs;
+    using winrt::Windows::Devices::Enumeration::DevicePairingResultStatus;
+    try {
+        auto info = co_await DeviceInformation::CreateFromIdAsync(device_id);
+        if (!info) {
+            LogBleLine("pair: DeviceInformation not found");
+            co_return false;
+        }
+        auto custom = info.Pairing().Custom();
+        auto token = custom.PairingRequested(
+            [](const DeviceInformationCustomPairing&, const DevicePairingRequestedEventArgs& args) {
+                args.Accept();
+            });
+        auto result = co_await custom.PairAsync(DevicePairingKinds::ConfirmOnly,
+                                                DevicePairingProtectionLevel::Encryption);
+        custom.PairingRequested(token);
+        const auto status = result.Status();
+        LogBleLine("pair: result=" + std::to_string(static_cast<int>(status)));
+        co_return status == DevicePairingResultStatus::Paired ||
+                  status == DevicePairingResultStatus::AlreadyPaired;
+    } catch (const winrt::hresult_error& error) {
+        LogBleLine("pair: exception hr=" + FormatHresult(error.code()));
+        co_return false;
+    } catch (...) {
+        LogBleLine("pair: unknown exception");
+        co_return false;
+    }
+}
+
+// Reading the encrypted characteristic makes Windows encrypt the link, and
+// the device only returns 0x01 to its authorized host.
+bool ReadAuthorized(const GattCharacteristic& characteristic, const std::string& device_id) {
+    using winrt::Windows::Foundation::AsyncStatus;
+    try {
+        auto op = characteristic.ReadValueAsync(BluetoothCacheMode::Uncached);
+        if (op.wait_for(kAuthorizationReadTimeout) == AsyncStatus::Started) {
+            op.Cancel();
+            LogBleLine("authorized read timed out VS-" + device_id);
+            return false;
+        }
+        auto result = op.GetResults();
+        if (result.Status() != GattCommunicationStatus::Success) {
+            LogBleLine("authorized read VS-" + device_id + " status=" + GattStatusName(result.Status()));
+            return false;
+        }
+        auto reader = DataReader::FromBuffer(result.Value());
+        const bool authorized = reader.UnconsumedBufferLength() == 1 && reader.ReadByte() == 1;
+        LogBleLine("authorized read VS-" + device_id + " value=" + (authorized ? "1" : "invalid"));
+        return authorized;
+    } catch (const winrt::hresult_error& error) {
+        LogBleLine("authorized read VS-" + device_id + " hr=" + FormatHresult(error.code()));
+        return false;
     }
 }
 
@@ -621,7 +721,8 @@ bool IsLikelyStaleBondError(std::int32_t hresult) {
 winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth_address,
                                                          BluetoothAddressKind address_kind,
                                                          std::string local_name,
-                                                         std::string device_id) {
+                                                         std::string device_id,
+                                                         bool pairing) {
     auto session = std::make_shared<DeviceSession>();
     session->bluetooth_address = bluetooth_address;
     session->device = ConnectedDevice{device_id, local_name.empty() ? "VS-" + device_id : local_name};
@@ -705,12 +806,11 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
         LogBleLine("connecting VS-" + device_id + " address=" + FormatBluetoothAddress(bluetooth_address) +
                    " kind=" + AddressKindName(address_kind));
 
-        // Proactively remove any stale Windows pairing/bond before connecting.
-        // ESP32/NimBLE peripherals lose their bond when reset, but Windows
-        // caches the old LTK and tries to encrypt with it, causing
-        // BLE_HS_EENCRYPT_KEY_SZ (status=26) on the device and
-        // Unreachable GATT status on Windows.
-        {
+        // Start pairing from a clean Windows bond. If the device lost its
+        // bond, Windows would otherwise encrypt with a key the device no
+        // longer has; the device replaces its own old bond in the pairing
+        // window.
+        if (pairing) {
             auto probe_device = co_await open_device(address_type);
             if (probe_device) {
                 if (co_await TryUnpairAsync(probe_device.DeviceId())) {
@@ -820,7 +920,7 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
                            " attempt=" + std::to_string(attempt) +
                            " hr=" + FormatHresult(throw_hresult) +
                            " message=" + throw_message);
-                if (!unpair_attempted && IsLikelyStaleBondError(throw_hresult)) {
+                if (pairing && !unpair_attempted && IsLikelyStaleBondError(throw_hresult)) {
                     unpair_attempted = true;
                     LogBleLine("attempting to remove stale Windows pairing for VS-" + device_id);
                     if (co_await TryUnpairAsync(session->ble_device.DeviceId())) {
@@ -900,7 +1000,7 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
             // Unreachable usually means the peripheral rejected the encrypted
             // link (stale bond / LTK mismatch). Unpair, reset the Bluetooth
             // radio to flush the controller-level key cache, then recycle.
-            if (status == GattCommunicationStatus::Unreachable && !unpair_attempted) {
+            if (pairing && status == GattCommunicationStatus::Unreachable && !unpair_attempted) {
                 unpair_attempted = true;
                 LogBleLine("Unreachable: removing stale Windows pairing for VS-" + device_id);
                 co_await TryUnpairAsync(session->ble_device.DeviceId());
@@ -1018,6 +1118,28 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
         }
         if (session->ota_state_characteristic && !HasNotify(session->ota_state_characteristic)) {
             session->ota_state_characteristic = nullptr;
+        }
+
+        // Firmware without the characteristic predates the pairing window.
+        auto authorized_result = discover_characteristic(winrt::guid{BleProtocol::authorized_uuid}, "authorized");
+        if (authorized_result && authorized_result.Status() == GattCommunicationStatus::Success &&
+            authorized_result.Characteristics().Size() > 0) {
+            const auto authorized = authorized_result.Characteristics().GetAt(0);
+            bool is_authorized = ReadAuthorized(authorized, device_id);
+            if (!is_authorized && pairing) {
+                LogBleLine("authorization failed VS-" + device_id + "; pairing explicitly");
+                if (co_await TryPairAsync(session->ble_device.DeviceId())) {
+                    is_authorized = ReadAuthorized(authorized, device_id);
+                }
+            }
+            if (!is_authorized) {
+                fail(pairing
+                         ? "VS-" + device_id + " did not authorize this PC. Hold the device's cancel "
+                           "button for 3 seconds, then pair again."
+                         : "VS-" + device_id + " no longer accepts this PC. It may be paired with "
+                           "another computer; pair it again from the VoiceStick menu.");
+                co_return;
+            }
         }
 
         session->audio_value_changed_token = session->audio_characteristic.ValueChanged(

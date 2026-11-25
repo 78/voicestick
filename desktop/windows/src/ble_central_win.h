@@ -31,6 +31,10 @@ public:
                              std::uint64_t bluetooth_address,
                              BluetoothAddressKind address_kind,
                              const std::string& name) override;
+    void PairDevice(const std::string& device_id,
+                    std::uint64_t bluetooth_address,
+                    BluetoothAddressKind address_kind,
+                    const std::string& name) override;
     void SendUiState(const std::string& state,
                        const std::string& text,
                        const std::optional<std::string>& device_id) override;
@@ -84,10 +88,18 @@ private:
     void StopScan();
     void HandleAdvertisement(const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher& watcher,
                               const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementReceivedEventArgs& args);
+    void StartDirectConnect(const std::string& device_id,
+                            std::uint64_t bluetooth_address,
+                            BluetoothAddressKind address_kind,
+                            const std::string& name,
+                            bool pairing);
+    // Only a pairing connection may remove this computer's Bluetooth bond:
+    // outside its pairing window the device rejects a fresh pairing.
     winrt::fire_and_forget ConnectDeviceAsync(std::uint64_t bluetooth_address,
                                               BluetoothAddressKind address_kind,
                                               std::string local_name,
-                                              std::string device_id);
+                                              std::string device_id,
+                                              bool pairing);
     winrt::fire_and_forget WriteControlPayloadAsync(std::shared_ptr<DeviceSession> session, ByteVector payload);
     winrt::fire_and_forget UpdateFirmwareAsync(std::shared_ptr<DeviceSession> session,
                                                std::shared_ptr<FirmwareUpdateSession> update_session);
@@ -112,6 +124,9 @@ private:
     std::map<std::string, std::shared_ptr<DeviceSession>> sessions_by_device_id_;
     std::shared_ptr<FirmwareUpdateSession> firmware_update_session_;
     std::set<std::uint64_t> connecting_addresses_;
+    // The service UUID and the device name arrive in separate advertising
+    // reports, so remember which addresses are in their pairing window.
+    std::set<std::uint64_t> pairing_window_addresses_;
     std::set<std::string> cancelled_device_ids_;
     winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher watcher_{nullptr};
     winrt::event_token received_token_{};
