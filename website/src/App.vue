@@ -38,8 +38,13 @@ const canFlash = computed(() => serialSupported.value && !flashing.value)
 const flashing = ref(false)
 const flashStatus = ref('idle')
 const flashProgress = ref(0)
+const showFlashProgress = computed(() =>
+  flashProgress.value > 0 && (flashStatus.value === 'flashing' || flashStatus.value === 'resetting'),
+)
+const flashError = ref('')
 const flashLog = ref([])
 const connectedChip = ref('')
+const flashAttempt = ref(0)
 const selectedBoardID = ref('stick_s3')
 const selectedBoard = computed(() => boards[selectedBoardID.value])
 const manifests = ref({})
@@ -49,6 +54,7 @@ const firmwareManifest = computed(() => manifests.value[selectedBoardID.value])
 watch(selectedBoardID, (boardID) => {
   flashStatus.value = 'idle'
   flashProgress.value = 0
+  flashError.value = ''
   flashLog.value = []
   connectedChip.value = ''
   loadFirmwareManifest(boardID).catch(() => {
@@ -140,8 +146,7 @@ function loadFirmwareManifest(boardID) {
 }
 
 async function flashFirmware() {
-  if (!serialSupported.value) {
-    flashStatus.value = 'unsupported'
+  if (!canFlash.value) {
     return
   }
 
@@ -151,13 +156,16 @@ async function flashFirmware() {
 
   try {
     flashing.value = true
-    flashStatus.value = 'connecting'
+    flashAttempt.value += 1
+    flashStatus.value = 'selecting'
     flashProgress.value = 0
+    flashError.value = ''
     connectedChip.value = ''
     flashLog.value = []
     appendLog(t('flasher.log.selectPort'))
 
     const port = await navigator.serial.requestPort()
+    flashStatus.value = 'connecting'
     transport = new Transport(port, false)
     const loader = new ESPLoader({
       transport,
@@ -196,9 +204,12 @@ async function flashFirmware() {
     flashStatus.value = 'done'
     appendLog(t('flasher.log.done'))
   } catch (error) {
-    flashStatus.value = error?.name === 'NotFoundError' ? 'idle' : 'error'
-    if (error?.name !== 'NotFoundError') {
-      appendLog(error?.message || String(error))
+    if (flashStatus.value === 'selecting' && error?.name === 'NotFoundError') {
+      flashStatus.value = 'idle'
+    } else {
+      flashStatus.value = 'error'
+      flashError.value = error?.message || String(error)
+      appendLog(flashError.value)
     }
   } finally {
     if (transport) {
@@ -299,18 +310,10 @@ async function flashFirmware() {
               </label>
             </div>
           </fieldset>
-          <div class="flasher-meta">
-            <span role="status">{{ t(`flasher.status.${flashStatus}`) }}</span>
-            <span>{{ connectedChip || selectedBoard.chip }}</span>
-          </div>
-
-          <div class="progress-track" aria-hidden="true">
-            <span :style="{ width: `${flashProgress}%` }"></span>
-          </div>
 
           <div class="flasher-actions">
             <button class="button primary" type="button" :disabled="!canFlash" @click="flashFirmware">
-              {{ flashing ? t('flasher.button.flashing') : t('flasher.button.start') }}
+              {{ t('flasher.button.start') }}
             </button>
             <a v-if="firmwareManifest" class="button secondary" :href="firmwareManifest.merged_url">
               {{ t('flasher.button.download') }}
@@ -320,11 +323,26 @@ async function flashFirmware() {
 
           <p v-if="!serialSupported" class="browser-warning">{{ t('flasher.unsupported') }}</p>
           <p v-if="firmwareManifest" class="firmware-note">{{ t('flasher.firmware.version', { version: firmwareManifest.version }) }}</p>
-          <p v-else-if="firmwareManifest === null" class="firmware-note">{{ t('flasher.error.manifestUnavailable') }}</p>
+          <p v-else-if="firmwareManifest === null && flashStatus === 'idle'" class="firmware-note">{{ t('flasher.error.manifestUnavailable') }}</p>
 
-          <div class="flash-log">
-            <p v-if="flashLog.length === 0">{{ t('flasher.log.empty') }}</p>
-            <p v-for="(line, index) in flashLog" :key="`${index}-${line}`">{{ line }}</p>
+          <div v-if="flashStatus !== 'idle'" class="flash-activity">
+            <p class="flash-status" role="status">{{ t(`flasher.status.${flashStatus}`) }}</p>
+            <p v-if="flashError" class="flash-error" role="alert">{{ flashError }}</p>
+
+            <div v-if="showFlashProgress" class="flash-progress">
+              <div class="progress-track" role="progressbar" :aria-label="t('flasher.progress')" :aria-valuenow="flashProgress">
+                <span :style="{ width: `${flashProgress}%` }"></span>
+              </div>
+              <span aria-hidden="true">{{ flashProgress }}%</span>
+            </div>
+
+            <details v-if="flashLog.length || connectedChip" :key="flashAttempt" class="flash-details">
+              <summary>{{ t('flasher.details') }}</summary>
+              <p v-if="connectedChip" class="flash-chip">{{ t('flasher.chip', { chip: connectedChip }) }}</p>
+              <div v-if="flashLog.length" class="flash-log" role="region" :aria-label="t('flasher.log.label')" tabindex="0">
+                <p v-for="(line, index) in flashLog" :key="`${index}-${line}`">{{ line }}</p>
+              </div>
+            </details>
           </div>
         </div>
       </div>

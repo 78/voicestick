@@ -278,14 +278,12 @@ h2 {
   display: grid;
   grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
   gap: clamp(24px, 5vw, 64px);
-  align-items: center;
+  align-items: start;
   padding-top: clamp(38px, 7vw, 78px);
   padding-bottom: clamp(38px, 7vw, 78px);
 }
 
-.flasher-copy > p:not(.eyebrow),
-.firmware-note,
-.browser-warning {
+.flasher-copy > p:not(.eyebrow) {
   margin: 14px 0 0;
   color: var(--muted);
   font-size: 17px;
@@ -309,7 +307,7 @@ h2 {
 
 .flasher-board {
   min-width: 0;
-  margin: 0 0 18px;
+  margin: 0;
   padding: 0;
   border: 0;
   font-weight: 650;
@@ -323,66 +321,86 @@ h2 {
 .board-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 8px 16px;
 }
 
 .board-options label {
-  position: relative;
-}
-
-.board-options input {
-  position: absolute;
-  opacity: 0;
-}
-
-.board-options span {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-height: 44px;
-  height: 100%;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  color: var(--ink);
-  text-align: center;
-  line-height: 1.25;
+  line-height: 1.3;
   cursor: pointer;
 }
 
+.board-options input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent-dark);
+  cursor: inherit;
+}
+
 .board-options input:checked + span {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: #ffffff;
+  color: var(--accent-dark);
 }
 
-.board-options input:focus-visible + span {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.flasher-board:disabled .board-options span {
+.flasher-board:disabled .board-options label {
   cursor: not-allowed;
 }
 
-.flasher-meta {
+.flasher-actions {
   display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  color: var(--ink);
-  font-size: 15px;
-  font-weight: 720;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
 }
 
-.flasher-meta span:last-child {
+.flasher-actions .button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.firmware-note,
+.browser-warning {
+  margin: 10px 0 0;
   color: var(--muted);
-  text-align: right;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.flash-activity {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.flash-status {
+  margin: 0;
+  font-weight: 650;
+}
+
+.flash-error,
+.flash-chip {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.flash-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .progress-track {
-  width: 100%;
-  height: 10px;
-  margin-top: 18px;
+  flex: 1;
+  height: 8px;
   overflow: hidden;
   border-radius: 999px;
   background: #dfe5ec;
@@ -393,31 +411,30 @@ h2 {
   width: 0;
   height: 100%;
   border-radius: inherit;
-  background: var(--accent);
+  background: var(--accent-dark);
   transition: width 180ms ease;
 }
 
-.flasher-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 20px;
+.flash-details {
+  margin-top: 6px;
 }
 
-.flasher-actions .button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
+.flash-details summary {
+  width: fit-content;
+  padding: 4px 0;
+  color: var(--accent-dark);
+  cursor: pointer;
 }
 
-.browser-warning {
+.browser-warning,
+.flash-error {
   color: #9f2f24;
 }
 
 .flash-log {
-  min-height: 150px;
-  max-height: 220px;
-  margin-top: 18px;
-  padding: 14px;
+  max-height: 160px;
+  margin-top: 8px;
+  padding: 10px 12px;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;

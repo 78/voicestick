@@ -48,25 +48,26 @@
     },
     "button": {
       "start": "开始烧录",
-      "flashing": "烧录中",
       "download": "下载固件"
     },
+    "progress": "烧录进度",
+    "details": "烧录详情",
+    "chip": "检测到 {chip}",
     "status": {
-      "idle": "准备就绪",
+      "selecting": "请选择 USB 串口",
       "connecting": "正在连接",
       "downloading": "正在下载固件",
       "flashing": "正在写入 Flash",
       "resetting": "正在重启设备",
       "done": "烧录完成",
-      "error": "烧录失败",
-      "unsupported": "浏览器不支持"
+      "error": "烧录失败"
     },
     "firmware": {
       "version": "固件版本 {version}"
     },
     "unsupported": "当前浏览器不支持 Web Serial。请使用桌面版 Chrome 或 Edge 打开此页面。",
     "log": {
-      "empty": "日志会显示在这里。",
+      "label": "烧录日志",
       "selectPort": "等待选择 USB 串口...",
       "connecting": "正在连接设备的引导程序...",
       "downloading": "正在下载 Release 固件...",

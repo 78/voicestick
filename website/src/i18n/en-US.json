@@ -48,25 +48,26 @@
     },
     "button": {
       "start": "Start flashing",
-      "flashing": "Flashing",
       "download": "Download firmware"
     },
+    "progress": "Flashing progress",
+    "details": "Flashing details",
+    "chip": "Detected {chip}",
     "status": {
-      "idle": "Ready",
+      "selecting": "Choose a USB serial port",
       "connecting": "Connecting",
       "downloading": "Downloading firmware",
       "flashing": "Writing Flash",
       "resetting": "Resetting device",
       "done": "Flash complete",
-      "error": "Flash failed",
-      "unsupported": "Unsupported browser"
+      "error": "Flash failed"
     },
     "firmware": {
       "version": "Firmware version {version}"
     },
     "unsupported": "This browser does not support Web Serial. Open this page in desktop Chrome or Edge.",
     "log": {
-      "empty": "Logs will appear here.",
+      "label": "Flashing log",
       "selectPort": "Waiting for USB serial port selection...",
       "connecting": "Connecting to the device bootloader...",
       "downloading": "Downloading Release firmware...",
