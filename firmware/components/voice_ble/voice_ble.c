@@ -75,6 +75,9 @@ typedef enum {
 
 static conn_itvl_target_t s_itvl_target;
 static bool s_itvl_update_pending;
+static bool s_itvl_update_in_flight;
+static bool s_device_info_pending;
+static bool s_host_commanded;
 
 typedef struct {
     bool active;
@@ -121,6 +124,7 @@ void ble_store_config_init(void);
 static void start_advertising(void);
 static void stop_advertising(void);
 static esp_err_t send_state_json(const char *json);
+static void announce_state_subscription(void);
 static struct ble_npl_callout s_adv_retry_callout;
 #define ADV_RETRY_DELAY_MS 1000
 
@@ -650,6 +654,14 @@ static int control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     if (s_control_cb) {
         s_control_cb(buffer);
     }
+    /* A bonded central gets its subscription restored at encryption, before
+     * its app listens, and Windows drops notifications nobody listens to.
+     * The first command shows the app is listening.
+     */
+    if (!s_host_commanded) {
+        s_host_commanded = true;
+        announce_state_subscription();
+    }
     return 0;
 }
 
@@ -727,7 +739,13 @@ static void announce_state_subscription(void)
         return;
     }
     esp_err_t rc = voice_ble_send_device_info();
-    if (rc != ESP_OK) {
+    /* A bonded central restores its subscription before the MTU exchange
+     * finishes, and device_info does not fit in the default MTU.
+     */
+    s_device_info_pending = rc == ESP_ERR_INVALID_SIZE;
+    if (s_device_info_pending) {
+        ESP_LOGD(TAG, "device_info deferred until the MTU exchange");
+    } else if (rc != ESP_OK) {
         ESP_LOGW(TAG, "device_info send failed err=0x%x", rc);
     }
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
@@ -875,6 +893,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_link_handle = BLE_HS_CONN_HANDLE_NONE;
         s_itvl_target = CONN_ITVL_NONE;
         s_itvl_update_pending = false;
+        s_itvl_update_in_flight = false;
+        s_device_info_pending = false;
+        s_host_commanded = false;
         start_advertising();
         if (was_connected && s_connection_cb) {
             s_connection_cb(false);
@@ -908,19 +929,15 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "conn updated: status=%d (desc unavailable)",
                      event->conn_update.status);
         }
-        if (s_itvl_update_pending) {
-            s_itvl_update_pending = false;
-            if (s_itvl_target == CONN_ITVL_FAST) {
-                voice_ble_request_fast_interval();
-            } else if (s_itvl_target == CONN_ITVL_SLOW) {
-                voice_ble_request_slow_interval();
-            }
-        }
         return 0;
     }
 
     case BLE_GAP_EVENT_MTU:
         ESP_LOGD(TAG, "mtu=%u", event->mtu.value);
+        if (s_device_info_pending) {
+            announce_state_subscription();
+            return 0;
+        }
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
         report_battery_status();
 #endif
@@ -1245,63 +1262,79 @@ esp_err_t voice_ble_send_audio(uint32_t session_id, uint32_t seq, uint8_t flags,
     return ESP_OK;
 }
 
-esp_err_t voice_ble_request_fast_interval(void)
+static void conn_params_response_cb(uint16_t conn_handle, int status, void *arg)
+{
+    (void)arg;
+    if (conn_handle != s_conn_handle) {
+        return;
+    }
+    s_itvl_update_in_flight = false;
+    if (status != 0) {
+        ESP_LOGW(TAG, "conn params request not accepted status=%d", status);
+    } else {
+        ESP_LOGI(TAG, "conn params request accepted");
+    }
+    if (s_itvl_update_pending) {
+        s_itvl_update_pending = false;
+        if (s_itvl_target == CONN_ITVL_FAST) {
+            voice_ble_request_fast_interval();
+        } else if (s_itvl_target == CONN_ITVL_SLOW) {
+            voice_ble_request_slow_interval();
+        }
+    }
+}
+
+/* Windows controllers advertise the LL connection parameters request procedure
+ * but some never answer it, and the link then drops after the 40 s LL response
+ * timeout. The L2CAP request is answered by the host, and an unanswered one
+ * only times out the request.
+ */
+static esp_err_t request_conn_params(conn_itvl_target_t target,
+                                     struct ble_l2cap_sig_update_params *params,
+                                     const char *label)
 {
     if (s_pairing_open || !s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         return ESP_ERR_INVALID_STATE;
     }
-    s_itvl_target = CONN_ITVL_FAST;
-    struct ble_gap_upd_params params = {
-        .itvl_min = 12,   // 15ms
-        .itvl_max = 24,   // 30ms
-        .latency = 0,
-        .supervision_timeout = 200,  // 2s
-        .min_ce_len = 0,
-        .max_ce_len = 0,
-    };
-    int rc = ble_gap_update_params(s_conn_handle, &params);
-    if (rc == BLE_HS_EALREADY) {
+    s_itvl_target = target;
+    if (s_itvl_update_in_flight) {
         s_itvl_update_pending = true;
-        ESP_LOGD(TAG, "fast interval deferred (update in progress)");
+        ESP_LOGD(TAG, "%s interval deferred (update in progress)", label);
         return ESP_OK;
     }
+    int rc = ble_l2cap_sig_update(s_conn_handle, params, conn_params_response_cb, NULL);
     if (rc != 0) {
-        ESP_LOGW(TAG, "fast interval request failed rc=%d", rc);
+        ESP_LOGW(TAG, "%s interval request failed rc=%d", label, rc);
         return ESP_FAIL;
     }
     s_itvl_update_pending = false;
-    ESP_LOGI(TAG, "requested fast conn interval 15-30ms");
+    s_itvl_update_in_flight = true;
+    ESP_LOGI(TAG, "requested %s conn interval %u-%ums latency=%u", label,
+             params->itvl_min * 5 / 4, params->itvl_max * 5 / 4, params->slave_latency);
     return ESP_OK;
+}
+
+esp_err_t voice_ble_request_fast_interval(void)
+{
+    struct ble_l2cap_sig_update_params params = {
+        .itvl_min = 12,   // 15ms
+        .itvl_max = 24,   // 30ms
+        .slave_latency = 0,
+        .timeout_multiplier = 200,  // 2s
+    };
+    return request_conn_params(CONN_ITVL_FAST, &params, "fast");
 }
 
 esp_err_t voice_ble_request_slow_interval(void)
 {
-    if (s_pairing_open || !s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    s_itvl_target = CONN_ITVL_SLOW;
     /* Apple caps interval * (latency + 1) at 2s and the supervision timeout at 6s. */
-    struct ble_gap_upd_params params = {
+    struct ble_l2cap_sig_update_params params = {
         .itvl_min = 40,   // 50ms
         .itvl_max = 160,  // 200ms
-        .latency = 8,
-        .supervision_timeout = 600,  // 6s
-        .min_ce_len = 0,
-        .max_ce_len = 0,
+        .slave_latency = 8,
+        .timeout_multiplier = 600,  // 6s
     };
-    int rc = ble_gap_update_params(s_conn_handle, &params);
-    if (rc == BLE_HS_EALREADY) {
-        s_itvl_update_pending = true;
-        ESP_LOGD(TAG, "slow interval deferred (update in progress)");
-        return ESP_OK;
-    }
-    if (rc != 0) {
-        ESP_LOGW(TAG, "slow interval request failed rc=%d", rc);
-        return ESP_FAIL;
-    }
-    s_itvl_update_pending = false;
-    ESP_LOGI(TAG, "requested slow conn interval 50-200ms");
-    return ESP_OK;
+    return request_conn_params(CONN_ITVL_SLOW, &params, "slow");
 }
 
 static esp_err_t send_state_json(const char *json)
