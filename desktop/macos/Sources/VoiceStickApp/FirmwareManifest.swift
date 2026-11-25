@@ -37,6 +37,7 @@ struct FirmwareManifest: Decodable {
 
 struct DeviceFirmwareInfo {
     var hardware: String?
+    var buttons: [String]?
     var currentVersion: String?
     var latestVersion: String?
     var updateAvailable = false

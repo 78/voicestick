@@ -120,7 +120,6 @@ void ui_status_icons_apply(ui_status_icons_t *icons, ui_status_icon_scene_t scen
     ui_status_icons_stop_anim(icons);
     lv_image_set_src(icons->root, get_scene_image(scene));
     lv_obj_set_style_opa(icons->root, LV_OPA_COVER, 0);
-    lv_obj_align(icons->root, LV_ALIGN_TOP_MID, 0, CAT_ICON_TOP_Y);
 }
 
 void ui_status_icons_start_anim(ui_status_icons_t *icons, ui_status_icon_scene_t scene)

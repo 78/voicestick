@@ -128,8 +128,10 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         scanIfReady()
     }
 
-    func sendUIState(_ state: String, text: String = "", to peripheralID: UUID? = nil) {
-        let data = BleProtocol.uiStatePayload(state: state, text: text)
+    func sendUIState(
+        _ state: String, text: String = "", confirmationID: UUID? = nil, to peripheralID: UUID? = nil
+    ) {
+        let data = BleProtocol.uiStatePayload(state: state, text: text, confirmationID: confirmationID)
         if let peripheralID {
             if let characteristic = controlCharacteristics[peripheralID] {
                 if let peripheral = peripherals[peripheralID] {

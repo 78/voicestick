@@ -2,7 +2,7 @@
 
 [English](README.md) · 简体中文
 
-Voice Stick 是一个适用于 macOS、Windows 和 Linux 的蓝牙语音输入按键。你可以用现成的 M5Stack StickS3，也可以自己制作 **VoiceStick C3 v1**。复刻自研版所需的打板文件、外壳 STL 和 STEP、装配顺序及烧录命令都在[硬件复刻指南](hardware/README_ZH.md)。
+Voice Stick 是一个适用于 macOS、Windows 和 Linux 的蓝牙语音输入按键。你可以用现成的 M5Stack StickS3 或 Magiclick 2P5，也可以自己制作 **VoiceStick C3 v1**。复刻自研版所需的打板文件、外壳 STL 和 STEP、装配顺序及烧录命令都在[硬件复刻指南](hardware/README_ZH.md)。
 
 默认模式下，按住主键录音，松开后桌面应用将音频送去识别。确认倒计时结束，识别结果会粘贴到当前输入框。设置里的 `auto_enter` 控制粘贴后是否按回车。
 
@@ -19,36 +19,40 @@ Voice Stick 是一个适用于 macOS、Windows 和 Linux 的蓝牙语音输入�
 
 ## 板型
 
-| | M5Stack StickS3 | VoiceStick C3 v1 |
-| --- | --- | --- |
-| 固件构建目标 | `m5stack_stick_s3`（默认） | `voicestick_c3` |
-| 主控与音频 | ESP32-S3-PICO-1-N8R8，ES8311 的 I2S 接口输出 16 kHz 单声道 PCM | ESP32-C3、外挂 8 MB Flash，SD18OB371 PDM 麦克风默认 1.536 MHz，经 CIC3 抽取得到 16 kHz PCM |
-| 按键 | 主键 GPIO11，侧键 GPIO12 | 主键 GPIO4、取消 GPIO9、上一页 GPIO8、下一页 GPIO21 |
-| 状态显示 | ST7789P3 竖屏，135 × 240，GPIO38 控制背光 | GPIO20 驱动 WS2812B 状态灯 |
-| 电源与唤醒 | PMIC 中断 GPIO13，电池供电空闲 5 分钟进入深睡 | GPIO2 控制外设供电，GPIO3 采样电池，GPIO10 读充电状态。正常深睡可由主键或插 USB 唤醒 |
+| | M5Stack StickS3 | VoiceStick C3 v1 | Magiclick 2P5 |
+| --- | --- | --- | --- |
+| 固件构建目标 | `m5stack_stick_s3`（默认） | `voicestick_c3` | `magiclick_2p5` |
+| 主控与音频 | ESP32-S3-PICO-1-N8R8，ES8311 的 I2S 接口输出 16 kHz 单声道 PCM | ESP32-C3、外挂 8 MB Flash，SD18OB371 PDM 麦克风默认 1.536 MHz，经 CIC3 抽取得到 16 kHz PCM | ESP32-S3，ES8311 采集 16 kHz 单声道 PCM |
+| 按键 | 主键 GPIO11，侧键 GPIO12 | 主键 GPIO4、取消 GPIO9、上一页 GPIO8、下一页 GPIO21 | 中键 GPIO21 录音和配对，左键 GPIO0 取消 |
+| 状态显示 | ST7789P3 竖屏，135 × 240，GPIO38 控制背光 | GPIO20 驱动 WS2812B 状态灯 | 128 × 128，按 PCB 版本选择 GC9107 或 ST7735 |
+| 电源与唤醒 | PMIC 中断 GPIO13，电池供电空闲 5 分钟进入深睡 | GPIO2 控制外设供电，GPIO3 采样电池，GPIO10 读充电状态。正常深睡可由主键或插 USB 唤醒 | GPIO7 采样电池，GPIO48 读充电状态，中键从深睡唤醒 |
 
 StickS3 的引脚见[板级头文件](firmware/boards/m5stack_stick_s3/components/stick_s3_board/include/stick_s3_board.h)。自研板的晶振、麦克风、电源和完整引脚表见 [C3 v1 电路说明](hardware/voicestick_c3/README_ZH.md)。
+
+Magiclick 2P5 复位时按住左键可进入 USB 下载模式。
 
 ## 录音、确认与配对
 
 设备会自动连回已配对的电脑，固件升级后也是如此。首次配对或换电脑时，按以下步骤操作。
 
 1. 从未配对过的设备开机或唤醒后，自动打开 60 秒配对窗口，可直接跳到第 3 步。
-2. 如果是换电脑，先从原电脑断开设备，再长按 C3 的取消键或 StickS3 的侧键 3 秒。配对窗口持续 60 秒，C3 在窗口打开时快闪蓝灯。
+2. 如果是换电脑，先从原电脑断开设备，再按一下设备的语音主键。配对窗口持续 60 秒，C3 在窗口打开时快闪蓝灯。
 3. 在要配对的 Mac 上，从菜单栏选择 `Pair Device...`，选中相符的 `VS-XXXX` 并点击 `Pair`。如果 macOS 弹出蓝牙配对确认，点「配对」。
 
 设备名末四位来自 eFuse MAC 地址。每台设备记住一台电脑，Mac 应用可以同时连接多台设备。设备进入深睡后，先按语音主键唤醒。
 
 | 状态（默认按住说话） | 主键 | 侧键 / 取消键 |
 | --- | --- | --- |
-| 未连接 | 等待连接，StickS3 屏幕显示设备名 | 无操作 |
+| 未连接 | 按一下进入配对模式 | 无操作 |
 | 已连接、空闲 | 按住开始录音 | 恢复上次可找回的待确认文本 |
 | 录音中 | 松开结束录音 | 继续录音 |
 | 等待识别 | 等待当前识别结束 | 取消识别 |
-| 粘贴倒计时（默认 1 秒） | 暂停倒计时，转为手动确认 | 取消待粘贴文本 |
-| 手动确认 | 确认粘贴 | 取消待粘贴文本 |
+| 粘贴倒计时（默认 1 秒） | 暂停倒计时，在同一浮层的正文下方展开确认按钮 | 取消待粘贴文本 |
+| 手动确认 | 粘贴窗口中编辑后的文字 | 取消待粘贴文本 |
 
-macOS 菜单栏里的 `Send Confirmation` 可以选择立即粘贴、1、2、3、5、10、15 秒倒计时或手动确认。
+macOS 菜单栏里的 `Send Confirmation` 可以选择立即粘贴、1、2、3、5、10、15 秒倒计时或手动确认。确认窗也可以用触控板编辑文字、点 **Send** 粘贴或点 **Cancel** 取消。
+
+StickS3 和 MagiClick 2P5 在暂停确认时也可以摇晃设备，取消当前草稿。
 
 设备上报 `button_down`、`button_up` 和按键角色，桌面应用管理交互状态并回传 `ui_state`。StickS3 显示配对、就绪、录音、识别、待确认、错误和电池状态，空闲 30 秒后调暗背光。接 USB 或充电时保持在调暗状态。
 
@@ -75,7 +79,7 @@ source ~/.espressif/tools/activate_idf_release-v6.1.sh
 cd firmware
 ```
 
-两种板型使用各自的构建目录。选一组命令，将串口替换为实际端口。
+每种板型使用各自的构建目录。选一组命令，将串口替换为实际端口。
 
 ```sh
 # M5Stack StickS3
@@ -85,9 +89,13 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 # VoiceStick C3 v1
 idf.py -B build-c3 -DBOARD=voicestick_c3 build
 idf.py -B build-c3 -p /dev/cu.usbmodemXXXX flash monitor
+
+# Magiclick 2P5
+idf.py -B build-magiclick-2p5 -DBOARD=magiclick_2p5 build
+idf.py -B build-magiclick-2p5 -p /dev/cu.usbmodemXXXX flash monitor
 ```
 
-`boards/<board>/board.cmake` 选择芯片，板级默认配置叠加在固件公共配置之上。可通过 `idf.py -B build-c3 menuconfig` 调整 C3 的麦克风时钟、声道和增益。公共依赖包括 `espressif/button`、`espressif/cjson` 和 `78/esp-opus`；StickS3 另用 `espressif/esp_codec_dev` 和 `lvgl/lvgl`，C3 另用 `espressif/led_strip`。
+`boards/<board>/board.cmake` 选择芯片，板级默认配置叠加在固件公共配置之上。可通过 `idf.py -B build-c3 menuconfig` 调整 C3 的麦克风时钟、声道和增益。公共依赖包括 `espressif/button`、`espressif/cjson` 和 `78/esp-opus`。StickS3 和 Magiclick 2P5 使用 `espressif/esp_codec_dev` 和 `lvgl/lvgl`。StickS3 用 `espressif/bmi270` 支持摇晃取消，Magiclick 的 GC9107 屏幕使用 `espressif/esp_lcd_gc9a01`。Magiclick 和 C3 共用 `espressif/adc_battery_estimation` 估算电量，C3 用 `espressif/led_strip` 驱动状态灯。
 
 分区表包含两个 3 MB OTA 槽和一个 1984 KB 存储区。使用旧单应用分区表的 StickS3，需要先通过 USB 运行一次 `idf.py -p /dev/cu.usbmodemXXXX erase-flash flash monitor`，再使用 BLE OTA。该命令会擦除设备上的现有数据。
 

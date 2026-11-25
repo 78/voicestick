@@ -1,11 +1,24 @@
 import AppKit
 
 final class OverlayController {
-    private let window: NSPanel
+    private enum Phase {
+        case preview, countdown, confirmation
+    }
+
+    private let window: EditableOverlayPanel
+    private let surface = NSView()
     private let container = NSView()
     private let indicator = RecognitionIndicatorView()
     private let textLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
+    private let draftScroll = NSScrollView()
+    private let draftEditor = OverlayTextView(frame: .zero)
+    private lazy var confirmationActions = ConfirmationActions(frame: .zero)
+    private lazy var confirmationActionsHeight = confirmationActions.heightAnchor.constraint(
+        equalToConstant: ConfirmationActions.height
+    )
+    private var bodyHeight: NSLayoutConstraint?
+    private var phase = Phase.preview
     private var textCenterYConstraint: NSLayoutConstraint?
     private var hideWorkItem: DispatchWorkItem?
     private var largestVisibleHeight: CGFloat?
@@ -16,16 +29,14 @@ final class OverlayController {
     private let indicatorWidth: CGFloat = 34
     private let contentSpacing: CGFloat = 16
     private let minWidth: CGFloat = 300
-    private let maxWidth: CGFloat = 645
     private let minHeight: CGFloat = 112
     private let textLineHeightMultiple: CGFloat = 1.1
-    private let positionMargin: CGFloat = 28
     private var themeColor: OverlayThemeColor = .white
     private var position: OverlayPosition = .center
     private var stackIndex = 0
 
     init() {
-        window = NSPanel(
+        window = EditableOverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 132),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -35,23 +46,30 @@ final class OverlayController {
         window.backgroundColor = .clear
         window.hasShadow = true
         window.ignoresMouseEvents = true
+        window.becomesKeyOnlyIfNeeded = true
+        window.hidesOnDeactivate = false
+        window.appearance = NSAppearance(named: .aqua)
         window.level = .screenSaver
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         window.animationBehavior = .utilityWindow
-        window.contentView = container
+        window.contentView = surface
         window.alphaValue = 0
 
-        container.wantsLayer = true
-        if let layer = container.layer {
-            layer.backgroundColor = Self.backgroundColor(for: themeColor).cgColor
-            layer.cornerRadius = 24
+        surface.wantsLayer = true
+        if let layer = surface.layer {
+            layer.backgroundColor = VoiceOverlayStyle.backgroundColor(for: themeColor).cgColor
+            layer.cornerRadius = VoiceOverlayStyle.cornerRadius
             layer.cornerCurve = .continuous
             layer.masksToBounds = true
             layer.borderWidth = 0
         }
+        container.translatesAutoresizingMaskIntoConstraints = false
+        surface.addSubview(container)
+        let bodyHeight = container.heightAnchor.constraint(equalToConstant: 132)
+        self.bodyHeight = bodyHeight
 
-        textLabel.font = .systemFont(ofSize: 30, weight: .regular)
-        textLabel.textColor = NSColor.black.withAlphaComponent(0.68)
+        textLabel.font = VoiceOverlayStyle.textFont
+        textLabel.textColor = VoiceOverlayStyle.textColor
         textLabel.alignment = .center
         textLabel.maximumNumberOfLines = 0
         textLabel.lineBreakMode = .byWordWrapping
@@ -64,15 +82,44 @@ final class OverlayController {
         hintLabel.lineBreakMode = .byClipping
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        draftScroll.borderType = .noBorder
+        draftScroll.drawsBackground = false
+        draftScroll.hasVerticalScroller = true
+        draftScroll.autohidesScrollers = true
+        draftScroll.scrollerStyle = .overlay
+        draftScroll.translatesAutoresizingMaskIntoConstraints = false
+        draftScroll.isHidden = true
+        draftEditor.isRichText = false
+        draftEditor.importsGraphics = false
+        draftEditor.allowsUndo = true
+        draftEditor.isEditable = false
+        draftEditor.isSelectable = false
+        draftEditor.drawsBackground = false
+        draftEditor.isVerticallyResizable = true
+        draftEditor.autoresizingMask = [.width]
+        draftEditor.textContainer?.widthTracksTextView = true
+        draftEditor.textContainer?.lineFragmentPadding = 0
+        draftEditor.setAccessibilityLabel("Recognized text")
+        draftEditor.onChange = { [weak self] text in
+            self?.confirmationActions.updateDraft(text)
+        }
+        draftScroll.documentView = draftEditor
+        window.initialFirstResponder = draftEditor
+
         indicator.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(indicator)
         container.addSubview(textLabel)
         container.addSubview(hintLabel)
+        container.addSubview(draftScroll)
 
         let textCenterYConstraint = textLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         self.textCenterYConstraint = textCenterYConstraint
 
         NSLayoutConstraint.activate([
+            container.topAnchor.constraint(equalTo: surface.topAnchor),
+            container.leadingAnchor.constraint(equalTo: surface.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: surface.trailingAnchor),
+            bodyHeight,
             indicator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: horizontalPadding),
             indicator.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             indicator.widthAnchor.constraint(equalToConstant: indicatorWidth),
@@ -82,20 +129,24 @@ final class OverlayController {
             textCenterYConstraint,
             hintLabel.leadingAnchor.constraint(equalTo: textLabel.leadingAnchor),
             hintLabel.trailingAnchor.constraint(equalTo: textLabel.trailingAnchor),
-            hintLabel.topAnchor.constraint(equalTo: textLabel.bottomAnchor, constant: 8)
+            hintLabel.topAnchor.constraint(equalTo: textLabel.bottomAnchor, constant: 8),
+            draftScroll.topAnchor.constraint(equalTo: container.topAnchor),
+            draftScroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            draftScroll.leadingAnchor.constraint(equalTo: textLabel.leadingAnchor),
+            draftScroll.trailingAnchor.constraint(equalTo: textLabel.trailingAnchor),
         ])
     }
 
     func setThemeColor(_ color: OverlayThemeColor) {
         guard themeColor != color else { return }
         themeColor = color
-        container.layer?.backgroundColor = Self.backgroundColor(for: color).cgColor
+        surface.layer?.backgroundColor = VoiceOverlayStyle.backgroundColor(for: color).cgColor
     }
 
     func setPosition(_ position: OverlayPosition) {
         guard self.position != position else { return }
         self.position = position
-        if window.isVisible {
+        if window.isVisible && phase != .confirmation {
             reposition(for: textLabel.stringValue)
         }
     }
@@ -103,7 +154,7 @@ final class OverlayController {
     func setStackIndex(_ index: Int) {
         guard stackIndex != index else { return }
         stackIndex = index
-        if window.isVisible {
+        if window.isVisible && phase != .confirmation {
             reposition(for: textLabel.stringValue)
         }
     }
@@ -122,12 +173,86 @@ final class OverlayController {
         )
     }
 
-    func showPaused(text: String) {
-        show(
-            mode: .paused,
-            text: text.isEmpty ? "No speech" : text,
-            hint: "Front: Send    Side: Cancel",
-            autoHideAfter: nil
+    func showConfirmation(
+        text: String,
+        shortcuts: ConfirmationShortcuts,
+        onSend: @escaping (Bool) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        hideWorkItem?.cancel()
+        hideWorkItem = nil
+        pendingHideCompletion = nil
+        presentationGeneration += 1
+
+        // Manual confirmation can arrive without an existing countdown.
+        if phase != .countdown || !window.isVisible {
+            phase = .countdown
+            prepareDraft(text)
+            reposition(for: text)
+            indicator.setMode(.paused)
+        }
+
+        indicator.pauseCountdown()
+        phase = .confirmation
+        window.hasTakenKeyboardFocus = window.isKeyWindow
+        let actions = confirmationActions
+        if actions.superview == nil {
+            actions.translatesAutoresizingMaskIntoConstraints = false
+            surface.addSubview(actions)
+            NSLayoutConstraint.activate([
+                actions.topAnchor.constraint(equalTo: container.bottomAnchor),
+                actions.leadingAnchor.constraint(equalTo: surface.leadingAnchor),
+                actions.trailingAnchor.constraint(equalTo: surface.trailingAnchor),
+                confirmationActionsHeight,
+            ])
+        }
+        confirmationActionsHeight.constant = ConfirmationActions.height
+        actions.onSend = onSend
+        actions.onCancel = onCancel
+        actions.reset(shortcuts: shortcuts)
+        actions.updateDraft(draftEditor.string)
+        actions.isHidden = false
+        draftEditor.isSelectable = true
+        draftEditor.isEditable = true
+        window.ignoresMouseEvents = false
+        expandWindowDownward(by: ConfirmationActions.height)
+        window.alphaValue = 1
+        window.orderFrontRegardless()
+    }
+
+    var confirmationDraft: String { draftEditor.string }
+    var confirmationTookKeyboardFocus: Bool { window.hasTakenKeyboardFocus }
+
+    func updateConfirmationShortcuts(_ shortcuts: ConfirmationShortcuts) {
+        guard phase == .confirmation else { return }
+        confirmationActions.updateShortcuts(shortcuts)
+    }
+
+    func takeDraftForSending() -> String? {
+        guard phase == .confirmation else { return nil }
+        draftEditor.unmarkText()
+        let text = draftEditor.string
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        window.orderOut(nil)
+        return text
+    }
+
+    func showConfirmationSendFailure() {
+        guard phase == .confirmation else { return }
+        confirmationActions.showSendFailure()
+        let extraHeight = ConfirmationActions.sendFailureHeight - confirmationActionsHeight.constant
+        if extraHeight > 0 {
+            confirmationActionsHeight.constant = ConfirmationActions.sendFailureHeight
+            expandWindowDownward(by: extraHeight)
+        }
+        window.orderFrontRegardless()
+    }
+
+    private func expandWindowDownward(by height: CGFloat) {
+        let frame = window.frame
+        window.setFrame(
+            NSRect(x: frame.minX, y: frame.minY - height, width: frame.width, height: frame.height + height),
+            display: true
         )
     }
 
@@ -152,6 +277,7 @@ final class OverlayController {
         pendingHideCompletion = nil
         presentationGeneration += 1
         let hideGeneration = presentationGeneration
+        window.ignoresMouseEvents = true
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             window.animator().alphaValue = 0
@@ -159,6 +285,8 @@ final class OverlayController {
             guard self.presentationGeneration == hideGeneration else { return }
             self.window.orderOut(nil)
             self.largestVisibleHeight = nil
+            self.resetConfirmation()
+            self.phase = .preview
             completion?()
         }
     }
@@ -175,6 +303,13 @@ final class OverlayController {
             self.presentationGeneration += 1
             self.pendingHideCompletion = onHidden
             self.indicator.setMode(mode)
+            self.resetConfirmation()
+            if case .countdown = mode {
+                self.phase = .countdown
+                self.prepareDraft(text)
+            } else {
+                self.phase = .preview
+            }
             self.applyText(text, shouldWrap: true)
             self.hintLabel.stringValue = hint
             self.hintLabel.isHidden = hint.isEmpty
@@ -204,13 +339,39 @@ final class OverlayController {
         }
     }
 
+    private func prepareDraft(_ text: String) {
+        draftScroll.isHidden = false
+        textLabel.isHidden = true
+        hintLabel.isHidden = true
+        textCenterYConstraint?.constant = 0
+        let attributes = textAttributes(font: VoiceOverlayStyle.textFont, shouldWrap: true)
+        draftEditor.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: attributes))
+        draftEditor.typingAttributes = attributes
+        draftEditor.undoManager?.removeAllActions()
+        draftEditor.setSelectedRange(NSRange(location: 0, length: 0))
+        draftScroll.contentView.scroll(to: .zero)
+    }
+
+    private func resetConfirmation() {
+        window.ignoresMouseEvents = true
+        if phase == .confirmation {
+            confirmationActions.isHidden = true
+            confirmationActions.onSend = nil
+            confirmationActions.onCancel = nil
+        }
+        draftEditor.isEditable = false
+        draftEditor.isSelectable = false
+        draftScroll.isHidden = true
+        textLabel.isHidden = false
+    }
+
     private func reposition(for text: String) {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let visibleFrame = screen.visibleFrame
-        let availableMaxWidth = min(maxWidth, visibleFrame.width - 48)
+        let availableMaxWidth = min(VoiceOverlayStyle.maxWidth, visibleFrame.width - 48)
         let measuredTextWidth = measuredSingleLineWidth(
             text: text,
-            font: textLabel.font ?? .systemFont(ofSize: 30)
+            font: textLabel.font ?? VoiceOverlayStyle.textFont
         )
         let sideChromeWidth = textLeadingInset + horizontalPadding
         let maxTextWidth = availableMaxWidth - sideChromeWidth
@@ -218,7 +379,7 @@ final class OverlayController {
         let desiredWidth = desiredTextWidth + sideChromeWidth
         let width = min(max(minWidth, desiredWidth), availableMaxWidth)
         let textWidth = min(maxTextWidth, max(1, width - sideChromeWidth))
-        let shouldWrap = measuredTextWidth > maxTextWidth
+        let shouldWrap = measuredTextWidth > maxTextWidth || text.contains("\n")
         textLabel.maximumNumberOfLines = shouldWrap ? 0 : 1
         textLabel.lineBreakMode = shouldWrap ? .byWordWrapping : .byClipping
         textLabel.usesSingleLineMode = !shouldWrap
@@ -226,73 +387,32 @@ final class OverlayController {
         textLabel.preferredMaxLayoutWidth = textWidth
         textLabel.invalidateIntrinsicContentSize()
 
-        let font = textLabel.font ?? .systemFont(ofSize: 30)
+        let font = textLabel.font ?? VoiceOverlayStyle.textFont
         let textHeight = shouldWrap
             ? measuredHeight(text: text, font: font, width: textWidth)
             : ceil(font.boundingRectForFont.height)
-        let maxHeight = visibleFrame.height - 120
-        let hintHeight = hintLabel.stringValue.isEmpty ? 0 : hintLabel.intrinsicContentSize.height + 8
+        let footerHeight = phase == .countdown ? ConfirmationActions.sendFailureHeight : 0
+        let maxHeight = visibleFrame.height - max(120, 2 * VoiceOverlayStyle.screenMargin + footerHeight)
+        let hintHeight = hintLabel.isHidden ? 0 : hintLabel.intrinsicContentSize.height + 8
         let desiredHeight = verticalPadding * 2 + max(textHeight + hintHeight, indicatorWidth)
         let measuredHeight = min(max(minHeight, desiredHeight), maxHeight)
-        let height = max(measuredHeight, largestVisibleHeight ?? 0)
+        let height = min(maxHeight, max(measuredHeight, largestVisibleHeight ?? 0))
         largestVisibleHeight = height
+        bodyHeight?.constant = height
+        if phase == .countdown {
+            draftEditor.textContainerInset = NSSize(width: 0, height: max(verticalPadding, (height - textHeight) / 2))
+        }
 
-        let origin = frameOrigin(
+        let origin = VoiceOverlayStyle.frameOrigin(
             in: visibleFrame,
-            windowSize: NSSize(width: width, height: height)
+            windowSize: NSSize(width: width, height: height),
+            position: position,
+            stackIndex: stackIndex
         )
         let x = origin.x
-        let y = origin.y
+        let y = max(origin.y, visibleFrame.minY + VoiceOverlayStyle.screenMargin + footerHeight)
         let frame = NSRect(x: x, y: y, width: width, height: height)
         window.setFrame(frame, display: true)
-    }
-
-    private func frameOrigin(in visibleFrame: NSRect, windowSize: NSSize) -> CGPoint {
-        let gap: CGFloat = 14
-        let stackStep = windowSize.height + gap
-        let direction = stackDirection(for: stackIndex)
-        let offset = CGFloat(abs(direction)) * stackStep * CGFloat(direction.signum())
-        switch position {
-        case .center:
-            return CGPoint(
-                x: visibleFrame.midX - windowSize.width / 2,
-                y: clamp(
-                    visibleFrame.midY - windowSize.height / 2 + offset,
-                    min: visibleFrame.minY + positionMargin,
-                    max: visibleFrame.maxY - positionMargin - windowSize.height
-                )
-            )
-        case .topLeft:
-            return CGPoint(
-                x: visibleFrame.minX + positionMargin,
-                y: visibleFrame.maxY - positionMargin - windowSize.height - CGFloat(stackIndex) * stackStep
-            )
-        case .topRight:
-            return CGPoint(
-                x: visibleFrame.maxX - positionMargin - windowSize.width,
-                y: visibleFrame.maxY - positionMargin - windowSize.height - CGFloat(stackIndex) * stackStep
-            )
-        case .bottomLeft:
-            return CGPoint(
-                x: visibleFrame.minX + positionMargin,
-                y: visibleFrame.minY + positionMargin + CGFloat(stackIndex) * stackStep
-            )
-        case .bottomRight:
-            return CGPoint(
-                x: visibleFrame.maxX - positionMargin - windowSize.width,
-                y: visibleFrame.minY + positionMargin + CGFloat(stackIndex) * stackStep
-            )
-        }
-    }
-
-    private func stackDirection(for index: Int) -> Int {
-        guard index > 0 else { return 0 }
-        let magnitude = (index + 1) / 2
-        return index % 2 == 1 ? -magnitude : magnitude
-    }
-
-    private func clamp(_ value: CGFloat, min minValue: CGFloat, max maxValue: CGFloat) -> CGFloat {
-        Swift.max(minValue, Swift.min(maxValue, value))
     }
 
     private var textLeadingInset: CGFloat {
@@ -305,7 +425,7 @@ final class OverlayController {
     }
 
     private func applyText(_ text: String, shouldWrap: Bool) {
-        let font = textLabel.font ?? .systemFont(ofSize: 30)
+        let font = textLabel.font ?? VoiceOverlayStyle.textFont
         textLabel.attributedStringValue = NSAttributedString(
             string: text.isEmpty ? " " : text,
             attributes: textAttributes(font: font, shouldWrap: shouldWrap)
@@ -331,7 +451,7 @@ final class OverlayController {
         paragraphStyle.lineSpacing = shouldWrap ? lineSpacing(for: font) : 0
         return [
             .font: font,
-            .foregroundColor: textLabel.textColor ?? NSColor.black.withAlphaComponent(0.68),
+            .foregroundColor: textLabel.textColor ?? VoiceOverlayStyle.textColor,
             .paragraphStyle: paragraphStyle
         ]
     }
@@ -340,22 +460,27 @@ final class OverlayController {
         let naturalLineHeight = ceil(font.boundingRectForFont.height)
         return max(0, ceil(naturalLineHeight * textLineHeightMultiple) - naturalLineHeight)
     }
+}
 
-    private static func backgroundColor(for color: OverlayThemeColor) -> NSColor {
-        switch color {
-        case .white:
-            return NSColor.white.withAlphaComponent(0.86)
-        case .pink:
-            return NSColor(calibratedRed: 1.0, green: 0.84, blue: 0.9, alpha: 0.86)
-        case .green:
-            return NSColor(calibratedRed: 0.84, green: 0.95, blue: 0.84, alpha: 0.86)
-        case .yellow:
-            return NSColor(calibratedRed: 1.0, green: 0.94, blue: 0.72, alpha: 0.86)
-        case .blue:
-            return NSColor(calibratedRed: 0.82, green: 0.91, blue: 1.0, alpha: 0.86)
-        case .purple:
-            return NSColor(calibratedRed: 0.9, green: 0.84, blue: 1.0, alpha: 0.86)
-        }
+private final class EditableOverlayPanel: NSPanel {
+    var hasTakenKeyboardFocus = false
+
+    override var canBecomeKey: Bool { !ignoresMouseEvents }
+
+    override func becomeKey() {
+        hasTakenKeyboardFocus = true
+        super.becomeKey()
+    }
+}
+
+private final class OverlayTextView: NSTextView {
+    var onChange: ((String) -> Void)?
+
+    override var needsPanelToBecomeKey: Bool { isEditable }
+
+    override func didChangeText() {
+        super.didChangeText()
+        onChange?(string)
     }
 }
 
@@ -394,10 +519,16 @@ private final class RecognitionIndicatorView: NSView {
         case .countdown(let duration):
             showCountdown(duration: duration)
         case .paused:
-            showPausedRing()
+            showRing()
         case .error:
             showErrorCircle()
         }
+    }
+
+    func pauseCountdown() {
+        let progress = ringLayer.presentation()?.strokeEnd ?? ringLayer.strokeEnd
+        ringLayer.removeAnimation(forKey: "countdown")
+        ringLayer.strokeEnd = progress
     }
 
     private func setup() {
@@ -498,15 +629,20 @@ private final class RecognitionIndicatorView: NSView {
         }
     }
 
-    private func showCountdown(duration: TimeInterval) {
+    private func showRing() {
         stopAnimating()
         for bar in barLayers {
             bar.isHidden = true
         }
         setXLayersHidden(true)
 
+        ringLayer.removeAnimation(forKey: "countdown")
         ringLayer.isHidden = false
         ringLayer.strokeEnd = 1
+    }
+
+    private func showCountdown(duration: TimeInterval) {
+        showRing()
         let animation = CABasicAnimation(keyPath: "strokeEnd")
         animation.fromValue = 1
         animation.toValue = 0
@@ -515,17 +651,6 @@ private final class RecognitionIndicatorView: NSView {
         animation.fillMode = .forwards
         animation.isRemovedOnCompletion = false
         ringLayer.add(animation, forKey: "countdown")
-    }
-
-    private func showPausedRing() {
-        stopAnimating()
-        for bar in barLayers {
-            bar.isHidden = true
-        }
-        ringLayer.removeAnimation(forKey: "countdown")
-        ringLayer.isHidden = false
-        ringLayer.strokeEnd = 1
-        setXLayersHidden(true)
     }
 
     private func showErrorCircle() {

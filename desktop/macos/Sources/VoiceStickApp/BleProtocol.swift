@@ -20,6 +20,7 @@ struct StateEvent: Decodable {
     let event: String
     let button: String?
     let sessionID: UInt32?
+    let confirmationID: UUID?
     let durationMs: UInt32?
     let hardware: String?
     let firmwareVersion: String?
@@ -39,6 +40,7 @@ struct StateEvent: Decodable {
         case event
         case button
         case sessionID = "session_id"
+        case confirmationID = "confirmation_id"
         case durationMs = "duration_ms"
         case hardware
         case firmwareVersion = "firmware_version"
@@ -124,12 +126,15 @@ enum BleProtocol {
         return try? JSONDecoder().decode(FirmwareOTAStateEvent.self, from: payload)
     }
 
-    static func uiStatePayload(state: String, text: String) -> Data {
-        let payload = [
+    static func uiStatePayload(state: String, text: String, confirmationID: UUID? = nil) -> Data {
+        var payload = [
             "event": "ui_state",
             "state": state,
             "text": text
         ]
+        if let confirmationID {
+            payload["confirmation_id"] = confirmationID.uuidString
+        }
         return (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
     }
 

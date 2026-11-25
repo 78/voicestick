@@ -1207,8 +1207,8 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
             const auto authorized = authorized_result.Characteristics().GetAt(0);
             if (!co_await ReadAuthorized(authorized, device_id, pairing)) {
                 fail(pairing
-                         ? "VS-" + device_id + " did not authorize this PC. Hold the device's cancel "
-                           "button for 3 seconds, then pair again."
+                         ? "VS-" + device_id + " did not authorize this PC. Press the main voice "
+                           "button while the device is disconnected, then pair again."
                          : "VS-" + device_id + " no longer accepts this PC. It may be paired with "
                            "another computer; pair it again from the VoiceStick menu.");
                 co_return;

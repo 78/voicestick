@@ -4,8 +4,8 @@ import Foundation
 final class VoiceStickCoordinator {
     private enum PendingPasteState {
         case idle
-        case waitingToPaste(text: String)
-        case paused(text: String)
+        case waitingToPaste(id: UUID, text: String)
+        case paused(id: UUID, target: InputInjector.PasteTarget?, overlay: OverlayController, deviceID: String?)
 
         var isIdle: Bool {
             if case .idle = self {
@@ -20,7 +20,7 @@ final class VoiceStickCoordinator {
         case recording(sessionID: UInt32, peripheralID: UUID, startedAt: Date)
         case finalizing(sessionID: UInt32, peripheralID: UUID, startedAt: Date?)
         case pendingConfirmation(peripheralID: UUID)
-        case pausedConfirmation(peripheralID: UUID)
+        case pausedConfirmation(peripheralID: UUID?)
         case error(peripheralID: UUID?)
 
         var sessionID: UInt32? {
@@ -36,10 +36,9 @@ final class VoiceStickCoordinator {
             switch self {
             case .recording(_, let peripheralID, _),
                  .finalizing(_, let peripheralID, _),
-                 .pendingConfirmation(let peripheralID),
-                 .pausedConfirmation(let peripheralID):
+                 .pendingConfirmation(let peripheralID):
                 return peripheralID
-            case .error(let peripheralID):
+            case .pausedConfirmation(let peripheralID), .error(let peripheralID):
                 return peripheralID
             case .ready:
                 return nil
@@ -147,7 +146,16 @@ final class VoiceStickCoordinator {
     private var pastedFinalText = false
     private var waitingForAudioEnd = false
     private var audioEndTimeoutTimer: Timer?
-    private var pendingPasteState = PendingPasteState.idle
+    private var pendingPasteState = PendingPasteState.idle {
+        didSet {
+            if case .paused(_, _, _, let deviceID) = oldValue {
+                statusController.hideOverlay(deviceID: deviceID)
+                isSendingConfirmation = false
+            }
+        }
+    }
+    private var isSendingConfirmation = false
+    private var countdownPasteTarget: InputInjector.PasteTarget?
     private var lastRecoverableText: String?
     private var lastRecoverablePeripheralID: UUID?
     private var pairedDeviceIDs: [String]
@@ -203,6 +211,7 @@ final class VoiceStickCoordinator {
             }
             self.cancelActiveCycleIfDeviceDisconnected()
             self.refreshFirmwareAvailability()
+            self.refreshConfirmationShortcuts()
             if case .pausedConfirmation = self.mainInputState {
                 self.statusController.setStatus("Awaiting confirmation")
             } else {
@@ -215,9 +224,9 @@ final class VoiceStickCoordinator {
 
         ble.onControlReady = { [weak self] peripheralID in
             guard let self, self.activePeripheralID == peripheralID,
-                  case .paused(let text) = self.pendingPasteState
+                  case .paused(let id, _, _, _) = self.pendingPasteState
             else { return }
-            self.sendUIStateForActiveDevice("pending_confirmation", text: text)
+            self.ble.sendUIState("pending_confirmation", confirmationID: id, to: peripheralID)
         }
 
         ble.onStateEvent = { [weak self] peripheralID, event in
@@ -439,6 +448,9 @@ final class VoiceStickCoordinator {
                 NSLog("Connected VoiceStick hardware=\(hardware) firmware=\(firmwareVersion)")
             }
             updateDeviceFirmwareInfo(event: event, peripheralID: peripheralID)
+            if activePeripheralID == peripheralID {
+                refreshConfirmationShortcuts()
+            }
         case "battery_status":
             guard ble.isConnected(peripheralID), let deviceID = ble.deviceID(for: peripheralID),
                   let status = event.batteryStatus else { return }
@@ -449,6 +461,12 @@ final class VoiceStickCoordinator {
             handleButtonUp(event, peripheralID: peripheralID)
         case "button_click":
             handleButtonClick(event, peripheralID: peripheralID)
+        case "confirmation_shake":
+            guard activePeripheralID == peripheralID, !isSendingConfirmation,
+                  case .paused(let id, _, _, _) = pendingPasteState, event.confirmationID == id
+            else { return }
+            NSLog("Shake cancelled paused confirmation")
+            dismissPendingConfirmation()
         default:
             break
         }
@@ -995,25 +1013,56 @@ final class VoiceStickCoordinator {
             return
         }
 
-        pendingPasteState = .waitingToPaste(text: text)
+        let id = UUID()
+        countdownPasteTarget = inputInjector.capturePasteTarget()
+        pendingPasteState = .waitingToPaste(id: id, text: text)
         if let peripheralID = activePeripheralID {
             mainInputState = .pendingConfirmation(peripheralID: peripheralID)
         }
         let duration = TimeInterval(mode.rawValue) / 1000
         statusController.showFinal(text, duration: duration, deviceID: activeDeviceID) { [weak self] in
-            self?.commitPendingPaste(text: text)
+            guard let self, case .waitingToPaste(let pendingID, let pendingText) = self.pendingPasteState,
+                  pendingID == id
+            else { return }
+            self.completePendingPaste(text: pendingText)
         }
         sendUIStateForActiveDevice("pending_confirmation", text: text)
     }
 
     private func enterPausedConfirmation(text: String, peripheralID: UUID?) {
-        pendingPasteState = .paused(text: text)
-        if let peripheralID {
-            mainInputState = .pausedConfirmation(peripheralID: peripheralID)
-        }
+        let target = countdownPasteTarget ?? inputInjector.capturePasteTarget()
+        mainInputState = .pausedConfirmation(peripheralID: peripheralID)
+        let deviceID = activeDeviceID
         statusController.setStatus("Awaiting confirmation")
-        statusController.showPausedFinal(text, deviceID: activeDeviceID)
-        sendUIStateForActiveDevice("pending_confirmation", text: text)
+        let overlay = statusController.showConfirmation(
+            text,
+            deviceID: deviceID,
+            shortcuts: confirmationShortcuts(for: peripheralID),
+            onSend: { [weak self] useCurrentField in
+                self?.sendEditedConfirmation(useCurrentField: useCurrentField)
+            },
+            onCancel: { [weak self] in
+                self?.dismissPendingConfirmation()
+            }
+        )
+        let id = UUID()
+        pendingPasteState = .paused(id: id, target: target, overlay: overlay, deviceID: deviceID)
+        if let peripheralID {
+            ble.sendUIState("pending_confirmation", confirmationID: id, to: peripheralID)
+        }
+    }
+
+    private func confirmationShortcuts(for peripheralID: UUID?) -> ConfirmationShortcuts {
+        guard let peripheralID, ble.isConnected(peripheralID),
+              let deviceID = ble.deviceID(for: peripheralID),
+              let info = firmwareInfoByDeviceID[deviceID]
+        else { return .none }
+        return ConfirmationShortcuts(hardware: info.hardware, buttons: info.buttons)
+    }
+
+    private func refreshConfirmationShortcuts() {
+        guard case .paused(_, _, let overlay, _) = pendingPasteState else { return }
+        overlay.updateConfirmationShortcuts(confirmationShortcuts(for: activePeripheralID))
     }
 
     private func handleDefiniteSegment(_ segment: ASRSegment) {
@@ -1265,23 +1314,58 @@ final class VoiceStickCoordinator {
         }
     }
 
-    private func commitPendingPaste(text: String) {
-        guard pendingPasteText == text else {
-            return
+    private func sendEditedConfirmation(useCurrentField: Bool = false) {
+        guard case .paused(let id, let target, let overlay, _) = pendingPasteState, !isSendingConfirmation
+        else { return }
+        let selectedApplication = useCurrentField ? inputInjector.frontmostPasteApplication() : nil
+        let needsFocusRestoration = overlay.confirmationTookKeyboardFocus
+        guard let text = overlay.takeDraftForSending() else { return }
+        isSendingConfirmation = true
+        let complete: (InputInjector.PasteTarget?) -> Void = { [weak self] destination in
+            guard let self, case .paused(let pendingID, _, let overlay, _) = self.pendingPasteState,
+                  pendingID == id
+            else { return }
+            self.isSendingConfirmation = false
+            guard let destination,
+                  self.inputInjector.paste(
+                    text: text, pressEnter: !useCurrentField && self.config.autoEnter, target: destination
+                  )
+            else {
+                overlay.showConfirmationSendFailure()
+                if let peripheralID = self.activePeripheralID {
+                    self.ble.sendUIState("pending_confirmation", confirmationID: id, to: peripheralID)
+                }
+                return
+            }
+            self.finishPendingPaste(text: text)
         }
-
-        completePendingPaste(text: text)
+        if let selectedApplication {
+            // Let the nonactivating panel relinquish keyboard focus before querying the editor.
+            DispatchQueue.main.async { [weak self] in
+                complete(self?.inputInjector.selectedPasteTarget(in: selectedApplication))
+            }
+        } else if !useCurrentField, !needsFocusRestoration {
+            complete(target?.windowTarget)
+        } else if !useCurrentField, let target {
+            inputInjector.restoreFocus(to: target, completion: complete)
+        } else {
+            complete(nil)
+        }
     }
 
     private func completePendingPaste(text: String) {
         let shouldPressEnter = config.autoEnter
+        finishPendingPaste(text: text)
+        inputInjector.paste(text: text, pressEnter: shouldPressEnter)
+    }
+
+    private func finishPendingPaste(text: String) {
         rememberInput(text)
         pendingPasteState = .idle
         finishRecognitionCycle()
         statusController.setStatus("Ready")
         sendUIStateForActiveDevice("ready")
         mainInputState = .ready
-        inputInjector.paste(text: text, pressEnter: shouldPressEnter)
     }
 
     private func rememberInput(_ text: String) {
@@ -1296,15 +1380,6 @@ final class VoiceStickCoordinator {
             asrStarted &&
             pendingPasteState.isIdle &&
             !pastedFinalText
-    }
-
-    private var pendingPasteText: String? {
-        switch pendingPasteState {
-        case .idle:
-            return nil
-        case .waitingToPaste(let text), .paused(let text):
-            return text
-        }
     }
 
     func restoreLastInputConfirmation() -> Bool {
@@ -1330,15 +1405,13 @@ final class VoiceStickCoordinator {
         switch pendingPasteState {
         case .idle:
             return false
-        case .waitingToPaste(let text):
+        case .waitingToPaste(_, let text):
             guard activePeripheralID == peripheralID else { return true }
             enterPausedConfirmation(text: text, peripheralID: peripheralID)
             return true
-        case .paused(let text):
+        case .paused:
             guard activePeripheralID == peripheralID else { return true }
-            statusController.hideOverlay { [weak self] in
-                self?.commitPendingPaste(text: text)
-            }
+            sendEditedConfirmation()
             return true
         }
     }
@@ -1355,14 +1428,21 @@ final class VoiceStickCoordinator {
             cancelRecognitionInProgress()
             return
         }
-        if pendingPasteText == nil {
+        if pendingPasteState.isIdle {
             _ = restoreLastInputConfirmation(peripheralID: peripheralID)
             return
         }
         guard activePeripheralID == peripheralID else { return }
+        dismissPendingConfirmation()
+    }
+
+    private func dismissPendingConfirmation() {
+        guard !pendingPasteState.isIdle else { return }
+        if case .waitingToPaste = pendingPasteState {
+            statusController.hideOverlay(deviceID: activeDeviceID)
+        }
         pendingPasteState = .idle
         finishRecognitionCycle()
-        statusController.hideOverlay()
         statusController.setStatus("Ready")
         sendUIStateForActiveDevice("ready")
         mainInputState = .ready
@@ -1410,6 +1490,7 @@ final class VoiceStickCoordinator {
         sentFinalAudioChunk = false
         pastedFinalText = false
         bufferedOggChunks.removeAll(keepingCapacity: true)
+        countdownPasteTarget = nil
     }
 
     private func updateDeviceFirmwareInfo(event: StateEvent, peripheralID: UUID) {
@@ -1420,6 +1501,9 @@ final class VoiceStickCoordinator {
         }
         if let hardware = event.hardware {
             info.hardware = hardware
+        }
+        if let buttons = event.buttons {
+            info.buttons = buttons
         }
         if let firmwareVersion = event.firmwareVersion {
             info.currentVersion = firmwareVersion

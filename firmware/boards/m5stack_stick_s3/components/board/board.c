@@ -1,13 +1,19 @@
 #include "board.h"
 
+#include "bmi270.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
 #include "esp_attr.h"
+#include "esp_check.h"
+#include "esp_lcd_panel_st7789.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "board_lcd.h"
+#include "es8311_input_board.h"
 #include "stick_s3_board.h"
 
 static const char *TAG = "board";
@@ -18,6 +24,64 @@ static const board_button_t s_buttons[] = {
 };
 
 static board_power_event_cb_t s_power_event_cb;
+static bmi270_handle_t *s_shake_sensor;
+
+#define BMI270_REG_PWR_CONF 0x7c
+#define BMI270_REG_PWR_CTRL 0x7d
+#define BMI270_ADV_POWER_SAVE_AND_FIFO_SELF_WAKEUP 0x03
+#define BMI270_ACCEL_ENABLE BIT(2)
+#define BMI270_IO_TIMEOUT_MS 20
+
+static bool set_shake_sensor_enabled(bool enabled)
+{
+    const uint8_t power[] = {BMI270_REG_PWR_CTRL, enabled ? BMI270_ACCEL_ENABLE : 0};
+    const esp_err_t err = i2c_master_transmit(s_shake_sensor->i2c_handle, power, sizeof(power),
+                                              BMI270_IO_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "set BMI270 accelerometer %s: %s", enabled ? "active" : "standby", esp_err_to_name(err));
+        return false;
+    }
+    /* Advanced power save requires at least 450 us between register writes. */
+    esp_rom_delay_us(450);
+    return true;
+}
+
+static bool read_acceleration(acceleration_mg_t *sample)
+{
+    float x, y, z;
+    if (bmi270_get_acce_data(s_shake_sensor, &x, &y, &z) != ESP_OK) {
+        return false;
+    }
+    *sample = (acceleration_mg_t){(int32_t)(x * 1000), (int32_t)(y * 1000), (int32_t)(z * 1000)};
+    return true;
+}
+
+static esp_err_t init_shake_sensor(i2c_master_bus_handle_t bus)
+{
+    const bmi270_driver_config_t config = {
+        .addr = BMI270_I2C_ADDRESS_L,
+        .interface = BMI270_USE_I2C,
+        .i2c_bus = bus,
+    };
+    bmi270_handle_t *sensor;
+    ESP_RETURN_ON_ERROR(i2c_master_probe(bus, config.addr, BMI270_IO_TIMEOUT_MS), TAG, "probe BMI270");
+    ESP_RETURN_ON_ERROR(bmi270_create(&config, &sensor), TAG, "initialize BMI270");
+
+    esp_err_t ret;
+    ESP_GOTO_ON_ERROR(bmi270_set_acce_odr(sensor, BMI270_ACC_ODR_100_HZ), cleanup, TAG, "set BMI270 sample rate");
+    ESP_GOTO_ON_ERROR(bmi270_set_acce_range(sensor, BMI270_ACC_RANGE_4_G), cleanup, TAG, "set BMI270 range");
+    ESP_GOTO_ON_ERROR(bmi270_stop(sensor), cleanup, TAG, "put BMI270 sensors in standby");
+    const uint8_t power_save[] = {BMI270_REG_PWR_CONF, BMI270_ADV_POWER_SAVE_AND_FIFO_SELF_WAKEUP};
+    ESP_GOTO_ON_ERROR(i2c_master_transmit(sensor->i2c_handle, power_save, sizeof(power_save), BMI270_IO_TIMEOUT_MS),
+                      cleanup, TAG, "enable BMI270 power save");
+    s_shake_sensor = sensor;
+    ESP_LOGI(TAG, "BMI270 ready for shake cancellation");
+    return ESP_OK;
+
+cleanup:
+    (void)bmi270_delete(sensor);
+    return ret;
+}
 
 const char *board_hardware_name(void)
 {
@@ -32,7 +96,66 @@ size_t board_buttons(const board_button_t **buttons)
 
 esp_err_t board_init(void)
 {
-    return stick_s3_board_init();
+    ESP_RETURN_ON_ERROR(stick_s3_board_init(), TAG, "initialize StickS3 board");
+    i2c_master_bus_handle_t bus = stick_s3_board_i2c_bus();
+    if (bus) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(init_shake_sensor(bus));
+    }
+    return ESP_OK;
+}
+
+const board_confirmation_motion_t *board_confirmation_motion(void)
+{
+    static const board_confirmation_motion_t motion = {
+        .set_enabled = set_shake_sensor_enabled,
+        .read_acceleration = read_acceleration,
+    };
+    return s_shake_sensor ? &motion : NULL;
+}
+
+es8311_input_board_t board_es8311_input_config(void)
+{
+    return (es8311_input_board_t){
+        .i2c_port = I2C_NUM_1,
+        .bus = stick_s3_board_i2c_bus(),
+        .i2s_port = I2S_NUM_1,
+        .pins = {
+            .mclk = STICK_S3_PIN_ES8311_MCLK,
+            .bclk = STICK_S3_PIN_ES8311_BCLK,
+            .ws = STICK_S3_PIN_ES8311_LRCK,
+            .dout = STICK_S3_PIN_ES8311_DIN,
+            .din = STICK_S3_PIN_ES8311_DOUT,
+        },
+        .gain_db = 36.0f,
+    };
+}
+
+static esp_err_t new_st7789(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t *panel)
+{
+    const esp_lcd_panel_dev_config_t config = {
+        .reset_gpio_num = STICK_S3_PIN_LCD_RST,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .bits_per_pixel = 16,
+    };
+    return esp_lcd_new_panel_st7789(io, &config, panel);
+}
+
+board_lcd_t board_lcd_config(void)
+{
+    return (board_lcd_t){
+        .host = SPI2_HOST,
+        .sck = STICK_S3_PIN_LCD_SCK,
+        .mosi = STICK_S3_PIN_LCD_MOSI,
+        .cs = STICK_S3_PIN_LCD_CS,
+        .dc = STICK_S3_PIN_LCD_DC,
+        .backlight = STICK_S3_PIN_LCD_BL,
+        .width = 135,
+        .height = 240,
+        .gap_x = 52,
+        .gap_y = 40,
+        .invert_colors = true,
+        .new_panel = new_st7789,
+    };
 }
 
 static void IRAM_ATTR pmic_irq_isr(void *arg)

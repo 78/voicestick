@@ -242,7 +242,7 @@ class SpriteTuner:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sprite-dir", type=Path, default=Path("docs/cat_sprites"))
-    parser.add_argument("--assets-dir", type=Path, default=Path("firmware/components/ui_status/assets"))
+    parser.add_argument("--assets-dir", type=Path, default=Path("firmware/boards/shared/ui_status/assets"))
     parser.add_argument("--size", type=int, default=112)
     args = parser.parse_args()
 

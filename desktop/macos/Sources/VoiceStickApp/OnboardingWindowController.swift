@@ -200,7 +200,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, NS
         switch currentStep {
         case .device:
             titleLabel.stringValue = "Pair your VoiceStick"
-            detailLabel.stringValue = "Hold the cancel or side button on your VoiceStick, then choose it below."
+            detailLabel.stringValue = "Press the main voice button while your VoiceStick is disconnected, then choose it below."
             contentStack.addArrangedSubview(deviceView())
         case .provider:
             titleLabel.stringValue = "Choose your speech provider"

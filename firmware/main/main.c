@@ -31,8 +31,11 @@ static const char *TAG = "voice_stick";
 #define DISPLAY_DIM_TIMEOUT_US (DISPLAY_DIM_TIMEOUT_MS * 1000ULL)
 #define DEEP_SLEEP_TIMEOUT_US (CONFIG_VOICE_STICK_DEEP_SLEEP_TIMEOUT_S * 1000000ULL)
 #define DISCONNECTED_SLEEP_TIMEOUT_US (CONFIG_VOICE_STICK_DISCONNECTED_SLEEP_TIMEOUT_S * 1000000ULL)
-#define PAIRING_HOLD_MS 3000
+#define CANCEL_CLICK_MAX_MS 3000
 #define MAX_BUTTONS 4
+#define CONFIRMATION_ID_LENGTH 36
+#define SHAKE_SAMPLE_MS 20
+#define SHAKE_WARMUP_US 150000
 
 static bool s_recording;
 static bool s_ota_updating;
@@ -59,9 +62,12 @@ static button_handle_t s_button_handles[MAX_BUTTONS];
 static int64_t s_button_down_us[MAX_BUTTONS];
 static int64_t s_primary_down_us;
 static uint32_t s_primary_session_id;
-/* Both cancel-button fields are used only by the button timer callbacks. */
+static const board_confirmation_motion_t *s_confirmation_motion;
+static shake_detector_t s_shake_detector;
+static int64_t s_shake_ready_us;
+static char s_shake_confirmation_id[CONFIRMATION_ID_LENGTH + 1];
+/* Used only by the button timer callbacks. */
 static int64_t s_cancel_down_us;
-static bool s_cancel_long_press;
 
 typedef enum {
     APP_UI_STATE_READY,
@@ -103,7 +109,6 @@ typedef enum {
     APP_EVENT_BUTTON_DOWN,
     APP_EVENT_BUTTON_UP,
     APP_EVENT_CANCEL_CLICK,
-    APP_EVENT_PAIRING_HOLD,
     APP_EVENT_UI_STATE,
     APP_EVENT_BLE_CONNECTED,
     APP_EVENT_BLE_DISCONNECTED,
@@ -129,13 +134,14 @@ typedef struct {
     uint32_t size;
     char state[32];
     char text[96];
+    char confirmation_id[CONFIRMATION_ID_LENGTH + 1];
 } app_event_t;
 
 static void update_battery_status(void);
 static uint32_t stop_recording(void);
 static void queue_app_event(app_event_type_t type);
 static void queue_app_event_with_ota(app_event_type_t type, uint32_t written, uint32_t size);
-static void queue_ui_state_event(const char *state, const char *text);
+static void queue_ui_state_event(const char *state, const char *text, const char *confirmation_id);
 static void apply_interaction_mode(interaction_mode_t mode);
 
 static bool is_external_powered(void)
@@ -266,6 +272,34 @@ static void note_activity(void)
     restart_deep_sleep_timer();
 }
 
+static void set_shake_confirmation(const char *confirmation_id)
+{
+    if (!s_confirmation_motion || strcmp(s_shake_confirmation_id, confirmation_id) == 0) {
+        return;
+    }
+    const bool enable = confirmation_id[0] != '\0';
+    s_shake_confirmation_id[0] = '\0';
+    if (s_confirmation_motion->set_enabled(enable) && enable) {
+        s_shake_detector = (shake_detector_t){0};
+        s_shake_ready_us = esp_timer_get_time() + SHAKE_WARMUP_US;
+        strlcpy(s_shake_confirmation_id, confirmation_id, sizeof(s_shake_confirmation_id));
+    }
+}
+
+static bool sample_confirmation_shake(void)
+{
+    const int64_t now = esp_timer_get_time();
+    if (now < s_shake_ready_us) {
+        return false;
+    }
+    acceleration_mg_t sample;
+    if (!s_confirmation_motion->read_acceleration(&sample)) {
+        s_shake_detector = (shake_detector_t){0};
+        return false;
+    }
+    return shake_detector_sample(&s_shake_detector, sample, now);
+}
+
 static void stop_host_response_timer(void)
 {
     if (s_host_response_timer) {
@@ -329,6 +363,7 @@ static void enter_deep_sleep(bool low_battery)
     }
 
     ESP_LOGI(TAG, "entering deep sleep low_battery=%d", low_battery);
+    set_shake_confirmation("");
     release_recording_pm_locks();
     ESP_ERROR_CHECK_WITHOUT_ABORT(ui_status_set_brightness(0));
     ui_status_prepare_deep_sleep();
@@ -428,7 +463,7 @@ static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_tas
     }
 }
 
-static void queue_ui_state_event(const char *state, const char *text)
+static void queue_ui_state_event(const char *state, const char *text, const char *confirmation_id)
 {
     if (!s_app_event_queue) {
         ESP_LOGW(TAG, "drop ui_state state=%s text_len=%u: app queue unavailable",
@@ -445,6 +480,10 @@ static void queue_ui_state_event(const char *state, const char *text)
     }
     if (text) {
         strlcpy(event.text, text, sizeof(event.text));
+    }
+    if (confirmation_id && strlen(confirmation_id) == CONFIRMATION_ID_LENGTH &&
+        strspn(confirmation_id, "0123456789abcdefABCDEF-") == CONFIRMATION_ID_LENGTH) {
+        strlcpy(event.confirmation_id, confirmation_id, sizeof(event.confirmation_id));
     }
     ESP_LOGI(TAG, "queue ui_state state=%s text_len=%u current=%s recording=%d",
              event.state[0] ? event.state : "nil",
@@ -483,7 +522,6 @@ static void button_down_cb(void *button_handle, void *usr_data)
 #endif
     if (strcmp(s_buttons[button].name, "secondary") == 0) {
         s_cancel_down_us = esp_timer_get_time();
-        s_cancel_long_press = false;
         return;
     }
     queue_button_event(button == 0 ? APP_EVENT_PRIMARY_DOWN : APP_EVENT_BUTTON_DOWN, button, 0);
@@ -502,23 +540,13 @@ static void button_up_cb(void *button_handle, void *usr_data)
 #endif
     if (strcmp(s_buttons[button].name, "secondary") == 0) {
         const uint32_t hold_ms = elapsed_button_ms(s_cancel_down_us);
-        if (s_cancel_down_us != 0 && !s_cancel_long_press && hold_ms < PAIRING_HOLD_MS) {
+        if (s_cancel_down_us != 0 && hold_ms < CANCEL_CLICK_MAX_MS) {
             queue_button_event(APP_EVENT_CANCEL_CLICK, button, hold_ms);
         }
         s_cancel_down_us = 0;
         return;
     }
     queue_button_event(button == 0 ? APP_EVENT_PRIMARY_UP : APP_EVENT_BUTTON_UP, button, 0);
-}
-
-static void pairing_hold_cb(void *button_handle, void *usr_data)
-{
-    (void)button_handle;
-    (void)usr_data;
-    s_cancel_long_press = true;
-    if (!voice_ble_has_active_link()) {
-        queue_app_event(APP_EVENT_PAIRING_HOLD);
-    }
 }
 
 static void ble_connection_cb(bool connected)
@@ -543,9 +571,11 @@ static void ble_control_cb(const char *json)
     const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
     const cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
     const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    const cJSON *confirmation_id = cJSON_GetObjectItemCaseSensitive(root, "confirmation_id");
     if (cJSON_IsString(event) && strcmp(event->valuestring, "ui_state") == 0 &&
         cJSON_IsString(state)) {
-        queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "");
+        queue_ui_state_event(state->valuestring, cJSON_IsString(text) ? text->valuestring : "",
+                             cJSON_IsString(confirmation_id) ? confirmation_id->valuestring : NULL);
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "interaction_mode") == 0 &&
                cJSON_IsString(mode)) {
         if (strcmp(mode->valuestring, "click_to_talk") == 0) {
@@ -635,7 +665,14 @@ static void app_event_task(void *arg)
     (void)arg;
     app_event_t event;
     while (true) {
-        if (xQueueReceive(s_app_event_queue, &event, portMAX_DELAY) != pdTRUE) {
+        const bool shake_armed = s_shake_confirmation_id[0] != '\0';
+        const TickType_t wait = shake_armed ? pdMS_TO_TICKS(SHAKE_SAMPLE_MS) : portMAX_DELAY;
+        if (xQueueReceive(s_app_event_queue, &event, wait) != pdTRUE) {
+            if (shake_armed && sample_confirmation_shake() &&
+                voice_ble_send_confirmation_shake(s_shake_confirmation_id) == ESP_OK) {
+                ESP_LOGI(TAG, "shake sent for paused confirmation");
+                set_shake_confirmation("");
+            }
             continue;
         }
 
@@ -643,6 +680,14 @@ static void app_event_task(void *arg)
         case APP_EVENT_PRIMARY_DOWN:
             ESP_LOGI(TAG, "button %s down", s_buttons[0].name);
             note_activity();
+            if (!voice_ble_has_active_link()) {
+                s_primary_down_us = 0;
+                s_primary_session_id = 0;
+                if (!s_recording && !s_ota_updating) {
+                    voice_ble_open_pairing();
+                }
+                break;
+            }
             if (s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK && s_recording) {
                 const uint32_t primary_duration_ms = elapsed_button_ms(s_primary_down_us);
                 s_primary_session_id = stop_recording();
@@ -713,13 +758,11 @@ static void app_event_task(void *arg)
             note_activity();
             voice_ble_send_button_click(s_buttons[event.button].name, event.button_hold_ms, 0);
             break;
-        case APP_EVENT_PAIRING_HOLD:
-            if (!s_recording && !s_ota_updating) {
-                voice_ble_open_pairing();
-            }
-            break;
         case APP_EVENT_UI_STATE:
             apply_app_ui_state(event.state, event.text);
+            set_shake_confirmation(!s_recording && !s_ota_updating && !s_pairing_open &&
+                                   voice_ble_is_connected() && strcmp(event.state, "pending_confirmation") == 0
+                                   ? event.confirmation_id : "");
             break;
         case APP_EVENT_BLE_CONNECTED:
             s_app_ui_state = APP_UI_STATE_READY;
@@ -727,6 +770,7 @@ static void app_event_task(void *arg)
             note_activity();
             break;
         case APP_EVENT_BLE_DISCONNECTED:
+            set_shake_confirmation("");
             s_recording = false;
             s_ota_updating = false;
             s_app_ui_state = APP_UI_STATE_READY;
@@ -740,6 +784,7 @@ static void app_event_task(void *arg)
             }
             break;
         case APP_EVENT_PAIRING_OPENED:
+            set_shake_confirmation("");
             s_pairing_open = true;
             note_activity();
             ui_status_set_pairing(voice_ble_device_name());
@@ -760,6 +805,7 @@ static void app_event_task(void *arg)
             enter_deep_sleep(false);
             break;
         case APP_EVENT_OTA_BEGIN:
+            set_shake_confirmation("");
             s_ota_updating = true;
             if (s_recording) {
                 const uint32_t session_id = stop_recording();
@@ -838,14 +884,6 @@ static esp_err_t init_buttons(void)
                                      button_up_cb, index);
         if (err != ESP_OK) {
             return err;
-        }
-        if (strcmp(s_buttons[i].name, "secondary") == 0) {
-            button_event_args_t args = {.long_press.press_time = PAIRING_HOLD_MS};
-            err = iot_button_register_cb(s_button_handles[i], BUTTON_LONG_PRESS_START, &args,
-                                         pairing_hold_cb, NULL);
-            if (err != ESP_OK) {
-                return err;
-            }
         }
     }
 
@@ -987,6 +1025,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(init_power_management());
     ESP_ERROR_CHECK(board_init());
+    s_confirmation_motion = board_confirmation_motion();
     ESP_ERROR_CHECK(ui_status_init());
     ESP_ERROR_CHECK(init_display_dim_timer());
     ESP_ERROR_CHECK(init_deep_sleep_timer());

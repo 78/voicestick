@@ -550,11 +550,18 @@ final class StatusController {
         })
     }
 
-    func showPausedFinal(_ text: String, deviceID: String? = nil) {
+    func showConfirmation(
+        _ text: String,
+        deviceID: String?,
+        shortcuts: ConfirmationShortcuts,
+        onSend: @escaping (Bool) -> Void,
+        onCancel: @escaping () -> Void
+    ) -> OverlayController {
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
-        overlay.showPaused(text: text)
+        overlay.showConfirmation(text: text, shortcuts: shortcuts, onSend: onSend, onCancel: onCancel)
+        return overlay
     }
 
     func showError(_ text: String, deviceID: String? = nil, onHidden: (() -> Void)? = nil) {

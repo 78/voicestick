@@ -9,28 +9,19 @@
 #include <unistd.h>
 
 #include "driver/ledc.h"
-#include "driver/spi_master.h"
+#include "board_lcd.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
-#include "esp_lcd_panel_st7789.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
-#include "stick_s3_board.h"
 #include "ui_status_icons.h"
 
 static const char *TAG = "ui_status";
-
-#define LCD_HOST SPI2_HOST
-
-#define LCD_H_RES 135
-#define LCD_V_RES 240
-#define LCD_X_GAP 52
-#define LCD_Y_GAP 40
 
 #define LCD_PIXEL_CLOCK_HZ (20 * 1000 * 1000)
 #define LCD_CMD_BITS 8
@@ -71,6 +62,7 @@ static char s_hint_text[UI_HINT_TEXT_MAX] = "Starting up";
 static char s_idle_hint_text[UI_HINT_TEXT_MAX] = "Hold to Talk";
 static char s_device_name[16] = "BLE";
 static bool s_dimmed;
+static bool s_compact;
 
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
@@ -170,14 +162,13 @@ static void render_scene_locked(ui_status_icon_scene_t scene, const char *status
     lv_label_set_text(s_status_label, status);
     lv_label_set_text(s_hint_label, hint ? hint : "");
     if (scene == UI_STATUS_ICON_ERROR) {
-        lv_obj_set_height(s_hint_label, 42);
+        lv_obj_set_height(s_hint_label, s_compact ? 22 : 42);
         lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_DOT);
-        lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, -10);
     } else {
         lv_obj_set_height(s_hint_label, LV_SIZE_CONTENT);
-        lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
-        lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, -10);
+        lv_label_set_long_mode(s_hint_label, s_compact ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_WRAP);
     }
+    lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, s_compact ? 0 : -10);
 
     const bool resting = scene == UI_STATUS_ICON_RESTING;
     const bool pairing = scene == UI_STATUS_ICON_PAIRING || scene == UI_STATUS_ICON_BOOT;
@@ -212,7 +203,7 @@ static void render_current_locked(void)
     }
 }
 
-static void create_status_ui(void)
+static void create_status_ui(int width)
 {
     s_screen = lv_display_get_screen_active(s_display);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(0xfff7ed), 0);
@@ -224,7 +215,7 @@ static void create_status_ui(void)
     lv_obj_set_style_text_font(s_top_label, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_top_label, lv_color_hex(0x7f7180), 0);
     lv_label_set_long_mode(s_top_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(s_top_label, 66);
+    lv_obj_set_width(s_top_label, s_compact ? width - 81 : 66);
     lv_obj_align(s_top_label, LV_ALIGN_TOP_LEFT, 12, 4);
 
     s_ble_dot = create_blob(s_screen, 8, 8, lv_color_hex(0x8fb8ff));
@@ -232,18 +223,27 @@ static void create_status_ui(void)
 
     create_battery_ui(s_screen);
     ui_status_icons_create(&s_icons, s_screen);
+    if (s_compact) {
+        lv_image_set_pivot(s_icons.root, 56, 56);
+        lv_image_set_scale(s_icons.root, LV_SCALE_NONE / 2);
+        lv_obj_align(s_icons.root, LV_ALIGN_TOP_MID, 0, -14);
+    }
 
     s_status_label = lv_label_create(s_screen);
     lv_label_set_text(s_status_label, "Booting");
-    lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_status_label,
+                               s_compact ? &lv_font_montserrat_14 : &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x3f3440), 0);
-    lv_obj_set_width(s_status_label, LCD_H_RES - 16);
+    lv_obj_set_width(s_status_label, width - 16);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, 168);
+    lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, s_compact ? 72 : 168);
 
     s_hint_label = lv_label_create(s_screen);
     lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_hint_label, LCD_H_RES - 16);
+    lv_obj_set_width(s_hint_label, width - 16);
+    if (s_compact) {
+        lv_obj_set_style_text_font(s_hint_label, &lv_font_montserrat_10, 0);
+    }
     lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_hint_label, lv_color_hex(0x7f7180), 0);
     lv_label_set_text(s_hint_label, "Starting up");
@@ -265,6 +265,8 @@ static void set_scene(ui_status_icon_scene_t scene, const char *status, const ch
 
 esp_err_t ui_status_init(void)
 {
+    const board_lcd_t lcd = board_lcd_config();
+    s_compact = lcd.height < 180;
     const ledc_timer_config_t backlight_timer = {
         .speed_mode = LCD_BACKLIGHT_LEDC_MODE,
         .duty_resolution = LEDC_TIMER_8_BIT,
@@ -276,7 +278,7 @@ esp_err_t ui_status_init(void)
     ESP_RETURN_ON_ERROR(ledc_timer_config(&backlight_timer), TAG, "configure backlight timer");
 
     const ledc_channel_config_t backlight_channel = {
-        .gpio_num = STICK_S3_PIN_LCD_BL,
+        .gpio_num = lcd.backlight,
         .speed_mode = LCD_BACKLIGHT_LEDC_MODE,
         .channel = LCD_BACKLIGHT_LEDC_CHANNEL,
         .intr_type = LEDC_INTR_DISABLE,
@@ -284,57 +286,51 @@ esp_err_t ui_status_init(void)
         .duty = 0,
         .hpoint = 0,
         .sleep_mode = LEDC_SLEEP_MODE_KEEP_ALIVE,
-        .flags.output_invert = 0,
+        .flags.output_invert = lcd.backlight_inverted,
     };
     ESP_RETURN_ON_ERROR(ledc_channel_config(&backlight_channel), TAG, "configure backlight channel");
 
     spi_bus_config_t bus_config = {
-        .sclk_io_num = STICK_S3_PIN_LCD_SCK,
-        .mosi_io_num = STICK_S3_PIN_LCD_MOSI,
+        .sclk_io_num = lcd.sck,
+        .mosi_io_num = lcd.mosi,
         .miso_io_num = -1,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_H_RES * LVGL_DRAW_BUF_LINES * sizeof(lv_color16_t),
+        .max_transfer_sz = lcd.width * LVGL_DRAW_BUF_LINES * sizeof(lv_color16_t),
     };
-    ESP_RETURN_ON_ERROR(spi_bus_initialize(LCD_HOST, &bus_config, SPI_DMA_CH_AUTO),
+    ESP_RETURN_ON_ERROR(spi_bus_initialize(lcd.host, &bus_config, SPI_DMA_CH_AUTO),
                         TAG, "initialize lcd spi bus");
 
     esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_panel_io_spi_config_t io_config = {
-        .dc_gpio_num = STICK_S3_PIN_LCD_DC,
-        .cs_gpio_num = STICK_S3_PIN_LCD_CS,
+        .dc_gpio_num = lcd.dc,
+        .cs_gpio_num = lcd.cs,
         .pclk_hz = LCD_PIXEL_CLOCK_HZ,
         .lcd_cmd_bits = LCD_CMD_BITS,
         .lcd_param_bits = LCD_PARAM_BITS,
         .spi_mode = 0,
         .trans_queue_depth = 10,
     };
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST,
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)lcd.host,
                                                  &io_config, &io),
                         TAG, "create lcd panel io");
 
     esp_lcd_panel_handle_t panel = NULL;
-    esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = STICK_S3_PIN_LCD_RST,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
-        .bits_per_pixel = 16,
-    };
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_st7789(io, &panel_config, &panel),
-                        TAG, "create st7789 panel");
+    ESP_RETURN_ON_ERROR(lcd.new_panel(io, &panel), TAG, "create LCD panel");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(panel), TAG, "reset panel");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(panel), TAG, "init panel");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(panel, true), TAG, "invert panel colors");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, false, false), TAG, "mirror panel");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(panel, LCD_X_GAP, LCD_Y_GAP), TAG, "set panel gap");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(panel, lcd.invert_colors), TAG, "set panel color inversion");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, lcd.mirror, lcd.mirror), TAG, "mirror panel");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(panel, lcd.gap_x, lcd.gap_y), TAG, "set panel gap");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "turn display on");
 
     lv_init();
-    s_display = lv_display_create(LCD_H_RES, LCD_V_RES);
+    s_display = lv_display_create(lcd.width, lcd.height);
     ESP_RETURN_ON_FALSE(s_display, ESP_ERR_NO_MEM, TAG, "create lvgl display");
 
-    const size_t draw_buffer_size = LCD_H_RES * LVGL_DRAW_BUF_LINES * sizeof(lv_color16_t);
-    void *buf1 = spi_bus_dma_memory_alloc(LCD_HOST, draw_buffer_size, 0);
-    void *buf2 = spi_bus_dma_memory_alloc(LCD_HOST, draw_buffer_size, 0);
+    const size_t draw_buffer_size = lcd.width * LVGL_DRAW_BUF_LINES * sizeof(lv_color16_t);
+    void *buf1 = spi_bus_dma_memory_alloc(lcd.host, draw_buffer_size, 0);
+    void *buf2 = spi_bus_dma_memory_alloc(lcd.host, draw_buffer_size, 0);
     ESP_RETURN_ON_FALSE(buf1 && buf2, ESP_ERR_NO_MEM, TAG, "allocate lvgl draw buffers");
 
     lv_display_set_buffers(s_display, buf1, buf2, draw_buffer_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
@@ -359,7 +355,7 @@ esp_err_t ui_status_init(void)
                         TAG, "start lvgl tick");
 
     _lock_acquire(&s_lvgl_lock);
-    create_status_ui();
+    create_status_ui(lcd.width);
     _lock_release(&s_lvgl_lock);
 
     BaseType_t task_ok = xTaskCreate(lvgl_task, "lvgl", LVGL_TASK_STACK_SIZE,
@@ -367,7 +363,7 @@ esp_err_t ui_status_init(void)
     ESP_RETURN_ON_FALSE(task_ok == pdPASS, ESP_ERR_NO_MEM, TAG, "create lvgl task");
 
     ESP_RETURN_ON_ERROR(ui_status_set_brightness(LCD_BACKLIGHT_DEFAULT), TAG, "set backlight");
-    ESP_LOGI(TAG, "display ready");
+    ESP_LOGI(TAG, "%dx%d display ready", lcd.width, lcd.height);
     return ESP_OK;
 }
 
@@ -409,7 +405,7 @@ void ui_status_set_device_name(const char *device_name)
 void ui_status_set_advertising(void)
 {
     ESP_LOGD(TAG, "advertising");
-    set_scene(UI_STATUS_ICON_PAIRING, "Disconnected", "Hold side button to pair");
+    set_scene(UI_STATUS_ICON_PAIRING, "Disconnected", "Press main to pair");
 }
 
 void ui_status_set_pairing(const char *device_name)

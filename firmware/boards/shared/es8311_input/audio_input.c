@@ -6,7 +6,7 @@
 #include "esp_codec_dev_defaults.h"
 #include "esp_log.h"
 
-#include "stick_s3_board.h"
+#include "es8311_input_board.h"
 
 static const char *TAG = "audio_input";
 
@@ -17,9 +17,9 @@ static const audio_codec_data_if_t *s_data_if;
 static const audio_codec_gpio_if_t *s_gpio_if;
 static const audio_codec_if_t *s_codec_if;
 
-static esp_err_t init_i2s(void)
+static esp_err_t init_i2s(const es8311_input_board_t *config)
 {
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(config->i2s_port, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
     ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, NULL, &s_rx_handle),
                         TAG, "create i2s channel");
@@ -28,18 +28,7 @@ static esp_err_t init_i2s(void)
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_INPUT_SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
                                                         I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {
-            .mclk = STICK_S3_PIN_ES8311_MCLK,
-            .bclk = STICK_S3_PIN_ES8311_BCLK,
-            .ws = STICK_S3_PIN_ES8311_LRCK,
-            .dout = STICK_S3_PIN_ES8311_DIN,
-            .din = STICK_S3_PIN_ES8311_DOUT,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
-        },
+        .gpio_cfg = config->pins,
     };
     std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
 
@@ -49,21 +38,20 @@ static esp_err_t init_i2s(void)
     return ESP_OK;
 }
 
-static esp_err_t init_codec(void)
+static esp_err_t init_codec(const es8311_input_board_t *config)
 {
-    i2c_master_bus_handle_t i2c_bus = stick_s3_board_i2c_bus();
-    ESP_RETURN_ON_FALSE(i2c_bus != NULL, ESP_ERR_INVALID_STATE, TAG, "i2c bus unavailable");
+    ESP_RETURN_ON_FALSE(config->bus != NULL, ESP_ERR_INVALID_STATE, TAG, "i2c bus unavailable");
 
     audio_codec_i2c_cfg_t i2c_cfg = {
-        .port = I2C_NUM_1,
+        .port = config->i2c_port,
         .addr = ES8311_CODEC_DEFAULT_ADDR,
-        .bus_handle = i2c_bus,
+        .bus_handle = config->bus,
     };
     s_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
     ESP_RETURN_ON_FALSE(s_ctrl_if != NULL, ESP_ERR_NO_MEM, TAG, "create codec i2c ctrl");
 
     audio_codec_i2s_cfg_t i2s_cfg = {
-        .port = I2S_NUM_1,
+        .port = config->i2s_port,
         .rx_handle = s_rx_handle,
         .tx_handle = NULL,
     };
@@ -109,7 +97,7 @@ static esp_err_t init_codec(void)
     };
     ESP_RETURN_ON_FALSE(esp_codec_dev_open(s_codec, &sample_cfg) == ESP_CODEC_DEV_OK,
                         ESP_FAIL, TAG, "open codec");
-    ESP_RETURN_ON_FALSE(esp_codec_dev_set_in_gain(s_codec, 36.0) == ESP_CODEC_DEV_OK,
+    ESP_RETURN_ON_FALSE(esp_codec_dev_set_in_gain(s_codec, config->gain_db) == ESP_CODEC_DEV_OK,
                         ESP_FAIL, TAG, "set mic gain");
     return ESP_OK;
 }
@@ -142,7 +130,10 @@ static void deinit_codec(void)
 static void deinit_i2s(void)
 {
     if (s_rx_handle) {
-        /* Channel is already disabled by codec close; just release it. */
+        i2s_chan_info_t info;
+        if (i2s_channel_get_info(s_rx_handle, &info) == ESP_OK && info.is_enabled) {
+            i2s_channel_disable(s_rx_handle);
+        }
         i2s_del_channel(s_rx_handle);
         s_rx_handle = NULL;
     }
@@ -150,12 +141,15 @@ static void deinit_i2s(void)
 
 esp_err_t audio_input_open(void)
 {
-    ESP_RETURN_ON_ERROR(init_i2s(), TAG, "i2s init");
-    esp_err_t err = init_codec();
+    const es8311_input_board_t config = board_es8311_input_config();
+    esp_err_t err = init_i2s(&config);
+    if (err == ESP_OK) {
+        err = init_codec(&config);
+    }
     if (err != ESP_OK) {
         deinit_codec();
         deinit_i2s();
-        ESP_LOGE(TAG, "codec init: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "open microphone: %s", esp_err_to_name(err));
     }
     return err;
 }

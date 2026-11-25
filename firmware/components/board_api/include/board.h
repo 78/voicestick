@@ -5,6 +5,7 @@
 
 #include "esp_err.h"
 #include "hal/gpio_types.h"
+#include "shake_detector.h"
 
 /*
  * Board support interface. Every board under boards/<name>/ provides a
@@ -19,6 +20,15 @@ typedef struct {
 
 /* Called from ISR or task context when the charger or USB state may have changed. */
 typedef void (*board_power_event_cb_t)(void);
+
+typedef struct {
+    bool (*set_enabled)(bool enabled);
+    /* Three-axis acceleration in milligravity, using a ±4 g range. */
+    bool (*read_acceleration)(acceleration_mg_t *sample);
+} board_confirmation_motion_t;
+
+/* Optional sensor for the paused-confirmation gesture. */
+const board_confirmation_motion_t *board_confirmation_motion(void);
 
 /* Hardware id sent in device_info; the desktop app only offers OTA images
  * whose manifest carries the same id. */

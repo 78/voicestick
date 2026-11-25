@@ -7,6 +7,7 @@ cmake_minimum_required(VERSION 3.16)
 # Every build directory keeps its own sdkconfig, so boards build side by side:
 #   idf.py build                                      # m5stack_stick_s3 -> build/
 #   idf.py -B build-c3 -DBOARD=voicestick_c3 build    # VoiceStick C3 v1
+#   idf.py -B build-magiclick-2p5 -DBOARD=magiclick_2p5 build
 set(BOARD "m5stack_stick_s3" CACHE STRING "Board directory under boards/")
 if(BOARD STREQUAL "m5stick_s3")
     # Migrate build directories created before the StickS3 board was renamed.
@@ -21,7 +22,7 @@ include("${BOARD_DIR}/board.cmake")
 set(IDF_TARGET "${BOARD_TARGET}")
 set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
 set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults;${BOARD_DIR}/sdkconfig.defaults")
-set(EXTRA_COMPONENT_DIRS "${BOARD_DIR}/components")
+set(EXTRA_COMPONENT_DIRS "${BOARD_DIR}/components" ${BOARD_EXTRA_COMPONENT_DIRS})
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 idf_build_set_property(DEPENDENCIES_LOCK "${CMAKE_CURRENT_LIST_DIR}/dependencies.lock.${BOARD}")

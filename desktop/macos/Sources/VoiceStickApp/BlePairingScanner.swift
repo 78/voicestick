@@ -13,7 +13,7 @@ struct PairingDevice {
 }
 
 final class BlePairingScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
-    static let openingHint = "Hold the device’s cancel button to pair"
+    static let openingHint = "Press the main voice button when disconnected"
 
     var onDevice: ((PairingDevice) -> Void)?
     var onStatus: ((String) -> Void)?
@@ -150,7 +150,7 @@ final class BlePairingScanner: NSObject, CBCentralManagerDelegate, CBPeripheralD
         guard pending != nil else { return }
         _ = endAttempt()
         if let central { scan(central) }
-        onStatus?("Hold the cancel button and try again")
+        onStatus?("Press the main voice button while disconnected and try again")
     }
 
     private func endAttempt() -> ((String) -> Void)? {
@@ -174,7 +174,7 @@ enum PeerRemovedPairingAlert {
         alert.alertStyle = .warning
         alert.messageText = "Forget \(device.name) on this Mac first"
         alert.informativeText = "\(device.name) no longer has the pairing key saved on this Mac, so macOS will not connect to it. "
-            + "In Bluetooth settings, forget \(device.name), then hold the device’s cancel button and pair again."
+            + "In Bluetooth settings, forget \(device.name), then press its main voice button and pair again."
         alert.addButton(withTitle: "Open Bluetooth Settings")
         alert.addButton(withTitle: "Cancel")
 

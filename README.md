@@ -2,13 +2,13 @@
 
 English · [简体中文](README_ZH.md)
 
-Voice Stick is a Bluetooth push-to-talk input device for macOS, Windows, and Linux. Build the VoiceStick C3 v1 from the published hardware files or use an M5Stack StickS3.
+Voice Stick is a Bluetooth push-to-talk input device for macOS, Windows, and Linux. Build the VoiceStick C3 v1 from the published hardware files or use an M5Stack StickS3 or Magiclick 2P5.
 
 Hold the front button on the StickS3 to record. When you release it, the macOS menu bar app sends the audio to ASR, shows the recognized text, and pastes the final result into the currently focused input field after a short confirmation countdown. By default it pastes text and presses Return; `auto_enter` can be disabled in settings.
 
 ## Project Layout
 
-- `firmware/`: ESP-IDF firmware, one tree for every board under `firmware/boards/` (M5Stack StickS3 / ESP32-S3 and VoiceStick C3 v1 / ESP32-C3).
+- `firmware/`: ESP-IDF firmware, with board support under `firmware/boards/`.
 - [Build a VoiceStick C3 v1](hardware/README.md) — KiCad project, PCB fabrication files, printable enclosure and ESP32-C3 flashing instructions.
 - `desktop/macos/`: Swift Package for the native macOS menu bar app.
 - `desktop/windows/`: Windows desktop app workspace.
@@ -27,7 +27,8 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - ASR providers can be direct Volcengine or VoiceStick Cloud relay.
 - During recognition, the macOS app shows a floating overlay and menu bar status. The firmware display stays in the thinking state after button release until the text is pasted or cancelled.
 - The macOS menu bar's **Send Confirmation** options are immediate paste, a countdown of 1, 2, 3, 5, 10, or 15 seconds, and manual confirmation. The default countdown is 1 second.
-- Pressing the front button during the countdown pauses auto-paste. Pressing the front button again confirms paste; pressing the side button cancels it.
+- Pressing the front button during the countdown reveals the confirmation controls below the text in the same overlay. Click the text to edit it. Click **Send** or press the front button again to paste your edits. Click **Cancel** or press the side button to discard them.
+- On StickS3 and MagiClick 2P5, shaking the device while the confirmation is paused also cancels the draft.
 - Pressing the side button while idle restores the last recoverable input confirmation.
 - Optional debug audio cache saves each valid recognition session as Ogg Opus, with the source device ID included in the file name when available.
 - Firmware updates are checked from a signed-by-hash manifest on app launch, device connect/reconnect, and manual menu refresh. Updates are offered per connected device.
@@ -44,6 +45,8 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - LCD backlight: GPIO38 PWM
 
 Main pin definitions live in `firmware/boards/m5stack_stick_s3/components/stick_s3_board/include/stick_s3_board.h`.
+
+Magiclick 2P5 (`magiclick_2p5`) uses an ESP32-S3 with an ES8311 microphone and a 128 × 128 LCD. The firmware reads the PCB revision strap to select the GC9107 or ST7735 panel. The center voice button wakes the device from deep sleep and opens BLE pairing when disconnected. The left button cancels on a short press and doubles as BOOT during reset.
 
 VoiceStick C3 v1 (`hardware/voicestick_c3`, board `voicestick_c3`):
 
@@ -112,6 +115,7 @@ Each board is a directory under `firmware/boards/<board>/` with `board.cmake` (c
 cd firmware
 idf.py build                                         # M5Stack StickS3 (default)
 idf.py -B build-c3 -DBOARD=voicestick_c3 build       # VoiceStick C3 v1
+idf.py -B build-magiclick-2p5 -DBOARD=magiclick_2p5 build
 ```
 
 Flash and monitor:
@@ -119,6 +123,7 @@ Flash and monitor:
 ```sh
 idf.py -p /dev/cu.usbmodemXXXX flash monitor
 idf.py -B build-c3 -p /dev/cu.usbmodemXXXX flash monitor
+idf.py -B build-magiclick-2p5 -p /dev/cu.usbmodemXXXX flash monitor
 ```
 
 Board-specific options (for example the C3 microphone clock, slot and gain) are under `idf.py -B build-c3 menuconfig`.
@@ -134,7 +139,10 @@ Firmware dependencies are declared through the ESP-IDF component manager:
 - `espressif/button`
 - `espressif/cjson`
 - `78/esp-opus`
-- StickS3: `espressif/esp_codec_dev`, `lvgl/lvgl`
+- StickS3 and Magiclick 2P5 use `espressif/esp_codec_dev` and `lvgl/lvgl`
+- StickS3 uses `espressif/bmi270` for shake cancellation
+- Magiclick 2P5 also uses `espressif/esp_lcd_gc9a01` for the GC9107 panel
+- Magiclick 2P5 and VoiceStick C3 use `espressif/adc_battery_estimation` for battery percentage
 - VoiceStick C3: `espressif/led_strip`
 
 ## macOS Desktop Build
@@ -305,7 +313,7 @@ Do not commit API keys.
 VoiceStick reconnects automatically to its paired computer, including after a firmware update. Use these steps when pairing for the first time or switching to a different computer.
 
 1. Turn on the VoiceStick and start the macOS app on the computer you want to pair.
-2. A VoiceStick that has never been paired accepts pairing for 60 seconds after it turns on or wakes. If you are switching computers, disconnect the VoiceStick from the old computer, then hold the C3 cancel button or the StickS3 side button for three seconds to accept pairing for 60 seconds. The C3 flashes blue during that window.
+2. A VoiceStick that has never been paired accepts pairing for 60 seconds after it turns on or wakes. If you are switching computers, disconnect the VoiceStick from the old computer, then press the main voice button once to open the same window. The C3 flashes blue during the pairing window.
 3. Open `Pair Device...` from the menu bar, select the matching `VS-XXXX`, and click `Pair`.
 4. Confirm the Bluetooth connection in macOS if prompted. The app reconnects automatically after pairing.
 

@@ -965,12 +965,13 @@ static void start_advertising(void)
         return;
     }
 
+    const bool pairing_with_owner = s_pairing_open && s_has_owner;
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof(fields));
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.uuids128 = s_pairing_open ? &s_pairing_adv_uuid : &s_reconnect_adv_uuid;
     fields.num_uuids128 = 1;
-    fields.uuids128_is_complete = 1;
+    fields.uuids128_is_complete = !pairing_with_owner;
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
@@ -983,6 +984,12 @@ static void start_advertising(void)
     rsp_fields.name = (const uint8_t *)s_device_name;
     rsp_fields.name_len = strlen(s_device_name);
     rsp_fields.name_is_complete = 1;
+    // The paired host can still find the device while pairing is available.
+    // A second 128-bit UUID does not fit in the primary advertising packet.
+    if (pairing_with_owner) {
+        rsp_fields.uuids128 = &s_reconnect_adv_uuid;
+        rsp_fields.num_uuids128 = 1;
+    }
     rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "set scan response failed rc=%d", rc);
@@ -1480,5 +1487,13 @@ esp_err_t voice_ble_send_button_click(const char *button, uint32_t duration_ms,
     }
     ESP_LOGI(TAG, "button click button=%s session=%" PRIu32 " duration_ms=%" PRIu32,
              button, session_id, duration_ms);
+    return send_state_json(json);
+}
+
+esp_err_t voice_ble_send_confirmation_shake(const char *confirmation_id)
+{
+    char json[96];
+    snprintf(json, sizeof(json), "{\"event\":\"confirmation_shake\",\"confirmation_id\":\"%s\"}",
+             confirmation_id);
     return send_state_json(json);
 }
