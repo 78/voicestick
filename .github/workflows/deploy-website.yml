@@ -9,6 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   pages: write
   id-token: write
@@ -123,8 +124,26 @@ jobs:
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
+        id: pages-artifact
         with:
           path: website/dist
+
+      - name: Wait for the uploaded Pages artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_ID: ${{ steps.pages-artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          : "${ARTIFACT_ID:?Missing Pages artifact ID}"
+          for attempt in {1..10}; do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=github-pages" \
+              | jq -e --argjson id "$ARTIFACT_ID" 'any(.artifacts[]; .id == $id and (.expired | not))' > /dev/null; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo '::error::The uploaded github-pages artifact did not become visible.'
+          exit 1
 
       - name: Deploy to GitHub Pages
         id: deployment
