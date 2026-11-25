@@ -32,7 +32,7 @@ The QFN32 ESP32-C3 uses a GD25Q64E 8 MB SPI flash, a 40 MHz crystal and a 32.768
 | 20 | WS2812B-2020-V6 data |
 | 21 | Next key through 1 kΩ |
 
-The GPIO8 pull-up stays on the previous key to avoid back-powering the unpowered LED. GPIO20 floats before deep sleep. After one hour idle on battery, the main key or USB can wake the board. The low-battery path uses USB-only wake after three readings below 3.5 V.
+The GPIO8 pull-up stays on the previous key to avoid back-powering the unpowered LED. GPIO20 floats before deep sleep. After one hour idle on battery, or one minute without a connected host, the main key or USB can wake the board. The low-battery path uses USB-only wake after three readings below 3.5 V.
 
 ## Editing and rebuilding
 

@@ -68,6 +68,8 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var connectedDevices: [UUID: ConnectedVoiceStickDevice] = [:]
     private var controlCharacteristics: [UUID: CBCharacteristic] = [:]
     private var pendingAuthorization: [UUID: [CBCharacteristic]] = [:]
+    /// Reconnecting would fail the same way until the device is paired again.
+    private var peerRemovedPairingIDs: Set<UUID> = []
     private var otaCharacteristics: [UUID: CBCharacteristic] = [:]
     private var firmwareUpdateSession: FirmwareUpdateSession?
     private var interactionMode: InteractionMode = .holdToTalk
@@ -106,6 +108,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func updatePairedDeviceIDs(_ deviceIDs: [String]) {
         let updatedIDs = Set(deviceIDs)
         pairedDeviceIDs = updatedIDs
+        peerRemovedPairingIDs.removeAll()
 
         let removedPeripherals = peripherals.values.filter { peripheral in
             guard let deviceID = deviceID(for: peripheral.identifier) else { return true }
@@ -243,6 +246,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
         let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         guard !isWorkspaceSleeping else { return }
+        guard !peerRemovedPairingIDs.contains(peripheral.identifier) else { return }
         guard shouldConnect(localName: localName, peripheralName: peripheral.name) else { return }
         guard peripheral.state != .disconnecting else { return }
         if let existingPeripheral = peripherals[peripheral.identifier] {
@@ -269,14 +273,19 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        handleConnectionClosed(peripheral)
+        handleConnectionClosed(peripheral, error: error)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        handleConnectionClosed(peripheral)
+        handleConnectionClosed(peripheral, error: error)
     }
 
-    private func handleConnectionClosed(_ peripheral: CBPeripheral) {
+    private func handleConnectionClosed(_ peripheral: CBPeripheral, error: Error?) {
+        if (error as? CBError)?.code == .peerRemovedPairingInformation {
+            let deviceID = deviceID(for: peripheral.identifier) ?? "unknown"
+            NSLog("BLE VS-\(deviceID) removed its pairing with this Mac; forget it in Bluetooth settings and pair again")
+            peerRemovedPairingIDs.insert(peripheral.identifier)
+        }
         if peripherals[peripheral.identifier] != nil {
             removePeripheral(peripheral)
             onConnectionChange?(currentConnectedDevices)

@@ -30,7 +30,7 @@ Characteristics:
 | `ota_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105` | StickS3 -> Mac | notify |
 | `authorized` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5108` | VoiceStick -> desktop | encrypted read, returns `0x01` after authorization |
 
-With no active BLE link, a three-second hold of the `secondary` button advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106` for pairing. The window closes after 60 seconds or a successful encrypted BLE bond. Each VoiceStick keeps one authorized host in persistent storage. Outside the window, a VoiceStick with an authorized host advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5107` for reconnection. Both advertisements lead to the same GATT service above. The previous firmware advertised the service UUID directly.
+With no active BLE link, a three-second hold of the `secondary` button advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106` for pairing. A VoiceStick without an authorized host opens this window by itself after boot or wake. The window closes after 60 seconds or a successful encrypted BLE bond. Each VoiceStick authorizes one host at a time but keeps the bonds of up to four hosts, so a previous host can be authorized again in the pairing window without forgetting the device in its system Bluetooth settings. When bond storage is full, the oldest bond other than the authorized host's is removed. Outside the window, a VoiceStick with an authorized host advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5107` for reconnection. Both advertisements lead to the same GATT service above. The previous firmware advertised the service UUID directly.
 
 The Mac app uses the pairing advertisement in the device picker and checks the encrypted `authorized` characteristic before saving the device. Background scanning uses the reconnect and legacy advertisements and matches the local `VS-XXXX` list. The firmware also validates the saved host bond before accepting control or OTA writes or sending audio and state. The Mac app can connect to multiple VoiceSticks.
 
@@ -253,10 +253,15 @@ StickS3:
 boot -> advertising -> connected -> idle -> recording -> idle
 ```
 
-The firmware also dims the display after 30 seconds of idle time. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes the device from deep sleep.
+The firmware also dims the display after 30 seconds of idle time. On battery power it enters deep sleep after 5 minutes, or after 1 minute while no host is connected; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes the device from deep sleep.
 
 The C3 turns off the status LED while waiting for the paired host and enters
-deep sleep after 60 minutes idle on battery power. The voice button wakes it.
+deep sleep after 60 minutes idle on battery power, or after 1 minute while no
+host is connected. The voice button wakes it.
+
+While idle, the device requests a 50–200 ms connection interval with a
+peripheral latency of 8 and a 6 s supervision timeout. It switches to a 15–30 ms
+interval with no latency while streaming audio.
 
 macOS:
 

@@ -30,6 +30,7 @@ static const char *TAG = "voice_stick";
 #define DISPLAY_DIM_BRIGHTNESS 32
 #define DISPLAY_DIM_TIMEOUT_US (DISPLAY_DIM_TIMEOUT_MS * 1000ULL)
 #define DEEP_SLEEP_TIMEOUT_US (CONFIG_VOICE_STICK_DEEP_SLEEP_TIMEOUT_S * 1000000ULL)
+#define DISCONNECTED_SLEEP_TIMEOUT_US (CONFIG_VOICE_STICK_DISCONNECTED_SLEEP_TIMEOUT_S * 1000000ULL)
 #define PAIRING_HOLD_MS 3000
 #define MAX_BUTTONS 4
 
@@ -237,7 +238,11 @@ static void restart_deep_sleep_timer(void)
 
     (void)esp_timer_stop(s_deep_sleep_timer);
     if (!s_recording && !s_ota_updating && !is_external_powered()) {
-        esp_err_t err = esp_timer_start_once(s_deep_sleep_timer, DEEP_SLEEP_TIMEOUT_US);
+        uint64_t timeout_us = DEEP_SLEEP_TIMEOUT_US;
+        if (!voice_ble_is_connected() && DISCONNECTED_SLEEP_TIMEOUT_US < timeout_us) {
+            timeout_us = DISCONNECTED_SLEEP_TIMEOUT_US;
+        }
+        esp_err_t err = esp_timer_start_once(s_deep_sleep_timer, timeout_us);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "start deep sleep timer failed: %s", esp_err_to_name(err));
         }
@@ -721,8 +726,7 @@ static void app_event_task(void *arg)
             ui_status_set_idle();
             note_activity();
             break;
-        case APP_EVENT_BLE_DISCONNECTED: {
-            const bool was_recording = s_recording;
+        case APP_EVENT_BLE_DISCONNECTED:
             s_recording = false;
             s_ota_updating = false;
             s_app_ui_state = APP_UI_STATE_READY;
@@ -730,14 +734,11 @@ static void app_event_task(void *arg)
             audio_pipeline_stop();
             release_recording_pm_locks();
             release_ota_pm_locks();
-            if (was_recording) {
-                restart_deep_sleep_timer();
-            }
+            restart_deep_sleep_timer();
             if (!s_pairing_open) {
                 ui_status_set_advertising();
             }
             break;
-        }
         case APP_EVENT_PAIRING_OPENED:
             s_pairing_open = true;
             note_activity();
@@ -1011,7 +1012,7 @@ void app_main(void)
         ui_status_set_error("Audio init failed");
     }
 
-    if (err == ESP_OK) {
+    if (err == ESP_OK && !s_pairing_open) {
         ui_status_set_advertising();
     }
     ESP_LOGI(TAG, "Voice Stick booted");

@@ -24,6 +24,7 @@ final class PairDeviceWindowController: NSWindowController, NSWindowDelegate, NS
         window.delegate = self
         scanner.onDevice = { [weak self] in self?.updateDevice($0) }
         scanner.onStatus = { [weak self] in self?.statusLabel.stringValue = $0 }
+        scanner.onPeerRemovedPairing = { [weak self] in PeerRemovedPairingAlert.show(for: $0, in: self?.window) }
         buildContent()
     }
 

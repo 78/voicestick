@@ -31,7 +31,7 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - Pressing the side button while idle restores the last recoverable input confirmation.
 - Optional debug audio cache saves each valid recognition session as Ogg Opus, with the source device ID included in the file name when available.
 - Firmware updates are checked from a signed-by-hash manifest on app launch, device connect/reconnect, and manual menu refresh. Updates are offered per connected device.
-- The firmware screen shows pairing, ready, listening, thinking, pending confirmation, error, and battery states based on app-sent `ui_state` updates. It dims after 30 seconds of inactivity. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes it from deep sleep.
+- The firmware screen shows pairing, ready, listening, thinking, pending confirmation, error, and battery states based on app-sent `ui_state` updates. It dims after 30 seconds of inactivity. On battery power it enters deep sleep after 5 minutes, or after 1 minute while no host is connected; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes it from deep sleep.
 
 ## Hardware Target
 
@@ -305,7 +305,7 @@ Do not commit API keys.
 VoiceStick reconnects automatically to its paired computer, including after a firmware update. Use these steps when pairing for the first time or switching to a different computer.
 
 1. Turn on the VoiceStick and start the macOS app on the computer you want to pair.
-2. If you are switching computers, disconnect the VoiceStick from the old computer. Hold the C3 cancel button or the StickS3 side button for three seconds. The device accepts pairing for 60 seconds. The C3 flashes blue during that window.
+2. A VoiceStick that has never been paired accepts pairing for 60 seconds after it turns on or wakes. If you are switching computers, disconnect the VoiceStick from the old computer, then hold the C3 cancel button or the StickS3 side button for three seconds to accept pairing for 60 seconds. The C3 flashes blue during that window.
 3. Open `Pair Device...` from the menu bar, select the matching `VS-XXXX`, and click `Pair`.
 4. Confirm the Bluetooth connection in macOS if prompted. The app reconnects automatically after pairing.
 

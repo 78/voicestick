@@ -1,3 +1,4 @@
+import AppKit
 import CoreBluetooth
 import Foundation
 
@@ -16,9 +17,13 @@ final class BlePairingScanner: NSObject, CBCentralManagerDelegate, CBPeripheralD
 
     var onDevice: ((PairingDevice) -> Void)?
     var onStatus: ((String) -> Void)?
+    /// The device lost its bond with this Mac. macOS refuses to pair again until
+    /// the user forgets the device in Bluetooth settings.
+    var onPeerRemovedPairing: ((PairingDevice) -> Void)?
 
     private var central: CBCentralManager?
     private var pending: PairingDevice?
+    private var lastAttempt: PairingDevice?
     private var onPair: ((String) -> Void)?
     private var timeout: DispatchWorkItem?
     private var isActive = false
@@ -35,6 +40,7 @@ final class BlePairingScanner: NSObject, CBCentralManagerDelegate, CBPeripheralD
     func stop() {
         isActive = false
         central?.stopScan()
+        lastAttempt = nil
         _ = endAttempt()
     }
 
@@ -46,6 +52,7 @@ final class BlePairingScanner: NSObject, CBCentralManagerDelegate, CBPeripheralD
         }
 
         pending = device
+        lastAttempt = device
         self.onPair = onPair
         onStatus?("Confirm the Bluetooth prompt if shown")
         central.stopScan()
@@ -93,10 +100,24 @@ final class BlePairingScanner: NSObject, CBCentralManagerDelegate, CBPeripheralD
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        if pending?.peripheral === peripheral { fail() }
+        connectionClosed(peripheral, error: error)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        connectionClosed(peripheral, error: error)
+    }
+
+    private func connectionClosed(_ peripheral: CBPeripheral, error: Error?) {
+        // The authorization read can fail before the disconnect reports why.
+        if (error as? CBError)?.code == .peerRemovedPairingInformation,
+           let device = lastAttempt, device.peripheral === peripheral {
+            lastAttempt = nil
+            _ = endAttempt()
+            if let central { scan(central) }
+            onStatus?("Forget \(device.name) in Bluetooth settings")
+            onPeerRemovedPairing?(device)
+            return
+        }
         if pending?.peripheral === peripheral { fail() }
     }
 
@@ -120,6 +141,7 @@ final class BlePairingScanner: NSObject, CBCentralManagerDelegate, CBPeripheralD
         guard let device = pending, device.peripheral === peripheral,
               characteristic.uuid.uuidString == BleProtocol.authorizedUUID else { return }
         guard error == nil, characteristic.value == Data([1]) else { fail(); return }
+        lastAttempt = nil
         let completion = endAttempt()
         completion?(device.deviceID)
     }
@@ -142,5 +164,38 @@ final class BlePairingScanner: NSObject, CBCentralManagerDelegate, CBPeripheralD
             central?.cancelPeripheralConnection(peripheral)
         }
         return completion
+    }
+}
+
+enum PeerRemovedPairingAlert {
+    static func show(for device: PairingDevice, in window: NSWindow?) {
+        guard window?.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Forget \(device.name) on this Mac first"
+        alert.informativeText = "\(device.name) no longer has the pairing key saved on this Mac, so macOS will not connect to it. "
+            + "In Bluetooth settings, forget \(device.name), then hold the device’s cancel button and pair again."
+        alert.addButton(withTitle: "Open Bluetooth Settings")
+        alert.addButton(withTitle: "Cancel")
+
+        let handle: (NSApplication.ModalResponse) -> Void = { response in
+            if response == .alertFirstButtonReturn { openBluetoothSettings() }
+        }
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: handle)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            handle(alert.runModal())
+        }
+    }
+
+    private static func openBluetoothSettings() {
+        let urls = [
+            "x-apple.systempreferences:com.apple.BluetoothSettings",
+            "x-apple.systempreferences:com.apple.preferences.Bluetooth"
+        ]
+        for text in urls {
+            if let url = URL(string: text), NSWorkspace.shared.open(url) { return }
+        }
     }
 }

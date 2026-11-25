@@ -206,22 +206,48 @@ static bool is_owner(const ble_addr_t *peer)
     return s_has_owner && ble_addr_cmp(&s_owner, peer) == 0;
 }
 
-static void prune_bonds(void)
+/* Hosts keep their keys after we drop ours, and macOS cannot recover from that
+ * without the user forgetting the device. Only evict old bonds when the store
+ * is full, and never the owner's.
+ */
+static int evict_oldest_bond(const ble_addr_t *keep)
 {
     ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
     int count;
     int rc = ble_store_util_bonded_peers(peers, &count, CONFIG_BT_NIMBLE_MAX_BONDS);
     if (rc != 0) {
         ESP_LOGW(TAG, "could not list bonds: rc=%d", rc);
-        return;
+        return rc;
     }
     for (int i = 0; i < count; i++) {
-        if (!is_owner(&peers[i])) {
-            rc = ble_store_util_delete_peer(&peers[i]);
-            if (rc != 0) {
-                ESP_LOGW(TAG, "could not remove old bond: rc=%d", rc);
-            }
+        if (is_owner(&peers[i]) || ble_addr_cmp(&peers[i], keep) == 0) {
+            continue;
         }
+        rc = ble_gap_unpair(&peers[i]);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "could not evict old bond: rc=%d", rc);
+        }
+        return rc;
+    }
+    ESP_LOGW(TAG, "bond storage is full and no old bond can be evicted");
+    return BLE_HS_ESTORE_CAP;
+}
+
+static int store_status_cb(struct ble_store_status_event *event, void *arg)
+{
+    if (event->event_code != BLE_STORE_EVENT_OVERFLOW) {
+        return ble_store_util_status_rr(event, arg);
+    }
+    switch (event->overflow.obj_type) {
+    case BLE_STORE_OBJ_TYPE_OUR_SEC:
+    case BLE_STORE_OBJ_TYPE_PEER_SEC:
+        return evict_oldest_bond(&event->overflow.value->sec.peer_addr);
+    case BLE_STORE_OBJ_TYPE_CCCD:
+        return evict_oldest_bond(&event->overflow.value->cccd.peer_addr);
+    case BLE_STORE_OBJ_TYPE_CSFC:
+        return evict_oldest_bond(&event->overflow.value->csfc.peer_addr);
+    default:
+        return ble_store_util_status_rr(event, arg);
     }
 }
 
@@ -246,7 +272,6 @@ static bool save_owner(const ble_addr_t *peer)
 
     s_owner = *peer;
     s_has_owner = true;
-    prune_bonds();
     return true;
 }
 
@@ -850,9 +875,6 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_link_handle = BLE_HS_CONN_HANDLE_NONE;
         s_itvl_target = CONN_ITVL_NONE;
         s_itvl_update_pending = false;
-        if (!was_connected) {
-            prune_bonds();
-        }
         start_advertising();
         if (was_connected && s_connection_cb) {
             s_connection_cb(false);
@@ -983,7 +1005,10 @@ static void on_sync(void)
         return;
     }
 
-    prune_bonds();
+    /* A device without an owner cannot be taken from anyone, so skip the button hold. */
+    if (!s_has_owner && !s_pairing_open) {
+        set_pairing_open(true);
+    }
     start_advertising();
 }
 
@@ -1077,6 +1102,7 @@ esp_err_t voice_ble_init(void)
 
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
+    ble_hs_cfg.store_status_cb = store_status_cb;
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_sc = 1;
@@ -1254,11 +1280,12 @@ esp_err_t voice_ble_request_slow_interval(void)
         return ESP_ERR_INVALID_STATE;
     }
     s_itvl_target = CONN_ITVL_SLOW;
+    /* Apple caps interval * (latency + 1) at 2s and the supervision timeout at 6s. */
     struct ble_gap_upd_params params = {
         .itvl_min = 40,   // 50ms
         .itvl_max = 160,  // 200ms
-        .latency = 4,
-        .supervision_timeout = 500,  // 5s
+        .latency = 8,
+        .supervision_timeout = 600,  // 6s
         .min_ce_len = 0,
         .max_ce_len = 0,
     };

@@ -8,6 +8,15 @@ menu "Voice Stick"
             Deep sleep drops the BLE connection; the talk button or USB wakes
             the device again.
 
+    config VOICE_STICK_DISCONNECTED_SLEEP_TIMEOUT_S
+        int "Idle time on battery without a host before deep sleep (seconds)"
+        range 30 86400
+        default 60
+        help
+            Applies while no host is connected, so the device stops advertising
+            soon after the computer sleeps or leaves. Values above the deep
+            sleep timeout have no effect.
+
     config VOICE_STICK_BLE_BATTERY_STATUS
         bool "Report battery status over BLE"
         default n
