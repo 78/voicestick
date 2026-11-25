@@ -45,16 +45,16 @@ jobs:
             def asset($name): first(.assets[] | select(.name == $name and .size > 0)) // null;
             add
             | map(select((.draft or .prerelease) | not)
-                | select(.tag_name | test("^v[0-9]+[.][0-9]+[.][0-9]+$")))
-            | sort_by(.tag_name[1:] | split(".") | map(tonumber)) | reverse
-            | map(.tag_name[1:] as $version | {
+                | select(.tag_name | test("^(windows-)?v[0-9]+[.][0-9]+[.][0-9]+$")))
+            | map((.tag_name | sub("^(windows-)?v"; "")) as $version | {
                 tag: .tag_name, version: $version, notes: (.body // ""),
                 zip: asset("VoiceStick-" + $version + ".zip"),
                 signature: asset("VoiceStick-" + $version + ".signature"),
                 msi: asset("VoiceStick_" + $version + ".msi")
               })
+            | sort_by(.version | split(".") | map(tonumber)) | reverse
             | {
-                mac: (first(.[] | select(.zip and .signature)) // null),
+                mac: (first(.[] | select((.tag | startswith("v")) and .zip and .signature)) // null),
                 windows: (first(.[] | select(.msi)) // null)
               }
           ')"

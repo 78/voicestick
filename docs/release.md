@@ -59,6 +59,16 @@ updates the existing OSS manifests for installed clients that use those URLs.
 Verify that both Pages manifests report the new firmware and minimum app
 versions and that their OTA and merged URLs are reachable.
 
+## Windows-Only Release
+
+Set `VERSION` to the Windows release version, then build and verify the signed
+MSI on the Windows signing machine. Commit and push the release commit, then
+create a stable GitHub Release with the MSI and a `windows-v<version>` tag.
+For example, `windows-v0.4.2` publishes `VoiceStick_0.4.2.msi`. Mark the release
+as non-latest so the repository's latest release continues to serve the combined
+desktop downloads. Run `deploy-website.yml` from `main` and verify the Windows
+appcast entry and MSI download URL.
+
 ## Standard Flow
 
 1. Update `VERSION` and `firmware/version.txt` to the new version.
