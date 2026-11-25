@@ -37,7 +37,7 @@
   "flasher": {
     "title": "在线烧录固件",
     "body": "使用桌面版 Chrome 或 Edge，通过 USB 为 M5Stack StickS3 或 VoiceStick C3 v1 烧录固件。",
-    "board": "硬件型号",
+    "board": "硬件",
     "steps": {
       "usb": "用支持数据传输的 USB-C 线将 {board} 连接到电脑。",
       "flash": "点击开始烧录，选择设备的 USB 串口。"

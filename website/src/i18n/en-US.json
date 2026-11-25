@@ -37,7 +37,7 @@
   "flasher": {
     "title": "Flash firmware online",
     "body": "Use desktop Chrome or Edge to flash your M5Stack StickS3 or VoiceStick C3 v1 over USB.",
-    "board": "Hardware model",
+    "board": "Hardware",
     "steps": {
       "usb": "Connect your {board} to your computer with a USB-C data cable.",
       "flash": "Click Start flashing and choose the device’s USB serial port."

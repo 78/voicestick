@@ -290,12 +290,15 @@ async function flashFirmware() {
         </div>
 
         <div class="flasher-panel">
-          <div class="flasher-board">
-            <label for="flash-board">{{ t('flasher.board') }}</label>
-            <select id="flash-board" v-model="selectedBoardID" :disabled="flashing">
-              <option v-for="(board, id) in boards" :key="id" :value="id">{{ board.name }}</option>
-            </select>
-          </div>
+          <fieldset class="flasher-board" :disabled="flashing">
+            <legend>{{ t('flasher.board') }}</legend>
+            <div class="board-options">
+              <label v-for="(board, id) in boards" :key="id">
+                <input v-model="selectedBoardID" type="radio" name="flash-board" :value="id">
+                <span>{{ board.name }}</span>
+              </label>
+            </div>
+          </fieldset>
           <div class="flasher-meta">
             <span role="status">{{ t(`flasher.status.${flashStatus}`) }}</span>
             <span>{{ connectedChip || selectedBoard.chip }}</span>
