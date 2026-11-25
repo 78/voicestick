@@ -66,7 +66,6 @@ final class StatusController {
 
     private static let batteryPercentagePreference = "showBatteryPercentageInMenuBar"
     private static let compactStatusItemWidth: CGFloat = 18
-    private static let batteryStatusItemSidePadding: CGFloat = 5
     private let statusItem = NSStatusBar.system.statusItem(withLength: StatusController.compactStatusItemWidth)
     private let menu = NSMenu()
     private var overlays: [String: OverlayController] = [:]
@@ -264,6 +263,27 @@ final class StatusController {
         )
         afterPasteItem.state = autoEnter ? .on : .off
         menu.addItem(afterPasteItem)
+
+        let confirmationItem = makeMenuItem(
+            title: "Send Confirmation",
+            symbolName: "timer",
+            action: nil
+        )
+        let confirmationSubmenu = NSMenu()
+        let confirmationMode = ConfirmationMode.preferred
+        for mode in ConfirmationMode.allCases {
+            let item = NSMenuItem(
+                title: mode.displayName,
+                action: #selector(selectConfirmationMode),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = mode.rawValue
+            item.state = mode == confirmationMode ? .on : .off
+            confirmationSubmenu.addItem(item)
+        }
+        confirmationItem.submenu = confirmationSubmenu
+        menu.addItem(confirmationItem)
 
         let interactionItem = makeMenuItem(
             title: "Interaction",
@@ -514,12 +534,17 @@ final class StatusController {
         overlay.showListening(text: text)
     }
 
-    func showFinal(_ text: String, deviceID: String? = nil, onHidden: (() -> Void)? = nil) {
+    func showFinal(
+        _ text: String,
+        duration: TimeInterval,
+        deviceID: String? = nil,
+        onHidden: (() -> Void)? = nil
+    ) {
         setStatus(text.isEmpty ? "No speech" : "Ready")
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
-        overlay.showFinal(text: text, onHidden: { [weak self] in
+        overlay.showFinal(text: text, duration: duration, onHidden: { [weak self] in
             self?.markOverlayHidden(for: deviceID)
             onHidden?()
         })
@@ -589,14 +614,7 @@ final class StatusController {
         )
         button.title = title
         button.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
-        if title.isEmpty {
-            statusItem.length = Self.compactStatusItemWidth
-        } else {
-            let contentWidth = button.intrinsicContentSize.width
-            statusItem.length = contentWidth > 0
-                ? ceil(contentWidth) + 2 * Self.batteryStatusItemSidePadding
-                : NSStatusItem.variableLength
-        }
+        statusItem.length = title.isEmpty ? Self.compactStatusItemWidth : NSStatusItem.variableLength
         button.toolTip = description
         button.setAccessibilityLabel(description)
     }
@@ -822,6 +840,12 @@ final class StatusController {
         autoEnter.toggle()
         rebuildMenu()
         onSetAutoEnter?(autoEnter)
+    }
+
+    @objc private func selectConfirmationMode(_ sender: NSMenuItem) {
+        guard let mode = ConfirmationMode(rawValue: sender.tag) else { return }
+        ConfirmationMode.preferred = mode
+        rebuildMenu()
     }
 
     @objc private func selectOutputTarget(_ sender: NSMenuItem) {

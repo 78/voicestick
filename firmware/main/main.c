@@ -556,7 +556,7 @@ static void ble_control_cb(const char *json)
             ESP_LOGW(TAG, "unknown interaction_mode %s", mode->valuestring);
         }
     } else if (cJSON_IsString(event) && strcmp(event->valuestring, "get_device_info") == 0) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(voice_ble_send_device_info());
+        voice_ble_send_device_snapshot();
     }
     cJSON_Delete(root);
 }

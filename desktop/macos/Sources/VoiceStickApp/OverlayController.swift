@@ -112,12 +112,12 @@ final class OverlayController {
         show(mode: .listening, text: text.isEmpty ? "Listening..." : text, hint: "", autoHideAfter: nil)
     }
 
-    func showFinal(text: String, onHidden: (() -> Void)? = nil) {
+    func showFinal(text: String, duration: TimeInterval, onHidden: (() -> Void)? = nil) {
         show(
-            mode: .countdown(duration: 1.2),
+            mode: .countdown(duration: duration),
             text: text.isEmpty ? "No speech" : text,
             hint: "",
-            autoHideAfter: 1.2,
+            autoHideAfter: duration,
             onHidden: onHidden
         )
     }

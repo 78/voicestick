@@ -982,12 +982,25 @@ final class VoiceStickCoordinator {
 
     private func enterPendingConfirmation(text: String) {
         pastedFinalText = true
+        let mode = ConfirmationMode.preferred
+        if mode == .immediate {
+            statusController.hideOverlay(deviceID: activeDeviceID)
+            completePendingPaste(text: text)
+            return
+        }
+
         rememberInput(text)
+        if mode == .manual {
+            enterPausedConfirmation(text: text, peripheralID: activePeripheralID)
+            return
+        }
+
         pendingPasteState = .waitingToPaste(text: text)
         if let peripheralID = activePeripheralID {
             mainInputState = .pendingConfirmation(peripheralID: peripheralID)
         }
-        statusController.showFinal(text, deviceID: activeDeviceID) { [weak self] in
+        let duration = TimeInterval(mode.rawValue) / 1000
+        statusController.showFinal(text, duration: duration, deviceID: activeDeviceID) { [weak self] in
             self?.commitPendingPaste(text: text)
         }
         sendUIStateForActiveDevice("pending_confirmation", text: text)

@@ -26,7 +26,7 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - The macOS app wraps incoming Opus payloads into Ogg Opus and forwards them to ASR over WebSocket.
 - ASR providers can be direct Volcengine or VoiceStick Cloud relay.
 - During recognition, the macOS app shows a floating overlay and menu bar status. The firmware display stays in the thinking state after button release until the text is pasted or cancelled.
-- Final text enters a 1.2 second confirmation countdown.
+- The macOS menu bar's **Send Confirmation** options are immediate paste, a countdown of 1, 2, 3, 5, 10, or 15 seconds, and manual confirmation. The default countdown is 1 second.
 - Pressing the front button during the countdown pauses auto-paste. Pressing the front button again confirms paste; pressing the side button cancels it.
 - Pressing the side button while idle restores the last recoverable input confirmation.
 - Optional debug audio cache saves each valid recognition session as Ogg Opus, with the source device ID included in the file name when available.

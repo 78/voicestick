@@ -103,12 +103,14 @@ compatibility with existing clients. New clients should request `device_info`
 with `get_device_info` after subscribing.
 
 VoiceStick C3 v1 sends `battery_status` once the host subscribes and a valid
-reading is available. The firmware checks the battery at startup, on USB power
-changes, after the charging signal has settled, and with a 60-second polling
-interval. While subscribed, it reports changes to `percent`, `charging`, or
-`usb_powered` after each check. `percent` is an integer from 0 to 100. Deep
-sleep closes the BLE connection. The Mac clears the reading on disconnect and
-uses the device icon to indicate connection status.
+reading is available. It also resends the current reading when the host requests
+device info or sends its first command after connecting. This covers hosts that
+start listening after their subscription was restored. The firmware checks the
+battery at startup, on USB power changes, after the charging signal has settled,
+and with a 60-second polling interval. While subscribed, it reports changes to
+`percent`, `charging`, or `usb_powered` after each check. `percent` is an integer
+from 0 to 100. Deep sleep closes the BLE connection. The Mac clears the reading
+on disconnect and uses the device icon to indicate connection status.
 
 Deprecated firmware-to-app events:
 

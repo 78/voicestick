@@ -30,6 +30,41 @@ enum InteractionMode: String {
     }
 }
 
+enum ConfirmationMode: Int, CaseIterable {
+    case immediate = 0
+    case oneSecond = 1000
+    case twoSeconds = 2000
+    case threeSeconds = 3000
+    case fiveSeconds = 5000
+    case tenSeconds = 10000
+    case fifteenSeconds = 15000
+    case manual = -1
+
+    private static let preferenceKey = "confirmationCountdownMs"
+
+    static var preferred: Self {
+        get {
+            guard let value = UserDefaults.standard.object(forKey: preferenceKey) as? Int else {
+                return .oneSecond
+            }
+            if value == 4000 { return .fiveSeconds }
+            return Self(rawValue: value) ?? .oneSecond
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: preferenceKey)
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .immediate: return "Send Immediately"
+        case .oneSecond: return "1 Second"
+        case .manual: return "Manual Confirmation"
+        default: return "\(rawValue / 1000) Seconds"
+        }
+    }
+}
+
 enum OverlayThemeColor: String, CaseIterable {
     case white
     case pink

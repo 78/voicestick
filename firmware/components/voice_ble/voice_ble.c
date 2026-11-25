@@ -124,6 +124,7 @@ void ble_store_config_init(void);
 static void start_advertising(void);
 static void stop_advertising(void);
 static esp_err_t send_state_json(const char *json);
+static esp_err_t send_device_info(void);
 static void announce_state_subscription(void);
 static struct ble_npl_callout s_adv_retry_callout;
 #define ADV_RETRY_DELAY_MS 1000
@@ -659,8 +660,7 @@ static int control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
      * The first command shows the app is listening.
      */
     if (!s_host_commanded) {
-        s_host_commanded = true;
-        announce_state_subscription();
+        voice_ble_send_device_snapshot();
     }
     return 0;
 }
@@ -738,7 +738,7 @@ static void announce_state_subscription(void)
     if (!s_connected || !s_state_subscribed) {
         return;
     }
-    esp_err_t rc = voice_ble_send_device_info();
+    esp_err_t rc = send_device_info();
     /* A bonded central restores its subscription before the MTU exchange
      * finishes, and device_info does not fit in the default MTU.
      */
@@ -751,6 +751,16 @@ static void announce_state_subscription(void)
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
     report_battery_status();
 #endif
+}
+
+void voice_ble_send_device_snapshot(void)
+{
+    s_host_commanded = true;
+#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
+    /* A restored subscription can accept a notification before the app listens. */
+    s_last_battery_report.percent = -1;
+#endif
+    announce_state_subscription();
 }
 
 static void on_link_encrypted(uint16_t conn_handle, int status)
@@ -1376,7 +1386,7 @@ static esp_err_t send_state_json(const char *json)
     return ESP_OK;
 }
 
-esp_err_t voice_ble_send_device_info(void)
+static esp_err_t send_device_info(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
     const char *version = app_desc ? app_desc->version : "unknown";
