@@ -406,24 +406,43 @@ void Win32App::CheckFirmwareReminders() {
             info.latest_version.empty() || !info.update_available) continue;
         const auto& device_key = info.device_uuid.empty() ? device.id : info.device_uuid;
         if (!RecordFirmwareReminder(device_key, info.latest_version)) continue;
-        ShowFirmwareUpdatePrompt(device.id, info.current_version, info.latest_version);
+        ShowFirmwareUpdatePrompt(device.id, info);
         return;
     }
 }
 
-void Win32App::ShowFirmwareUpdatePrompt(std::string device_id, std::string current_version,
-                                        std::string latest_version) {
+const wchar_t* Win32App::FirmwareUpdateUnavailableReason(const std::string& device_id,
+                                                          const DeviceFirmwareInfo& info) const {
+    const auto connected = std::ranges::find(connected_devices_, device_id, &ConnectedDevice::id);
+    if (connected == connected_devices_.end()) return L"Connect this device to install the update.";
+    if (!info.reported_on_connection) return L"Wait for the device to report its firmware version.";
+    if (!connected->supports_firmware_update) return L"This Bluetooth connection does not support firmware updates.";
+    return nullptr;
+}
+
+void Win32App::ShowFirmwareUpdatePrompt(std::string device_id, DeviceFirmwareInfo info) {
+    if (is_shutting_down_ || is_showing_firmware_prompt_) return;
+    if (firmware_update_dialog_ && IsWindowVisible(firmware_update_dialog_->hwnd())) {
+        firmware_update_dialog_->Show();
+        return;
+    }
     const bool is_below_minimum = FirmwareVersion::IsOlderThan(
-        current_version, AppConfig::minimum_compatible_firmware_version);
-    const auto message = L"VS-" + Utf16(device_id) + L" is running firmware " +
-                         Utf16(current_version) + L".\n\nUpdate to " + Utf16(latest_version) + L"?";
+        info.current_version, AppConfig::minimum_compatible_firmware_version);
+    auto message = L"VS-" + Utf16(device_id) + L" is running firmware " +
+                   Utf16(info.current_version) + L".\n\n";
+    const auto* unavailable = FirmwareUpdateUnavailableReason(device_id, info);
+    if (unavailable) {
+        message += L"Firmware " + Utf16(info.latest_version) + L" is available. " + unavailable;
+    } else {
+        message += L"Update to " + Utf16(info.latest_version) + L"?";
+    }
     is_showing_firmware_prompt_ = true;
     const int result = MessageBoxW(
         hwnd_, message.c_str(),
         is_below_minimum ? L"Firmware update recommended" : L"Firmware update available",
-        MB_ICONINFORMATION | MB_YESNO | MB_DEFBUTTON2 | MB_SETFOREGROUND);
+        MB_ICONINFORMATION | MB_SETFOREGROUND | (unavailable ? MB_OK : (MB_YESNO | MB_DEFBUTTON2)));
     is_showing_firmware_prompt_ = false;
-    if (result == IDYES && !is_shutting_down_) StartFirmwareUpdate(device_id, latest_version);
+    if (result == IDYES && !is_shutting_down_) StartFirmwareUpdate(device_id, info.latest_version);
 }
 
 void Win32App::ShowAppUpdateRequiredForFirmware(const std::string& minimum_version) {
@@ -680,9 +699,13 @@ LRESULT Win32App::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
                     }
                 }
             } else if (cmd >= kMenuUpdateFirmwareBase && cmd <= kMenuUpdateFirmwareEnd) {
-                std::size_t index = cmd - kMenuUpdateFirmwareBase;
+                const std::size_t index = cmd - kMenuUpdateFirmwareBase;
                 if (index < paired_device_ids_.size()) {
-                    StartFirmwareUpdate(paired_device_ids_[index]);
+                    const auto& device_id = paired_device_ids_[index];
+                    const auto firmware = firmware_info_map_.find(device_id);
+                    if (firmware != firmware_info_map_.end() && firmware->second.update_available) {
+                        ShowFirmwareUpdatePrompt(device_id, firmware->second);
+                    }
                 }
             } else if (cmd >= kMenuCheckFirmwareBase && cmd <= kMenuCheckFirmwareEnd) {
                 const std::size_t index = cmd - kMenuCheckFirmwareBase;
@@ -948,9 +971,7 @@ void Win32App::ShowTrayMenu() {
             AppendMenuW(submenu, MF_STRING | MF_DISABLED, 0, L"Checking for Firmware Updates...");
         } else if (firmware && firmware->update_available) {
             const auto update_action = L"Update to " + Utf16(firmware->latest_version) + L"...";
-            const bool can_update = connected && connected->supports_firmware_update && firmware->reported_on_connection;
-            AppendMenuW(submenu, can_update ? MF_STRING : (MF_STRING | MF_DISABLED),
-                        kMenuUpdateFirmwareBase + static_cast<UINT>(i), update_action.c_str());
+            AppendMenuW(submenu, MF_STRING, kMenuUpdateFirmwareBase + static_cast<UINT>(i), update_action.c_str());
         } else {
             AppendMenuW(submenu, manual_firmware_check_device_ ? (MF_STRING | MF_DISABLED) : MF_STRING,
                         kMenuCheckFirmwareBase + static_cast<UINT>(i), L"Check for Firmware Updates...");
@@ -1198,6 +1219,12 @@ void Win32App::CheckDeviceFirmwareUpdates(std::string device_id) {
             }
             if (!result.required_app_version.empty()) {
                 ShowAppUpdateRequiredForFirmware(result.required_app_version);
+            } else if (result.update_available) {
+                if (result.reported_on_connection || !result.device_uuid.empty()) {
+                    const auto& device_key = result.device_uuid.empty() ? device_id : result.device_uuid;
+                    RecordFirmwareReminder(device_key, result.latest_version);
+                }
+                ShowFirmwareUpdatePrompt(device_id, std::move(result));
             } else {
                 const wchar_t* title;
                 std::wstring message;
@@ -1209,11 +1236,7 @@ void Win32App::CheckDeviceFirmwareUpdates(std::string device_id) {
                 } else {
                     message = L"VS-" + Utf16(device_id) + L" is running firmware " + Utf16(result.current_version) +
                               L". The latest firmware is " + Utf16(result.latest_version) + L".";
-                    title = result.update_available ? L"Firmware update available" : L"No newer firmware available";
-                    if (result.update_available && (result.reported_on_connection || !result.device_uuid.empty())) {
-                        const auto& device_key = result.device_uuid.empty() ? device_id : result.device_uuid;
-                        RecordFirmwareReminder(device_key, result.latest_version);
-                    }
+                    title = L"No newer firmware available";
                 }
                 MessageBoxW(hwnd_, message.c_str(), title, MB_OK | icon | MB_SETFOREGROUND);
             }
@@ -1231,16 +1254,16 @@ void Win32App::StartFirmwareUpdate(const std::string& device_id, std::string_vie
     const auto firmware_it = firmware_info_map_.find(device_id);
     if (firmware_it == firmware_info_map_.end()) return;
     const auto& firmware = firmware_it->second;
-    if (!expected_version.empty() && expected_version != firmware.latest_version) return;
+    if (expected_version != firmware.latest_version) return;
     if (!firmware.required_app_version.empty()) {
         ShowAppUpdateRequiredForFirmware(firmware.required_app_version);
         return;
     }
-    if (!firmware.update_available || !firmware.reported_on_connection || firmware.is_checking ||
-        !firmware.error_message.empty() ||
-        std::none_of(connected_devices_.begin(), connected_devices_.end(), [&device_id](const ConnectedDevice& device) {
-            return device.id == device_id && device.supports_firmware_update;
-        })) return;
+    if (!firmware.update_available || firmware.is_checking || !firmware.error_message.empty()) return;
+    if (const auto* unavailable = FirmwareUpdateUnavailableReason(device_id, firmware)) {
+        MessageBoxW(hwnd_, unavailable, L"Firmware update unavailable", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     firmware_update_dialog_ = std::make_unique<FirmwareUpdateDialog>(
         instance_, hwnd_, firmware.latest_version);
     firmware_update_dialog_->on_cancel = [this] {

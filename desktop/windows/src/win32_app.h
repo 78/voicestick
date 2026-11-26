@@ -74,11 +74,13 @@ private:
     void SaveDeviceOverlayPosition(const std::string& device_id, OverlayPosition position);
     void SaveDeviceOutputProfile(const std::string& device_id, OutputProfile profile);
     void ApplyOverlayStyle(const std::optional<std::string>& device_id);
-    void StartFirmwareUpdate(const std::string& device_id, std::string_view expected_version = {});
+    void StartFirmwareUpdate(const std::string& device_id, std::string_view expected_version);
     void CheckDeviceFirmwareUpdates(std::string device_id);
     void CheckFirmwareReminders();
     bool RecordFirmwareReminder(const std::string& device_key, const std::string& version);
-    void ShowFirmwareUpdatePrompt(std::string device_id, std::string current_version, std::string latest_version);
+    const wchar_t* FirmwareUpdateUnavailableReason(const std::string& device_id,
+                                                    const DeviceFirmwareInfo& info) const;
+    void ShowFirmwareUpdatePrompt(std::string device_id, DeviceFirmwareInfo info);
     void ShowAppUpdateRequiredForFirmware(const std::string& minimum_version);
     void PairDevice(const std::string& device_id, std::uint64_t bluetooth_address,
                     BluetoothAddressKind address_kind, const std::string& name);
