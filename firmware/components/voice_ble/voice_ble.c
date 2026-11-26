@@ -38,7 +38,7 @@ static const char *TAG = "voice_ble";
 
 #define OTA_PROGRESS_NOTIFY_BYTES (32 * 1024)
 #define PAIRING_WINDOW_MS (60 * 1000)
-#define BONDED_SECURITY_GRACE_MS 1500
+#define LINK_SECURITY_GRACE_MS 1500
 
 static atomic_bool s_connected;
 static bool s_audio_subscribed;
@@ -66,7 +66,7 @@ static nvs_handle_t s_owner_store;
 static const char *OWNER_KEY = "owner";
 static struct ble_npl_event s_open_pairing_event;
 static struct ble_npl_callout s_pairing_timeout;
-static struct ble_npl_callout s_bonded_security;
+static struct ble_npl_callout s_link_security;
 
 typedef enum {
     CONN_ITVL_NONE,
@@ -794,7 +794,7 @@ static void on_link_encrypted(uint16_t conn_handle, int status)
 
     s_conn_handle = conn_handle;
     s_connected = true;
-    ble_npl_callout_stop(&s_bonded_security);
+    ble_npl_callout_stop(&s_link_security);
     set_pairing_open(false);
     ESP_LOGI(TAG, "authorized connection handle=%u", conn_handle);
     int dle_rc = ble_gap_set_data_len(conn_handle, BLE_HCI_SUGG_DEF_DATALEN_TX_OCTETS_MAX,
@@ -838,7 +838,7 @@ static bool request_link_security(uint16_t conn_handle)
     return false;
 }
 
-static void bonded_security_cb(struct ble_npl_event *event)
+static void link_security_cb(struct ble_npl_event *event)
 {
     (void)event;
     struct ble_gap_conn_desc desc;
@@ -875,11 +875,11 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 
         if (desc.sec_state.encrypted && desc.sec_state.bonded) {
             on_link_encrypted(s_link_handle, 0);
-        } else if (is_owner(&desc.peer_id_addr)) {
-            /* A bonded central can start restoring encryption on its own. */
-            ble_npl_callout_reset(&s_bonded_security, pdMS_TO_TICKS(BONDED_SECURITY_GRACE_MS));
-        } else if (!request_link_security(s_link_handle)) {
-            return 0;
+        } else {
+            /* Let the central start encryption or pairing on its own first.
+             * A security request that arrives before the Windows app pairs
+             * makes Windows fall back to its system pairing prompt. */
+            ble_npl_callout_reset(&s_link_security, pdMS_TO_TICKS(LINK_SECURITY_GRACE_MS));
         }
         return 0;
     }
@@ -902,7 +902,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         if (event->disconnect.conn.conn_handle != s_link_handle) {
             return 0;
         }
-        ble_npl_callout_stop(&s_bonded_security);
+        ble_npl_callout_stop(&s_link_security);
         const bool was_connected = s_connected;
         ESP_LOGI(TAG, "disconnected reason=%d", event->disconnect.reason);
         if (s_ota.active) {
@@ -988,7 +988,9 @@ static void start_advertising(void)
     const bool pairing_with_owner = s_pairing_open && s_has_owner;
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof(fields));
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    /* Only the pairing window is discoverable, so system "add device" lists
+     * do not offer a device that is waiting for its owner. */
+    fields.flags = BLE_HS_ADV_F_BREDR_UNSUP | (s_pairing_open ? BLE_HS_ADV_F_DISC_GEN : 0);
     fields.uuids128 = s_pairing_open ? &s_pairing_adv_uuid : &s_reconnect_adv_uuid;
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = !pairing_with_owner;
@@ -1176,7 +1178,7 @@ esp_err_t voice_ble_init(void)
                          adv_retry_callout_cb, NULL);
     ble_npl_event_init(&s_open_pairing_event, open_pairing_event_cb, NULL);
     ble_npl_callout_init(&s_pairing_timeout, nimble_port_get_dflt_eventq(), pairing_timeout_cb, NULL);
-    ble_npl_callout_init(&s_bonded_security, nimble_port_get_dflt_eventq(), bonded_security_cb, NULL);
+    ble_npl_callout_init(&s_link_security, nimble_port_get_dflt_eventq(), link_security_cb, NULL);
 #ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
     ble_npl_event_init(&s_battery_status_event, battery_status_event_cb, NULL);
 #endif
