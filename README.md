@@ -196,21 +196,23 @@ Config is `~/.config/voicestick/config.toml`. Text is copied with GTK, then Voic
 
 GitHub Actions can do the macOS and firmware release path automatically when a `v<version>` tag is pushed. The tag must match `VERSION`, for example `VERSION=0.2.1` pairs with `v0.2.1`. The release workflow publishes the macOS DMG/ZIP/signature and firmware assets to GitHub Releases, then deploys the website/appcast to GitHub Pages. The Windows MSI is uploaded afterward from the local signing machine. See `docs/release.md` for the full release process, including the Windows-first and Windows-afterward flows.
 
-The same release workflow also builds StickS3 and VoiceStick C3 firmware with ESP-IDF release-v6.1 and uploads firmware artifacts to Aliyun OSS:
+The same release workflow builds StickS3, VoiceStick C3, and MagiClick 2P5 firmware with ESP-IDF release-v6.1 and uploads firmware artifacts to Aliyun OSS:
 
 | File | Use |
 | --- | --- |
-| `voicestick-firmware-<board>-ota-<version>.bin` | BLE OTA image used by the macOS app |
+| `voicestick-firmware-<board>-ota-<version>.bin` | Application image for OTA updates |
 | `voicestick-firmware-<board>-merged-<version>.bin` | Browser/USB flashing image written at offset `0x0` |
 | `manifest.json` | Latest firmware metadata for the app and website |
 
-Image filenames use `sticks3` or `c3` for `<board>`. Each board has a versioned manifest and a stable update URL.
+Image filenames use `sticks3`, `c3`, or `magiclick_2p5` for `<board>`. Each board has a versioned manifest and a stable update URL.
 
 ```text
 voicestick/firmwares/<version>/manifest.json
 voicestick/firmwares/latest/manifest.json
 voicestick/firmwares/voicestick_c3/<version>/manifest.json
 voicestick/firmwares/voicestick_c3/latest/manifest.json
+voicestick/firmwares/magiclick_2p5/<version>/manifest.json
+voicestick/firmwares/magiclick_2p5/latest/manifest.json
 ```
 
 The macOS app checks the stable latest manifest URL on app launch, on device connect/reconnect, and at most once every 24 hours while running. The menu also has `Check for Firmware Updates` for a manual refresh. If a connected device reports an older `firmware_version` than the manifest version, its device submenu shows `Update to <version>...`. The app downloads the manifest `ota_url` and verifies `ota_size` plus `ota_sha256` before starting BLE OTA.

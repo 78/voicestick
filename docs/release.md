@@ -3,7 +3,7 @@
 VoiceStick releases have three moving parts:
 
 - macOS app: built, signed, notarized, and uploaded by GitHub Actions.
-- StickS3 and VoiceStick C3 firmware: built by GitHub Actions and uploaded to Aliyun OSS and GitHub Releases.
+- StickS3, VoiceStick C3, and MagiClick 2P5 firmware: built by GitHub Actions and uploaded to Aliyun OSS and GitHub Releases.
 - Windows app: built and signed manually on the Windows signing machine, then uploaded to the matching GitHub Release.
 
 The Windows package is the special case because the signing certificate is local hardware or local machine state. The release process supports either order:
@@ -42,7 +42,7 @@ The GitHub Actions release workflow validates that `v<VERSION>` matches the push
 ## Firmware-Only Release
 
 Set the firmware version in `firmware/version.txt` and push the matching
-`firmware-v<version>` tag. For example, `firmware-v0.3.6` builds both boards,
+`firmware-v<version>` tag. The workflow builds all three boards,
 publishes the OTA and merged images, and updates their OSS manifests. The
 desktop apps keep their separate version and release tags.
 
@@ -97,7 +97,8 @@ Pushing the tag runs `.github/workflows/release.yml`. That workflow builds:
 - `voicestick-firmware-sticks3-ota-<version>.bin`
 - `voicestick-firmware-sticks3-merged-<version>.bin`
 - `voicestick-firmware-c3-ota-<version>.bin` and `voicestick-firmware-c3-merged-<version>.bin`
-- firmware checksums, `manifest.json` for StickS3 and `manifest-voicestick_c3.json` for C3
+- `voicestick-firmware-magiclick_2p5-ota-<version>.bin` and `voicestick-firmware-magiclick_2p5-merged-<version>.bin`
+- Firmware checksums and a manifest for each board. The release uses `manifest.json` for StickS3, `manifest-voicestick_c3.json` for C3, and `manifest-magiclick_2p5.json` for MagiClick 2P5.
 
 It also uploads the firmware to Aliyun OSS under both:
 
@@ -106,12 +107,14 @@ voicestick/firmwares/<version>/
 voicestick/firmwares/latest/
 voicestick/firmwares/voicestick_c3/<version>/
 voicestick/firmwares/voicestick_c3/latest/
+voicestick/firmwares/magiclick_2p5/<version>/
+voicestick/firmwares/magiclick_2p5/latest/
 ```
 
 After publishing a combined or firmware-only GitHub Release, the workflow
 requests a Pages deployment. The deployment refreshes the appcast and copies
-the current manifests from OSS. The firmware image URLs continue pointing to
-OSS.
+the StickS3 and C3 manifests from OSS. The MagiClick 2P5 manifest is available
+on GitHub Releases and OSS.
 
 ## Windows First
 

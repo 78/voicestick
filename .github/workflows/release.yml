@@ -39,6 +39,12 @@ jobs:
             hardware: voicestick_c3
             slug: c3
             subdir: /voicestick_c3
+          - label: MagiClick 2P5
+            board: magiclick_2p5
+            chip: esp32s3
+            hardware: magiclick_2p5
+            slug: magiclick_2p5
+            subdir: /magiclick_2p5
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -282,6 +288,11 @@ jobs:
                   "dist/voicestick_c3/voicestick-firmware-c3-merged-${version}.bin"
                   "dist/voicestick_c3/voicestick-firmware-c3-merged-${version}.bin.sha256"
                   "dist/voicestick_c3/manifest-voicestick_c3.json"
+                  "dist/magiclick_2p5/voicestick-firmware-magiclick_2p5-ota-${version}.bin"
+                  "dist/magiclick_2p5/voicestick-firmware-magiclick_2p5-ota-${version}.bin.sha256"
+                  "dist/magiclick_2p5/voicestick-firmware-magiclick_2p5-merged-${version}.bin"
+                  "dist/magiclick_2p5/voicestick-firmware-magiclick_2p5-merged-${version}.bin.sha256"
+                  "dist/magiclick_2p5/manifest-magiclick_2p5.json"
               )
           fi
           if [[ "$RELEASE_TAG" != firmware-v* ]]; then
@@ -344,7 +355,7 @@ jobs:
             -L EN
 
           version="${{ steps.ver.outputs.version }}"
-          for manifest in dist/manifest.json dist/voicestick_c3/manifest.json; do
+          for manifest in dist/manifest.json dist/voicestick_c3/manifest.json dist/magiclick_2p5/manifest.json; do
             dir="${manifest%/*}"
             destination="oss://${ALIYUN_OSS_BUCKET}/${prefix}${dir#dist}"
             for file in "$dir"/*.bin "$dir"/*.bin.sha256 "$manifest"; do
@@ -353,6 +364,7 @@ jobs:
             done
           done
           cp dist/voicestick_c3/{manifest.json,manifest-voicestick_c3.json}
+          cp dist/magiclick_2p5/{manifest.json,manifest-magiclick_2p5.json}
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2
