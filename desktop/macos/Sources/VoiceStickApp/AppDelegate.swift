@@ -282,12 +282,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func checkFirmwareUpdates(for deviceID: String) {
-        coordinator?.checkFirmwareUpdatesNow(for: deviceID) { result in
+        coordinator?.checkFirmwareUpdatesNow(for: deviceID) { [weak self] result in
+            if case .success(let versions) = result,
+               FirmwareVersion.isVersion(versions.current, olderThan: versions.latest) {
+                self?.showFirmwareUpdatePrompt(
+                    deviceID: deviceID,
+                    currentVersion: versions.current,
+                    latestVersion: versions.latest,
+                    isBelowMinimum: false
+                )
+                return
+            }
+
             let alert = NSAlert()
             switch result {
             case .success(let versions):
-                let hasUpdate = FirmwareVersion.isVersion(versions.current, olderThan: versions.latest)
-                alert.messageText = hasUpdate ? "Firmware update available" : "No newer firmware available"
+                alert.messageText = "No newer firmware available"
                 alert.informativeText = "VS-\(deviceID) is running firmware \(versions.current). The latest firmware is \(versions.latest)."
             case .failure(let error):
                 alert.alertStyle = .warning
@@ -336,10 +346,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = isBelowMinimum ? "Firmware update recommended" : "Firmware update available"
         alert.informativeText = "VS-\(deviceID) is running firmware \(currentVersion). The latest firmware is \(latestVersion)."
-        alert.addButton(withTitle: "Update Firmware")
-        alert.addButton(withTitle: "Later")
+        let canUpdate = coordinator?.isDeviceConnected(deviceID) == true
+        if canUpdate {
+            alert.addButton(withTitle: "Update Firmware")
+            alert.addButton(withTitle: "Later").keyEquivalent = "\u{1b}"
+        } else {
+            alert.informativeText += "\n\nConnect VS-\(deviceID) to install the update."
+            alert.addButton(withTitle: "OK")
+        }
         NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
+        if alert.runModal() == .alertFirstButtonReturn, canUpdate {
             updateFirmwareFromLatest(for: deviceID)
         }
     }

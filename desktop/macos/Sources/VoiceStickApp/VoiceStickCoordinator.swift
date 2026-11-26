@@ -398,6 +398,10 @@ final class VoiceStickCoordinator {
         ble.cancelFirmwareUpdate()
     }
 
+    func isDeviceConnected(_ deviceID: String) -> Bool {
+        ble.isConnected(deviceID: deviceID)
+    }
+
     func checkFirmwareUpdatesNow(for deviceID: String,
                                  completion: @escaping (Result<(current: String, latest: String), Error>) -> Void) {
         guard let info = firmwareInfoByDeviceID[deviceID], let current = info.currentVersion,
