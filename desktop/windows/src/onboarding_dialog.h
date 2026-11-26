@@ -64,8 +64,6 @@ private:
     HWND provider_combo_ = nullptr;
     HWND api_key_edit_ = nullptr;
     HWND apply_trial_button_ = nullptr;
-    HWND resource_label_ = nullptr;
-    HWND resource_combo_ = nullptr;
     HWND back_button_ = nullptr;
     HWND next_button_ = nullptr;
 
@@ -75,7 +73,6 @@ private:
     static constexpr UINT kIdProviderCombo = 3002;
     static constexpr UINT kIdApiKeyEdit = 3003;
     static constexpr UINT kIdApplyTrial = 3004;
-    static constexpr UINT kIdResourceCombo = 3005;
     static constexpr UINT kIdBack = 3006;
     static constexpr UINT kIdNext = 3007;
     static constexpr UINT kIdCancel = 3008;

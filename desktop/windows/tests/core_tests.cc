@@ -3,11 +3,13 @@
 #include "byte_utils.h"
 #include "firmware_manifest.h"
 #include "ogg_opus_muxer.h"
+#include "openai_realtime_protocol.h"
 #include "voice_stick_coordinator.h"
 
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <optional>
@@ -25,6 +27,7 @@ struct SentUiState {
     std::string state;
     std::string text;
     std::optional<std::string> device_id;
+    std::string confirmation_id;
 };
 
 class FakeBleCentral : public BleCentral {
@@ -39,8 +42,9 @@ public:
                              const std::string&) override {}
     void SendUiState(const std::string& state,
                      const std::string& text,
-                     const std::optional<std::string>& device_id) override {
-        sent_ui_states.push_back(SentUiState{state, text, device_id});
+                     const std::optional<std::string>& device_id,
+                     std::string_view confirmation_id) override {
+        sent_ui_states.push_back(SentUiState{state, text, device_id, std::string(confirmation_id)});
     }
     void SendInteractionMode(InteractionMode mode,
                              const std::optional<std::string>& device_id) override {
@@ -117,7 +121,7 @@ public:
     void SetHasRecoverableInput(bool has_recoverable_input) override {
         has_recoverable_input_set = has_recoverable_input;
     }
-    void ShowListening(const std::optional<std::string>&) override {
+    void ShowListening(const OutputProfile&, const std::optional<std::string>&) override {
         ++show_listening_count;
     }
     void ShowPartial(const std::string& text, const std::optional<std::string>&) override {
@@ -125,13 +129,17 @@ public:
     }
     void ShowFinalCountdown(const std::string& text,
                             const std::optional<std::string>&,
-                            std::function<void()> on_complete) override {
+                            int duration_ms, std::function<void()> on_complete) override {
+        countdown_duration_ms = duration_ms;
         final_countdowns.push_back(text);
         final_countdown_completion = std::move(on_complete);
     }
     void ShowPausedFinal(const std::string& text, const std::optional<std::string>&) override {
         paused_finals.push_back(text);
     }
+    std::optional<std::string> EditedConfirmationText() const override { return edited_confirmation; }
+    void ConcealConfirmation() override { ++concealed_confirmations; }
+    void ShowPasteFailure() override { ++paste_failures; }
     void ShowError(const std::string& text,
                    const std::optional<std::string>&,
                    std::function<void()> on_complete) override {
@@ -172,6 +180,10 @@ public:
     std::function<void()> final_countdown_completion;
     std::function<void()> error_completion;
     bool has_recoverable_input_set = false;
+    std::optional<std::string> edited_confirmation;
+    int countdown_duration_ms = 0;
+    int paste_failures = 0;
+    int concealed_confirmations = 0;
     int show_listening_count = 0;
     int hide_overlay_count = 0;
     int hide_subtitles_count = 0;
@@ -179,10 +191,24 @@ public:
 
 class FakeInputInjector : public InputInjector {
 public:
-    void Paste(const std::string& text, bool press_enter) override {
+    bool Paste(const std::string& text, bool press_enter) override {
+        if (!paste_succeeds) return false;
         pasted_text = text;
         pasted_enter = press_enter;
+        return true;
     }
+
+    bool PasteConfirmation(const std::string& text, bool press_enter, bool use_current_field,
+                           const std::function<void()>& conceal) override {
+        attempted_enter = press_enter;
+        used_current_field = use_current_field;
+        if (conceal) conceal();
+        return Paste(text, press_enter);
+    }
+
+    bool paste_succeeds = true;
+    bool attempted_enter = false;
+    bool used_current_field = false;
 
     std::string pasted_text;
     bool pasted_enter = false;
@@ -261,10 +287,13 @@ void TestBatteryStatusEvents() {
     assert(!parse(R"({"event":"battery_status","percent":99,"charging":false})"));
 
     auto info = parse(R"({"event":"device_info","hardware":"voicestick_c3","firmware_version":"0.4.0",)"
-                      R"("device_uuid":"5a8f3b0e-2c71-4e6b-9d12-7f84b06d3ac1"})");
+                      R"("device_uuid":"5a8f3b0e-2c71-4e6b-9d12-7f84b06d3ac1","buttons":["primary","secondary"]})");
     assert(info && info->device_uuid == "5A8F3B0E-2C71-4E6B-9D12-7F84B06D3AC1");
+    assert((info->buttons == std::vector<std::string>{"primary", "secondary"}));
     info = parse(R"({"event":"device_info","device_uuid":"invalid"})");
-    assert(info && info->device_uuid.empty());
+    assert(info && info->device_uuid.empty() && !info->buttons);
+    info = parse(R"({"event":"device_info","buttons":[]})");
+    assert(info && info->buttons && info->buttons->empty());
 
     auto ble = std::make_unique<FakeBleCentral>();
     auto* ble_ptr = ble.get();
@@ -394,6 +423,15 @@ void TestAsrProtocol() {
     const auto utterance_payload = event_payload(utterance_request, utterance_session_id);
     assert(utterance_payload.find("\"show_utterances\":true") != std::string::npos);
     assert(utterance_payload.find("\"result_type\":\"single\"") != std::string::npos);
+    assert(utterance_payload.find("voicestick_text") == std::string::npos);
+    options.cloud_text_profile = OutputProfile{OutputTarget::kFocusedApp, TextTransform::kTranslate, "zh-Hans"};
+    auto translated = AsrProtocol::MakeStartSessionFrame(config, utterance_session_id, options);
+    assert(event_payload(translated, utterance_session_id).find(
+        R"("voicestick_text":{"operation":"translate","target_language":"zh-Hans"})") != std::string::npos);
+    options.cloud_text_profile->transform = TextTransform::kRefine;
+    auto refined = AsrProtocol::MakeStartSessionFrame(config, utterance_session_id, options);
+    assert(event_payload(refined, utterance_session_id).find(
+        R"("voicestick_text":{"operation":"refine"})") != std::string::npos);
 
     const std::string segment_json =
         "{\"result\":{\"text\":\"hello world\",\"utterances\":["
@@ -409,6 +447,27 @@ void TestAsrProtocol() {
     assert(AsrProtocol::ExtractNewDefiniteSegments(segment_json, &emitted).empty());
 }
 
+void TestOpenAIRealtimeProtocol() {
+    const auto update = OpenAITranscriptionSessionUpdate({"VoiceStick", "<invalid>"});
+    assert(update.find(R"("type":"session.update")") != std::string::npos);
+    assert(update.find(R"("rate":24000)") != std::string::npos);
+    assert(update.find(R"("model":"gpt-live-transcribe")") != std::string::npos);
+    assert(update.find(R"("keywords":["VoiceStick"])") != std::string::npos);
+
+    OpenAIOpusDecoder decoder;
+    assert(decoder.Reset());
+    OggOpusMuxer muxer(16000, 1);
+    const auto ogg = muxer.Append(ByteVector{0xf8, 0xff, 0xfe}, false);
+    const auto pcm = decoder.Decode(ogg);
+    assert(pcm && pcm->size() == 480);
+    const auto end = decoder.Decode(muxer.Finish());
+    assert(end && end->empty());
+    assert(!decoder.Decode(ByteVector{0, 1, 2}));
+
+    const std::int16_t samples[] = {0x1234, -2};
+    assert(OpenAIAudioAppend(samples) == R"({"type":"input_audio_buffer.append","audio":"NBL+/w=="})");
+}
+
 void TestAppConfig() {
     AppConfig cloud = AppConfig::Defaults();
     assert(cloud.asr_provider == AsrProvider::kVoiceStickCloud);
@@ -419,9 +478,21 @@ void TestAppConfig() {
     cloud.voicestick_cloud_url = "  wss://example.test/asr?token=1  ";
     assert(cloud.ActiveWebsocketUrl() == "wss://example.test/asr?token=1");
 
-    AppConfig volcengine = AppConfig::Defaults();
-    volcengine.asr_provider = AsrProvider::kVolcengine;
-    assert(volcengine.ActiveWebsocketUrl().starts_with("wss://openspeech.bytedance.com/"));
+    AppConfig migrated = cloud;
+    migrated.asr_provider = AsrProviderFromName("volcengine");
+    migrated.volcengine_api_key = "legacy-key";
+    assert(migrated.asr_provider == AsrProvider::kVoiceStickCloud);
+    assert(migrated.ActiveApiKey().empty());
+    assert(migrated.ActiveWebsocketUrl() == cloud.ActiveWebsocketUrl());
+
+    AppConfig openai = cloud;
+    openai.asr_provider = AsrProviderFromName("openai");
+    openai.SetActiveApiKey(" example ");
+    assert(openai.ActiveApiKey() == "example");
+    assert(openai.ActiveWebsocketUrl() == "wss://api.openai.com/v1/realtime?intent=transcription");
+    assert(TextTransformFromName("polish") == TextTransform::kRefine);
+    assert(TextTransformFromName("refine") == TextTransform::kRefine);
+    assert(TextTransformName(TextTransform::kRefine) == "polish");
 
     PairedDeviceEntry entry;
     entry.device_id = "5A74";
@@ -649,13 +720,15 @@ void TestCoordinatorAcceptsAudioFramesAfterButtonUpUntilEnd() {
 }
 
 void TestCoordinatorPrimaryPausesPendingConfirmation() {
+    auto config = AppConfig::Defaults();
+    config.auto_enter = true;
     auto ble = std::make_unique<FakeBleCentral>();
     auto* ble_ptr = ble.get();
     auto asr = std::make_unique<FakeAsrClient>();
     auto* asr_ptr = asr.get();
     FakeUi ui;
     FakeInputInjector input;
-    VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
+    VoiceStickCoordinator coordinator(config, std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
     ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 9));
@@ -663,7 +736,7 @@ void TestCoordinatorPrimaryPausesPendingConfirmation() {
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
     ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 9));
     ble_ptr->on_audio_frame("5A74", EmptyEndFrame(9, 2));
-    asr_ptr->on_final("hello");
+    asr_ptr->on_final({"hello"});
 
     ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary"));
 
@@ -673,6 +746,79 @@ void TestCoordinatorPrimaryPausesPendingConfirmation() {
     assert(ui.paused_finals.back() == "hello");
     assert(ble_ptr->sent_ui_states.back().state == "pending_confirmation");
     assert(ble_ptr->sent_ui_states.back().text == "hello");
+    assert(ui.countdown_duration_ms == 1000);
+    assert(!ble_ptr->sent_ui_states.back().confirmation_id.empty());
+
+    ui.final_countdown_completion();
+    assert(input.pasted_text.empty());
+
+    StateEvent shake;
+    shake.event = "confirmation_shake";
+    const auto confirmation_id = ble_ptr->sent_ui_states.back().confirmation_id;
+    shake.confirmation_id = confirmation_id;
+    ble_ptr->on_state_event("another-device", shake);
+    assert(ui.hide_overlay_count == 0);
+
+    ble_ptr->on_state_event("5A74", shake);
+    assert(ui.hide_overlay_count == 1);
+    assert(coordinator.RestoreLastInputConfirmation());
+    assert(ble_ptr->sent_ui_states.back().confirmation_id != confirmation_id);
+    ble_ptr->on_state_event("5A74", shake);
+    assert(ui.hide_overlay_count == 1);
+
+    ui.edited_confirmation = "edited";
+    input.paste_succeeds = false;
+    const auto retry_id = ble_ptr->sent_ui_states.back().confirmation_id;
+    coordinator.ConfirmPendingPaste();
+    assert(ui.paused_finals.size() == 2);
+    assert(ble_ptr->sent_ui_states.back().confirmation_id == retry_id);
+    assert(input.attempted_enter && !input.used_current_field);
+    assert(ui.concealed_confirmations == 1);
+    assert(ui.paste_failures == 1);
+    assert(input.pasted_text.empty());
+
+    input.paste_succeeds = true;
+    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary"));
+    assert(input.pasted_text == "edited");
+    assert(input.used_current_field && !input.pasted_enter);
+    assert(ui.concealed_confirmations == 2);
+    assert(ui.hide_overlay_count == 2);
+}
+
+void TestCoordinatorCloudOutputWithManualAndImmediateConfirmation() {
+    auto config = AppConfig::Defaults();
+    config.default_output_profile.transform = TextTransform::kTranslate;
+    config.send_confirmation_ms = -1;
+    auto ble = std::make_unique<FakeBleCentral>();
+    auto* ble_ptr = ble.get();
+    auto asr = std::make_unique<FakeAsrClient>();
+    auto* asr_ptr = asr.get();
+    FakeUi ui;
+    FakeInputInjector input;
+    VoiceStickCoordinator coordinator(config, std::move(ble), std::move(asr), &ui, &input);
+    coordinator.Start();
+
+    const auto transcribe = [&](std::uint32_t session, std::string text) {
+        ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", session));
+        ble_ptr->on_audio_frame("5A74", AudioDataFrame(session, 1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(520));
+        ble_ptr->on_audio_frame("5A74", EmptyEndFrame(session, 2));
+        assert(asr_ptr->last_options.cloud_text_profile == config.default_output_profile);
+        asr_ptr->on_final({std::move(text), true});
+    };
+
+    transcribe(11, "cloud translation");
+    assert(ui.paused_finals == std::vector<std::string>{"cloud translation"});
+    assert(input.pasted_text.empty());
+    assert(ui.final_countdowns.empty());
+    coordinator.ConfirmPendingPaste();
+    assert(input.pasted_text == "cloud translation");
+
+    coordinator.SetSendConfirmationDuration(0);
+    transcribe(12, "another translation");
+    assert(input.pasted_text == "another translation");
+    assert(ui.paused_finals.size() == 1);
+    assert(ui.final_countdowns.empty());
 }
 
 void TestCoordinatorOtherDeviceDuringRecordingGetsReady() {
@@ -735,7 +881,7 @@ void TestCoordinatorSubtitleOutputSkipsPaste() {
     subtitle_asr_ptr->on_partial("interim subtitle");
     assert(!ui.partials.empty());
     assert(ui.partials.back() == "interim subtitle");
-    subtitle_asr_ptr->on_final("hello subtitle");
+    subtitle_asr_ptr->on_final({"hello subtitle"});
 
     assert(input.pasted_text.empty());
     assert(!ui.subtitles.empty());
@@ -787,7 +933,7 @@ void TestCoordinatorSubtitleFinalDoesNotBlockNextSession() {
 
     ble_ptr->on_audio_frame("5A74", EmptyEndFrame(12, 2));
     assert(subtitle_asrs[0]->started);
-    subtitle_asrs[0]->on_final("first late subtitle");
+    subtitle_asrs[0]->on_final({"first late subtitle"});
     assert(!ui.subtitles.empty());
     assert(ui.subtitles.back() == "5A74:first late subtitle:blue");
     const auto ready_count_after_late_final = std::count_if(
@@ -949,7 +1095,8 @@ void TestCoordinatorKeepsPartialForManualConfirmationAfterAsrError() {
     ble_ptr->on_state_event("5A74", ButtonEvent("button_click", "secondary"));
     assert(ble_ptr->sent_ui_states.back().state == "ready");
     assert(input.pasted_text == "already recognized");
-    assert(!coordinator.RestoreLastInputConfirmation());
+    assert(coordinator.RestoreLastInputConfirmation());
+    assert(ui.paused_finals.back() == "already recognized");
 }
 
 void TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError() {
@@ -979,12 +1126,14 @@ void TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError() {
 } // namespace
 
 int main() {
+    _set_error_mode(_OUT_TO_STDERR);
     TestDeviceIds();
     TestBatteryStatusEvents();
     TestAudioFrameParsing();
     TestStateParsing();
     TestOggMuxer();
     TestAsrProtocol();
+    TestOpenAIRealtimeProtocol();
     TestAppConfig();
     TestFirmwareManifestParsingAndVersionCompare();
     TestFirmwareWindowsAppVersionRequirement();
@@ -994,6 +1143,7 @@ int main() {
     TestCoordinatorSecondaryCancelsFinalizing();
     TestCoordinatorAcceptsAudioFramesAfterButtonUpUntilEnd();
     TestCoordinatorPrimaryPausesPendingConfirmation();
+    TestCoordinatorCloudOutputWithManualAndImmediateConfirmation();
     TestCoordinatorOtherDeviceDuringRecordingGetsReady();
     TestCoordinatorSubtitleOutputSkipsPaste();
     TestCoordinatorSubtitleFinalDoesNotBlockNextSession();

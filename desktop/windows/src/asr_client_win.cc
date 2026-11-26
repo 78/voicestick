@@ -1,10 +1,12 @@
 #include "asr_client_win.h"
 
 #include "asr_protocol.h"
+#include "cJSON.h"
 
 #include <bcrypt.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -37,6 +39,7 @@ constexpr int kAsrResolveTimeoutMs = 5000;
 constexpr int kAsrConnectTimeoutMs = 5000;
 constexpr int kAsrSendTimeoutMs = 5000;
 constexpr int kAsrReceiveTimeoutMs = 15000;
+constexpr auto kCloudIdleTimeout = std::chrono::minutes(30);
 
 void SetAsrWinHttpTimeouts(HINTERNET handle) {
     if (!handle) return;
@@ -67,9 +70,13 @@ std::optional<std::wstring> WinHttpUrlFromWebSocketUrl(std::string_view websocke
 } // namespace
 
 AsrClientWin::AsrClientWin(AppConfig config, std::function<void(std::function<void()>)> post_to_ui)
-    : config_(std::move(config)), post_to_ui_(std::move(post_to_ui)) {}
+    : config_(std::move(config)), post_to_ui_(std::move(post_to_ui)) {
+    session_timeout_worker_ = std::jthread([this](std::stop_token stop) { RunSessionTimeouts(stop); });
+}
 
 AsrClientWin::~AsrClientWin() {
+    session_timeout_worker_.request_stop();
+    if (session_timeout_worker_.joinable()) session_timeout_worker_.join();
     ShutdownReusableConnection();
     callback_generation_->fetch_add(1);
 }
@@ -77,19 +84,14 @@ AsrClientWin::~AsrClientWin() {
 bool AsrClientWin::Start(AsrSessionOptions options) {
     SetLastStartError({});
     if (config_.ActiveApiKey().empty()) {
-        SetLastStartError("Missing ASR API key");
+        SetLastStartError(UsesOpenAI() ? "Missing OpenAI API key" : "Missing ASR API key");
         return false;
     }
-    session_options_ = std::move(options);
-    if (session_options_.hotwords.empty()) {
-        session_options_.hotwords = config_.asr_hotwords;
-    }
-    emitted_definite_segment_keys_.clear();
-    return StartReusableSession();
+    if (options.hotwords.empty()) options.hotwords = config_.asr_hotwords;
+    return StartReusableSession(std::move(options));
 }
 
-bool AsrClientWin::StartReusableSession() {
-    std::string ready_session_id;
+bool AsrClientWin::StartReusableSession(AsrSessionOptions options) {
     bool has_ready_websocket = false;
     {
         std::lock_guard lock(mutex_);
@@ -97,24 +99,29 @@ bool AsrClientWin::StartReusableSession() {
             last_start_error_ = "ASR session already active";
             return false;
         }
+        if (UsesOpenAI() && !decoder_.Reset()) {
+            last_start_error_ = "Could not initialize the Opus decoder.";
+            return false;
+        }
         callback_generation_->fetch_add(1);
+        session_options_ = std::move(options);
+        openai_pcm_samples_ = 0;
+        realtime_item_.clear();
+        emitted_definite_segment_keys_.clear();
+        cloud_text_requested_ = false;
         current_session_id_ = GenerateSessionId();
         latest_session_transcript_.clear();
         queued_audio_chunks_.clear();
         session_state_ = SessionState::kStarting;
+        SetSessionTimeout(std::chrono::seconds(0));
         if (connection_state_ == ConnectionState::kReady && websocket_) {
             has_ready_websocket = true;
-            ready_session_id = current_session_id_;
         }
         if (connection_state_ == ConnectionState::kConnecting && worker_.joinable()) {
             return true;
         }
     }
-    if (has_ready_websocket) {
-        return SendReusableFrameOrFail(
-            AsrProtocol::MakeStartSessionFrame(config_, ready_session_id, session_options_),
-            "start ASR session");
-    }
+    if (has_ready_websocket) return SendStartSession();
 
     ShutdownReusableConnection();
     {
@@ -124,14 +131,50 @@ bool AsrClientWin::StartReusableSession() {
             session_state_ = SessionState::kStarting;
         }
         connection_state_ = ConnectionState::kConnecting;
+        cloud_supports_text_ = false;
+        last_realtime_item_.clear();
+        if (UsesOpenAI()) SetSessionTimeout(std::chrono::seconds(15));
     }
     cancelled_ = false;
     worker_ = std::thread([this] { RunReusableWebSocket(); });
     return true;
 }
 
+bool AsrClientWin::SendStartSession() {
+    if (UsesOpenAI()) {
+        std::string error;
+        {
+            std::lock_guard lock(mutex_);
+            if (session_state_ != SessionState::kStarting || connection_state_ != ConnectionState::kReady) return true;
+            session_state_ = SessionState::kStreaming;
+            SetSessionTimeout(std::chrono::seconds(0));
+            for (const auto& chunk : queued_audio_chunks_) {
+                error = SendOpenAIAudioLocked(chunk.data, chunk.is_last);
+                if (!error.empty()) break;
+            }
+            queued_audio_chunks_.clear();
+        }
+        if (!error.empty()) FailReusableSession(error);
+        return true;
+    }
+    ByteVector frame;
+    {
+        std::lock_guard lock(mutex_);
+        if (session_state_ != SessionState::kStarting) return false;
+        auto options = session_options_;
+        if (!cloud_supports_text_) options.cloud_text_profile.reset();
+        cloud_text_requested_ = options.cloud_text_profile.has_value();
+        frame = AsrProtocol::MakeStartSessionFrame(config_, current_session_id_, options);
+    }
+    return SendReusableFrameOrFail(frame, "start ASR session");
+}
+
 void AsrClientWin::SendOggOpusChunk(std::span<const std::uint8_t> data, bool is_last) {
-    SendReusableAudio(data, is_last);
+    if (UsesOpenAI()) {
+        SendOpenAIAudio(data, is_last);
+    } else {
+        SendReusableAudio(data, is_last);
+    }
 }
 
 void AsrClientWin::Cancel() {
@@ -149,16 +192,24 @@ void AsrClientWin::CancelReusableSession() {
     queued_audio_chunks_.clear();
     latest_session_transcript_.clear();
     emitted_definite_segment_keys_.clear();
-    if (session_state_ == SessionState::kStarting ||
-        session_state_ == SessionState::kStreaming ||
-        session_state_ == SessionState::kFinishing) {
+    SetSessionTimeout(std::chrono::seconds(0));
+    if (UsesOpenAI() && session_state_ != SessionState::kIdle) {
+        cancelled_ = true;
+        connection_state_ = ConnectionState::kDisconnected;
+        if (websocket_) {
+            WinHttpWebSocketShutdown(websocket_, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+        }
+    } else if (session_state_ == SessionState::kStarting ||
+               session_state_ == SessionState::kStreaming ||
+               session_state_ == SessionState::kFinishing ||
+               session_state_ == SessionState::kTransforming) {
         if (websocket_ && !current_session_id_.empty()) {
             SendFrame(websocket_, AsrProtocol::MakeCancelSessionFrame(
                 config_, current_session_id_, session_options_));
         }
     }
     current_session_id_.clear();
-    session_state_ = SessionState::kIdle;
+    MarkSessionIdle();
 }
 
 void AsrClientWin::ShutdownReusableConnection() {
@@ -167,7 +218,7 @@ void AsrClientWin::ShutdownReusableConnection() {
     {
         std::lock_guard lock(mutex_);
         if (websocket_) {
-            if (connection_state_ == ConnectionState::kReady) {
+            if (!UsesOpenAI() && connection_state_ == ConnectionState::kReady) {
                 SendFrame(websocket_,
                           AsrProtocol::MakeFinishConnectionFrame(config_, session_options_));
             }
@@ -180,6 +231,7 @@ void AsrClientWin::ShutdownReusableConnection() {
                 websocket_ = nullptr;
             }
         }
+        SetSessionTimeout(std::chrono::seconds(0));
         queued_audio_chunks_.clear();
         current_session_id_.clear();
         latest_session_transcript_.clear();
@@ -241,15 +293,16 @@ void AsrClientWin::RunReusableWebSocket() {
     }
     SetAsrWinHttpTimeouts(request);
 
-    AddHeader(request, "X-Api-Key", config_.ActiveApiKey());
-    AddHeader(request, "X-Api-Request-Id", GenerateSessionId());
-    AddHeader(request, "X-Api-Sequence", "-1");
-    if (config_.asr_provider == AsrProvider::kVoiceStickCloud) {
+    if (UsesOpenAI()) {
+        AddHeader(request, "Authorization", "Bearer " + config_.ActiveApiKey());
+    } else {
+        AddHeader(request, "X-Api-Key", config_.ActiveApiKey());
+        AddHeader(request, "X-Api-Request-Id", GenerateSessionId());
+        AddHeader(request, "X-Api-Sequence", "-1");
+        AddHeader(request, "X-VoiceStick-Text", "1");
         if (!config_.paired_device_ids.empty()) {
             AddHeader(request, "X-Device-Id", config_.paired_device_ids.front());
         }
-    } else {
-        AddHeader(request, "X-Api-Resource-Id", config_.resource_id);
     }
 
     if (!WinHttpSetOption(request, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
@@ -278,18 +331,28 @@ void AsrClientWin::RunReusableWebSocket() {
     WinHttpCloseHandle(request);
     request = nullptr;
 
+    AsrSessionOptions connection_options;
+    bool should_open;
     {
         std::lock_guard lock(mutex_);
-        websocket_ = websocket;
-        connection_state_ = ConnectionState::kConnecting;
+        should_open = !cancelled_;
+        if (should_open) {
+            websocket_ = websocket;
+            connection_options = session_options_;
+        }
     }
-    if (!SendReusableFrameOrFail(AsrProtocol::MakeStartConnectionFrame(config_, session_options_),
-                                 "start ASR connection")) {
-        CloseHandles(session, connect, request, websocket);
-        return;
+    if (should_open && UsesOpenAI()) {
+        if (!SendTextFrame(websocket, OpenAITranscriptionSessionUpdate(connection_options.hotwords))) {
+            FailReusableSession("Could not configure the OpenAI Realtime session.");
+        }
+    } else if (should_open) {
+        connection_options.cloud_text_profile.reset();
+        SendReusableFrameOrFail(AsrProtocol::MakeStartConnectionFrame(config_, connection_options),
+                                "start ASR connection");
     }
+    ByteVector message;
     while (!cancelled_) {
-        ReceiveOneReusable(websocket);
+        ReceiveOneReusable(websocket, &message);
     }
     {
         std::lock_guard lock(mutex_);
@@ -325,7 +388,7 @@ bool AsrClientWin::SendFrame(HINTERNET websocket, const ByteVector& frame) {
                                 static_cast<DWORD>(frame.size())) == ERROR_SUCCESS;
 }
 
-void AsrClientWin::ReceiveOneReusable(HINTERNET websocket) {
+void AsrClientWin::ReceiveOneReusable(HINTERNET websocket, ByteVector* message) {
     std::array<std::uint8_t, 64 * 1024> buffer{};
     DWORD bytes_read = 0;
     WINHTTP_WEB_SOCKET_BUFFER_TYPE type{};
@@ -343,12 +406,251 @@ void AsrClientWin::ReceiveOneReusable(HINTERNET websocket) {
         FailReusableSession("ASR WebSocket disconnected");
         return;
     }
-    if (bytes_read == 0) return;
-    if (type != WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE &&
-        type != WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE) {
+    constexpr std::size_t kMaxMessageBytes = 1024 * 1024;
+    if (message->size() + bytes_read > kMaxMessageBytes) {
+        FailReusableSession("ASR WebSocket message is too large");
         return;
     }
-    HandleReusableResponse(std::span(buffer.data(), bytes_read), websocket);
+    message->insert(message->end(), buffer.begin(), buffer.begin() + bytes_read);
+    if (type == WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE ||
+        type == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE) {
+        return;
+    }
+    if (!message->empty()) {
+        if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+            const std::string_view json(reinterpret_cast<const char*>(message->data()), message->size());
+            if (UsesOpenAI()) HandleOpenAIEvent(json);
+            else HandleCloudTextMessage(json);
+        } else if (!UsesOpenAI()) {
+            HandleReusableResponse(*message, websocket);
+        }
+    }
+    message->clear();
+}
+
+void AsrClientWin::HandleCloudTextMessage(std::string_view message) {
+    if (config_.asr_provider != AsrProvider::kVoiceStickCloud) return;
+    const std::unique_ptr<cJSON, decltype(&cJSON_Delete)> json(
+        cJSON_ParseWithLength(message.data(), message.size()), cJSON_Delete);
+    const auto* type = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json.get(), "type"));
+    if (!type) return;
+    if (std::string_view(type) == "voicestick.text.ready") {
+        std::lock_guard lock(mutex_);
+        if (connection_state_ == ConnectionState::kConnecting) cloud_supports_text_ = true;
+        return;
+    }
+    if (std::string_view(type) != "voicestick.text.result") return;
+    const auto* session_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json.get(), "session_id"));
+    if (!session_id) return;
+    const auto* text = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json.get(), "text"));
+    const auto* error = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json.get(), "error"));
+    FinishCloudText(session_id, text ? std::optional<std::string>(text) : std::nullopt,
+                    error ? error : "VoiceStick Cloud translation failed.");
+}
+
+void AsrClientWin::SetSessionTimeout(std::chrono::seconds duration) {
+    timeout_at_ = duration.count() == 0 ? std::chrono::steady_clock::time_point{}
+                                        : std::chrono::steady_clock::now() + duration;
+    timeout_changed_.notify_one();
+}
+
+void AsrClientWin::MarkSessionIdle() {
+    session_state_ = SessionState::kIdle;
+    if (!UsesOpenAI() && connection_state_ == ConnectionState::kReady) {
+        SetSessionTimeout(kCloudIdleTimeout);
+    }
+}
+
+void AsrClientWin::RunSessionTimeouts(std::stop_token stop) {
+    std::unique_lock lock(mutex_);
+    while (!stop.stop_requested()) {
+        if (timeout_at_ == std::chrono::steady_clock::time_point{}) {
+            timeout_changed_.wait(lock, stop, [this] {
+                return timeout_at_ != std::chrono::steady_clock::time_point{};
+            });
+            continue;
+        }
+        const auto deadline = timeout_at_;
+        if (timeout_changed_.wait_until(lock, stop, deadline, [this, deadline] {
+                return deadline != timeout_at_;
+            }) || stop.stop_requested()) {
+            continue;
+        }
+        const auto state = session_state_;
+        const auto session_id = current_session_id_;
+        SetSessionTimeout(std::chrono::seconds(0));
+        if (state == SessionState::kIdle && !UsesOpenAI() &&
+            connection_state_ == ConnectionState::kReady && websocket_) {
+            // WebSocket receive can block independently of the HTTP receive timeout.
+            cancelled_ = true;
+            connection_state_ = ConnectionState::kDisconnected;
+            WinHttpWebSocketClose(websocket_, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+            websocket_ = nullptr;
+            continue;
+        }
+        lock.unlock();
+        if (state == SessionState::kTransforming) {
+            FinishCloudText(session_id, std::nullopt, "VoiceStick Cloud text processing timed out.");
+        } else if (!session_id.empty()) {
+            FailReusableSession(state == SessionState::kStarting
+                                    ? "OpenAI Realtime session could not start in time."
+                                    : "OpenAI Realtime did not return a final transcript in time.",
+                                {}, session_id, state);
+        }
+        lock.lock();
+    }
+}
+
+void AsrClientWin::FinishCloudText(std::string_view session_id, std::optional<std::string> text, std::string error) {
+    std::string raw;
+    bool refine;
+    std::uint64_t generation;
+    {
+        std::lock_guard lock(mutex_);
+        if (session_state_ != SessionState::kTransforming || session_id != current_session_id_) return;
+        SetSessionTimeout(std::chrono::seconds(0));
+        refine = session_options_.cloud_text_profile->transform == TextTransform::kRefine;
+        raw = std::exchange(latest_session_transcript_, {});
+        generation = callback_generation_->load();
+        current_session_id_.clear();
+        emitted_definite_segment_keys_.clear();
+        queued_audio_chunks_.clear();
+        MarkSessionIdle();
+    }
+    if (text && (!text->empty() || raw.empty())) {
+        raw = std::move(*text);
+    } else if (!refine && !raw.empty()) {
+        PostSessionError(generation, std::move(error), {});
+        return;
+    }
+    PostSessionCallback(generation, [final = on_final, output = std::move(raw)] {
+        if (final) final({output, true});
+    });
+}
+
+void AsrClientWin::HandleOpenAIEvent(std::string_view message) {
+    const std::unique_ptr<cJSON, decltype(&cJSON_Delete)> json(
+        cJSON_ParseWithLength(message.data(), message.size()), cJSON_Delete);
+    const auto field = [](const cJSON* object, const char* key) -> std::string_view {
+        const auto* value = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(object, key));
+        return value ? value : "";
+    };
+    const auto type = field(json.get(), "type");
+    if (type == "session.updated") {
+        {
+            std::lock_guard lock(mutex_);
+            if (cancelled_ || connection_state_ != ConnectionState::kConnecting) return;
+            connection_state_ = ConnectionState::kReady;
+        }
+        SendStartSession();
+        return;
+    }
+    if (type == "error") {
+        const auto error = field(cJSON_GetObjectItemCaseSensitive(json.get(), "error"), "message");
+        const auto key = config_.ActiveApiKey();
+        FailReusableSession(error.empty() || (!key.empty() && error.find(key) != std::string_view::npos)
+                                ? "OpenAI Realtime transcription failed." : std::string(error));
+        return;
+    }
+
+    const auto item = field(json.get(), "item_id");
+    if (item.empty()) return;
+    std::string text;
+    std::string session_id;
+    std::uint64_t generation = 0;
+    {
+        std::lock_guard lock(mutex_);
+        if ((session_state_ != SessionState::kStreaming && session_state_ != SessionState::kFinishing) ||
+            item == last_realtime_item_ || (!realtime_item_.empty() && item != realtime_item_)) {
+            return;
+        }
+
+        if (type == "input_audio_buffer.committed") {
+            if (session_state_ == SessionState::kFinishing) realtime_item_ = item;
+            return;
+        }
+        if (type == "conversation.item.input_audio_transcription.delta") {
+            const auto delta = field(json.get(), "delta");
+            if (delta.empty()) return;
+            realtime_item_ = item;
+            latest_session_transcript_.append(delta);
+            text = latest_session_transcript_;
+        } else if (type == "conversation.item.input_audio_transcription.completed" &&
+                   session_state_ == SessionState::kFinishing) {
+            const auto transcript = field(json.get(), "transcript");
+            text = transcript.empty() ? latest_session_transcript_ : std::string(transcript);
+            const auto first = text.find_first_not_of(" \r\n\t");
+            const auto last = text.find_last_not_of(" \r\n\t");
+            text = first == std::string::npos ? "" : text.substr(first, last - first + 1);
+            last_realtime_item_ = item;
+            latest_session_transcript_.clear();
+            current_session_id_.clear();
+            session_state_ = SessionState::kIdle;
+            SetSessionTimeout(std::chrono::seconds(0));
+        } else if (type == "conversation.item.input_audio_transcription.failed") {
+            session_id = current_session_id_;
+        } else {
+            return;
+        }
+        generation = callback_generation_->load();
+    }
+    if (!session_id.empty()) {
+        const auto error = field(cJSON_GetObjectItemCaseSensitive(json.get(), "error"), "message");
+        const auto key = config_.ActiveApiKey();
+        FailReusableSession(error.empty() || (!key.empty() && error.find(key) != std::string_view::npos)
+                                ? "OpenAI Realtime transcription failed." : std::string(error), {}, session_id);
+    } else if (type == "conversation.item.input_audio_transcription.delta") {
+        PostSessionCallback(generation, [partial = on_partial, text = std::move(text)] {
+            if (partial) partial(text);
+        });
+    } else {
+        PostSessionCallback(generation, [final = on_final, text = std::move(text)] {
+            if (final) final({text});
+        });
+    }
+}
+
+void AsrClientWin::SendOpenAIAudio(std::span<const std::uint8_t> data, bool is_last) {
+    std::string error;
+    std::string session_id;
+    {
+        std::lock_guard lock(mutex_);
+        if (session_state_ == SessionState::kStarting) {
+            queued_audio_chunks_.push_back({ByteVector(data.begin(), data.end()), is_last});
+            return;
+        }
+        if (session_state_ != SessionState::kStreaming) return;
+        session_id = current_session_id_;
+        error = SendOpenAIAudioLocked(data, is_last);
+    }
+    if (!error.empty()) FailReusableSession(error, {}, session_id);
+}
+
+std::string AsrClientWin::SendOpenAIAudioLocked(std::span<const std::uint8_t> data, bool is_last) {
+    const auto pcm = decoder_.Decode(data);
+    if (!pcm) return "Could not decode VoiceStick Opus audio.";
+    if (!pcm->empty()) {
+        const auto append = OpenAIAudioAppend(*pcm);
+        if (!SendTextFrame(websocket_, append)) return "Could not send audio to OpenAI Realtime.";
+        openai_pcm_samples_ += pcm->size();
+    }
+    if (is_last) {
+        if (openai_pcm_samples_ < kOpenAIRealtimeSampleRate / 10) {
+            return "OpenAI Realtime needs at least 100 ms of audio.";
+        }
+        if (!SendTextFrame(websocket_, R"({"type":"input_audio_buffer.commit"})")) {
+            return "Could not commit audio to OpenAI Realtime.";
+        }
+        session_state_ = SessionState::kFinishing;
+        SetSessionTimeout(std::chrono::seconds(20));
+    }
+    return {};
+}
+
+bool AsrClientWin::SendTextFrame(HINTERNET websocket, std::string_view json) {
+    return websocket && !json.empty() &&
+           WinHttpWebSocketSend(websocket, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                                const_cast<char*>(json.data()), static_cast<DWORD>(json.size())) == ERROR_SUCCESS;
 }
 
 void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HINTERNET websocket) {
@@ -373,18 +675,12 @@ void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HI
     const auto& response = *event_response;
     switch (response.event.value_or(static_cast<AsrEvent>(0))) {
     case AsrEvent::kConnectionStarted: {
-        std::string session_id;
-        bool should_start_session = false;
         {
             std::lock_guard lock(mutex_);
             connection_state_ = ConnectionState::kReady;
-            should_start_session = session_state_ == SessionState::kStarting;
-            session_id = current_session_id_;
+            if (session_state_ == SessionState::kIdle) MarkSessionIdle();
         }
-        if (should_start_session && !session_id.empty()) {
-            SendReusableFrameOrFail(AsrProtocol::MakeStartSessionFrame(config_, session_id, session_options_),
-                                    "start ASR session");
-        }
+        SendStartSession();
         break;
     }
 
@@ -405,7 +701,7 @@ void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HI
         bool should_flush = false;
         {
             std::lock_guard lock(mutex_);
-            if (response.session_id == current_session_id_) {
+            if (session_state_ == SessionState::kStarting && response.session_id == current_session_id_) {
                 session_state_ = SessionState::kStreaming;
                 should_flush = true;
             }
@@ -421,7 +717,7 @@ void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HI
         std::uint64_t generation;
         {
             std::lock_guard lock(mutex_);
-            if (response.session_id != current_session_id_) return;
+            if (response.session_id != current_session_id_ || session_state_ == SessionState::kTransforming) return;
             generation = callback_generation_->load();
             transcript = AsrProtocol::ExtractTranscript(response.payload_text);
             if (!transcript.empty()) latest_session_transcript_ = transcript;
@@ -442,28 +738,42 @@ void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HI
 
     case AsrEvent::kSessionFinished: {
         std::string final_text;
+        bool wait_for_cloud_text;
         std::vector<AsrSegment> segments;
         std::uint64_t generation;
         {
             std::lock_guard lock(mutex_);
-            if (response.session_id != current_session_id_) return;
+            if (response.session_id != current_session_id_ || session_state_ == SessionState::kTransforming) return;
             generation = callback_generation_->load();
             final_text = AsrProtocol::ExtractTranscript(response.payload_text);
             if (final_text.empty()) final_text = latest_session_transcript_;
-            segments = AsrProtocol::ExtractNewDefiniteSegments(
-                response.payload_text, &emitted_definite_segment_keys_);
-            current_session_id_.clear();
-            latest_session_transcript_.clear();
-            emitted_definite_segment_keys_.clear();
-            queued_audio_chunks_.clear();
-            session_state_ = SessionState::kIdle;
+            wait_for_cloud_text = cloud_text_requested_ && !final_text.empty();
+            if (wait_for_cloud_text) {
+                latest_session_transcript_ = final_text;
+                session_state_ = SessionState::kTransforming;
+                SetSessionTimeout(std::chrono::seconds(8));
+            } else {
+                segments = AsrProtocol::ExtractNewDefiniteSegments(
+                    response.payload_text, &emitted_definite_segment_keys_);
+                current_session_id_.clear();
+                latest_session_transcript_.clear();
+                emitted_definite_segment_keys_.clear();
+                queued_audio_chunks_.clear();
+                MarkSessionIdle();
+            }
+        }
+        if (wait_for_cloud_text) {
+            PostSessionCallback(generation, [partial = on_partial, raw = std::move(final_text)] {
+                if (partial) partial(raw);
+            });
+            break;
         }
         PostSessionCallback(generation, [final = on_final, segment_callback = on_segment,
             final_text = std::move(final_text), segments = std::move(segments)] {
             if (segment_callback) {
                 for (const auto& segment : segments) segment_callback(segment);
             }
-            if (final) final(final_text);
+            if (final) final({final_text});
         });
         break;
     }
@@ -476,7 +786,7 @@ void AsrClientWin::HandleReusableResponse(std::span<const std::uint8_t> data, HI
                 latest_session_transcript_.clear();
                 emitted_definite_segment_keys_.clear();
                 queued_audio_chunks_.clear();
-                session_state_ = SessionState::kIdle;
+                MarkSessionIdle();
             }
         }
         break;
@@ -500,7 +810,7 @@ void AsrClientWin::SendReusableAudio(std::span<const std::uint8_t> data, bool is
             queued_audio_chunks_.push_back(QueuedAudioChunk{ByteVector(data.begin(), data.end()), is_last});
             return;
         }
-        if (state == SessionState::kFinishing) return;
+        if (state != SessionState::kStreaming) return;
         session_id = current_session_id_;
     }
     if (session_id.empty()) {
@@ -535,13 +845,23 @@ void AsrClientWin::FinishReusableSessionIfNeeded() {
                             "finish ASR session");
 }
 
-void AsrClientWin::FailReusableSession(const std::string& message, std::optional<std::string> upgrade_url) {
+void AsrClientWin::FailReusableSession(const std::string& message, std::optional<std::string> upgrade_url,
+                                       std::string_view expected_session_id,
+                                       std::optional<SessionState> expected_state) {
     bool had_active_session = false;
     std::string partial_text;
     std::uint64_t generation;
     {
         std::lock_guard lock(mutex_);
+        if ((!expected_session_id.empty() && expected_session_id != current_session_id_) ||
+            (expected_state && *expected_state != session_state_)) {
+            return;
+        }
         if (cancelled_.exchange(true)) return;
+        SetSessionTimeout(std::chrono::seconds(0));
+        if (UsesOpenAI() && websocket_) {
+            WinHttpWebSocketShutdown(websocket_, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+        }
         had_active_session = session_state_ != SessionState::kIdle;
         queued_audio_chunks_.clear();
         current_session_id_.clear();

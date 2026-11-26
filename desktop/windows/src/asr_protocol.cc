@@ -285,7 +285,7 @@ std::string AsrProtocol::SegmentKey(const AsrSegment& segment) {
 }
 
 std::string AsrProtocol::SessionPayload(const AppConfig& config, const AsrSessionOptions& options) {
-    return "{\"user\":{\"uid\":\"voice-stick-local\"},"
+    auto payload = "{\"user\":{\"uid\":\"voice-stick-local\"},"
            "\"audio\":{\"format\":\"ogg\",\"codec\":\"opus\",\"rate\":16000,\"bits\":16,\"channel\":1},"
            "\"request\":{\"model_name\":\"bigmodel\",\"enable_nonstream\":true,"
            "\"show_utterances\":" +
@@ -294,7 +294,17 @@ std::string AsrProtocol::SessionPayload(const AppConfig& config, const AsrSessio
            AsrResultTypeName(options.result_type) +
            "\",\"enable_ddc\":true,"
            "\"resource_id\":\"" +
-           JsonEscape(config.resource_id) + "\"" + HotwordsCorpusJson(config, options) + "}}";
+           JsonEscape(config.resource_id) + "\"" + HotwordsCorpusJson(config, options) + "}";
+    if (config.asr_provider == AsrProvider::kVoiceStickCloud && options.cloud_text_profile) {
+        const auto& profile = *options.cloud_text_profile;
+        if (profile.transform == TextTransform::kTranslate) {
+            payload += ",\"voicestick_text\":{\"operation\":\"translate\",\"target_language\":\"" +
+                       JsonEscape(profile.translation_target) + "\"}";
+        } else if (profile.transform == TextTransform::kRefine) {
+            payload += ",\"voicestick_text\":{\"operation\":\"refine\"}";
+        }
+    }
+    return payload + "}";
 }
 
 std::string AsrProtocol::ConnectionPayload(const AppConfig& config, const AsrSessionOptions& options) {

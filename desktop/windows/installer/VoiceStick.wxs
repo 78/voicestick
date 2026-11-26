@@ -46,6 +46,9 @@
         <Component Id="VoiceStickExe" Guid="*" Bitness="always64">
           <File Id="VoiceStickExeFile" Source="$(var.BuildDir)\VoiceStick.exe" KeyPath="yes" />
         </Component>
+        <Component Id="OpusLicense" Guid="*" Bitness="always64">
+          <File Id="OpusLicenseFile" Source="$(var.BuildDir)\Opus-License.txt" KeyPath="yes" />
+        </Component>
         <Component Id="WinSparkleDll" Guid="*" Bitness="always64">
           <File Id="WinSparkleDllFile" Source="$(var.BuildDir)\WinSparkle.dll" KeyPath="yes" />
         </Component>
@@ -84,6 +87,7 @@
     <Feature Id="Main" Title="VoiceStick" Level="1">
       <ComponentRef Id="VoiceStickExe" />
       <ComponentRef Id="WinSparkleDll" />
+      <ComponentRef Id="OpusLicense" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="DesktopShortcut" />
     </Feature>

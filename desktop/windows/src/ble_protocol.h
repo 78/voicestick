@@ -30,11 +30,13 @@ struct DeviceBatteryStatus {
 struct StateEvent {
     std::string event;
     std::string button;
+    std::string confirmation_id;
     std::optional<std::uint32_t> session_id;
     std::optional<std::uint32_t> duration_ms;
     std::string hardware;
     std::string firmware_version;
     std::string device_uuid;
+    std::optional<std::vector<std::string>> buttons;
     std::optional<DeviceBatteryStatus> battery;
 };
 
@@ -67,7 +69,8 @@ public:
     static std::optional<AudioFrame> ParseAudioFrame(std::span<const std::uint8_t> data);
     static std::optional<StateEvent> ParseStateEvent(std::span<const std::uint8_t> data);
     static std::optional<FirmwareOtaStateEvent> ParseFirmwareOtaStateEvent(std::span<const std::uint8_t> data);
-    static ByteVector UiStatePayload(std::string_view state, std::string_view text);
+    static ByteVector UiStatePayload(std::string_view state, std::string_view text,
+                                     std::string_view confirmation_id = {});
     static ByteVector InteractionModePayload(std::string_view mode);
     static ByteVector OtaBeginPayload(std::uint32_t image_size, std::uint32_t transfer_id);
     static ByteVector OtaDataPayload(std::uint32_t transfer_id, std::uint32_t offset, std::span<const std::uint8_t> chunk);

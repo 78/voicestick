@@ -1,13 +1,13 @@
 # Voice Stick Protocol
 
-This document describes the protocol implemented by the current firmware and macOS desktop app.
+This document describes the protocol implemented by the current firmware and desktop clients.
 
 ## Goals
 
-- Low-latency push-to-talk audio from StickS3 to macOS.
+- Low-latency push-to-talk audio from VoiceStick devices to the desktop.
 - Opus over BLE to keep wireless bandwidth low.
-- Ogg Opus forwarding from macOS to either Volcengine ASR or the VoiceStick Cloud relay.
-- Final ASR text insertion into the focused macOS input field after release and confirmation.
+- Ogg Opus forwarding to VoiceStick Cloud or Volcengine, with PCM audio for OpenAI Realtime.
+- Final ASR text insertion into the focused input field after release and confirmation.
 
 ## BLE GATT
 
@@ -30,7 +30,7 @@ Characteristics:
 | `ota_tx` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5105` | StickS3 -> Mac | notify |
 | `authorized` | `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5108` | VoiceStick -> desktop | encrypted read, returns `0x01` after authorization |
 
-With no active BLE link, a three-second hold of the `secondary` button advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106` for pairing. A VoiceStick without an authorized host opens this window by itself after boot or wake. The window closes after 60 seconds or a successful encrypted BLE bond. Each VoiceStick authorizes one host at a time but keeps the bonds of up to four hosts, so a previous host can be authorized again in the pairing window without forgetting the device in its system Bluetooth settings. When bond storage is full, the oldest bond other than the authorized host's is removed. Outside the window, a VoiceStick with an authorized host advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5107` for reconnection. Both advertisements lead to the same GATT service above. The previous firmware advertised the service UUID directly.
+With no active BLE link, a press of the `primary` button advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5106` for pairing. A VoiceStick without an authorized host opens this window by itself after boot or wake. The window closes after 60 seconds or a successful encrypted BLE bond. Each VoiceStick authorizes one host at a time but keeps the bonds of up to four hosts, so a previous host can be authorized again in the pairing window without forgetting the device in its system Bluetooth settings. When bond storage is full, the oldest bond other than the authorized host's is removed. Outside the window, a VoiceStick with an authorized host advertises `8f2f0b84-6e6f-4b23-88f7-3a3ceafc5107` for reconnection. Both advertisements lead to the same GATT service above. Firmware 0.4.2 opens pairing with a three-second hold of the `secondary` button. Earlier legacy firmware advertised the service UUID directly.
 
 The Mac app uses the pairing advertisement in the device picker and checks the encrypted `authorized` characteristic before saving the device. Background scanning uses the reconnect and legacy advertisements and matches the local `VS-XXXX` list. The firmware also validates the saved host bond before accepting control or OTA writes or sending audio and state. The Mac app can connect to multiple VoiceSticks.
 
@@ -54,7 +54,7 @@ struct AudioBleFrame {
 
 The payload contains one raw Opus packet when `payload_len > 0`. The firmware currently encodes 60 ms of 16 kHz mono audio per packet. When recording stops, the firmware also sends an end frame with `flags & 0x02` and an empty payload.
 
-The macOS app wraps incoming Opus packets into an Ogg Opus stream before sending them to ASR. It does not decode Opus to PCM.
+The desktop clients wrap incoming Opus packets into Ogg Opus for VoiceStick Cloud and Volcengine. For OpenAI Realtime, the app decodes Opus to 24 kHz mono PCM16.
 
 ## State Event
 
@@ -80,6 +80,7 @@ Currently emitted state events:
 {"event":"button_up","button":"primary","duration_ms":620,"session_id":1234}
 {"event":"button_down","button":"secondary"}
 {"event":"button_up","button":"secondary","duration_ms":90}
+{"event":"confirmation_shake","confirmation_id":"5a8f3b0e-2c71-4e6b-9d12-7f84b06d3ac1"}
 {"event":"battery_status","percent":73,"charging":false,"usb_powered":false}
 ```
 
@@ -132,6 +133,7 @@ Current desktop events:
 {"event":"ui_state","state":"recording","text":""}
 {"event":"ui_state","state":"thinking","text":"partial text"}
 {"event":"ui_state","state":"pending_confirmation","text":"final text"}
+{"event":"ui_state","state":"pending_confirmation","text":"draft text","confirmation_id":"5a8f3b0e-2c71-4e6b-9d12-7f84b06d3ac1"}
 {"event":"ui_state","state":"error","text":"ASR timeout"}
 {"event":"interaction_mode","mode":"hold_to_talk"}
 {"event":"interaction_mode","mode":"click_to_talk"}
@@ -143,6 +145,12 @@ After enabling notifications on `state_tx`, the desktop can write
 information from the resulting `device_info` notification.
 This also covers bonded links where the firmware restored the subscription
 before the desktop started listening.
+
+In manual or paused confirmation, the app sends a new `confirmation_id` UUID to
+arm shake detection on StickS3 and MagiClick 2P5 firmware with motion support.
+A `confirmation_shake` notification echoes that ID. The app cancels only the
+current paused draft from the same device with the matching ID. A `ui_state`
+without the ID disarms shake detection.
 
 The desktop helper always includes a `text` field, even for states without text
 content. Firmware may immediately render local physical feedback, such as

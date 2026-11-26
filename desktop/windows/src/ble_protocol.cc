@@ -145,6 +145,25 @@ std::optional<StateEvent> BleProtocol::ParseStateEvent(std::span<const std::uint
     if (event.event == "device_info") {
         auto uuid = JsonStringValue(json, "device_uuid");
         if (IsDeviceUuid(uuid)) event.device_uuid = Uppercase(std::move(uuid));
+        const std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(cJSON_Parse(json.c_str()), cJSON_Delete);
+        const auto* buttons = cJSON_GetObjectItemCaseSensitive(root.get(), "buttons");
+        if (cJSON_IsArray(buttons)) {
+            std::vector<std::string> names;
+            bool valid = true;
+            for (const cJSON* button = buttons->child; button; button = button->next) {
+                const auto* name = cJSON_GetStringValue(button);
+                if (!name) {
+                    valid = false;
+                    break;
+                }
+                names.emplace_back(name);
+            }
+            if (valid) event.buttons = std::move(names);
+        }
+    } else if (event.event == "confirmation_shake") {
+        auto uuid = JsonStringValue(json, "confirmation_id");
+        if (!IsDeviceUuid(uuid)) return std::nullopt;
+        event.confirmation_id = Uppercase(std::move(uuid));
     } else if (event.event == "battery_status") {
         const std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(cJSON_Parse(json.c_str()), cJSON_Delete);
         const auto* percent = cJSON_GetObjectItemCaseSensitive(root.get(), "percent");
@@ -176,9 +195,14 @@ std::optional<FirmwareOtaStateEvent> BleProtocol::ParseFirmwareOtaStateEvent(std
     return event;
 }
 
-ByteVector BleProtocol::UiStatePayload(std::string_view state, std::string_view text) {
-    const auto json = std::string("{\"event\":\"ui_state\",\"state\":\"") +
-                      JsonEscape(state) + "\",\"text\":\"" + JsonEscape(text) + "\"}";
+ByteVector BleProtocol::UiStatePayload(std::string_view state, std::string_view text,
+                                       std::string_view confirmation_id) {
+    auto json = std::string("{\"event\":\"ui_state\",\"state\":\"") +
+                JsonEscape(state) + "\",\"text\":\"" + JsonEscape(text) + "\"";
+    if (!confirmation_id.empty()) {
+        json += ",\"confirmation_id\":\"" + JsonEscape(confirmation_id) + "\"";
+    }
+    json += "}";
     return ByteVector(json.begin(), json.end());
 }
 

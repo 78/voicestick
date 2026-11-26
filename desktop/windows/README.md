@@ -16,13 +16,18 @@ Current scope:
 - Debug audio cache at `%LOCALAPPDATA%\VoiceStick\DebugAudio`.
 - BLE advertisement scanning through C++/WinRT.
 - Core VoiceStick protocol parsing, Ogg Opus muxing, ASR binary framing, and coordinator state machine.
-- Text insertion through clipboard plus `SendInput`.
+- Tray menu **Send Confirmation** offers immediate paste, a 1, 2, 3, 5, 10, or 15 second countdown, or manual confirmation. Press the main button during the countdown to pause. In manual confirmation, edit the draft, then choose **Send** or press the main button. Choose **Cancel**, use the C3 side button, or shake a StickS3 or MagiClick 2P5 running firmware with motion support.
+- Text insertion uses the clipboard and `SendInput`. If the original app cannot be focused or the paste fails, the confirmation window keeps the draft and offers **Paste Here**.
+- Settings offers VoiceStick Cloud and OpenAI Realtime. Use **Text Output** in the device menu to choose Original, Refine, or a translation. VoiceStick Cloud uses the Cloud key for text processing. OpenAI Realtime uses the same OpenAI key for transcription and GPT-6 Luna text processing. Older Cloud relays can use the optional LLM fields in `config.toml`. A saved Volcengine provider selection migrates to VoiceStick Cloud and uses the Cloud key.
 - App self-update checks through WinSparkle, using the same appcast feed as the macOS Sparkle updater.
+- To open pairing with current firmware, press the main voice button while the device is disconnected. With 0.4.2 firmware, hold the secondary button for three seconds.
 - StickS3 and VoiceStick C3 use separate firmware manifests. An optional `minimum_app_versions.windows` entry sets the minimum Windows app version for BLE updates. When it is present, older app versions are prompted to update VoiceStick first.
 - C3 battery and charging status appear in the device menu and in the tray tooltip when a single device is connected.
 - The device menu offers **Check for Firmware Updates** or **Update to** when an eligible update is available. A connected device can prompt for a firmware update when voice input is idle. VoiceStick remembers each device and target version already shown, including updates seen through a manual check.
 
 ## Build
+
+CMake downloads libopus for OpenAI Realtime and includes its license in the MSI.
 
 From a normal PowerShell prompt:
 

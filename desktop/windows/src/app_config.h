@@ -12,7 +12,7 @@ namespace voicestick {
 
 enum class AsrProvider {
     kVoiceStickCloud,
-    kVolcengine,
+    kOpenAI,
 };
 
 enum class InteractionMode {
@@ -45,6 +45,7 @@ enum class OutputTarget {
 enum class TextTransform {
     kOriginal,
     kTranslate,
+    kRefine,
 };
 
 enum class BluetoothAddressKind : std::uint8_t {
@@ -77,6 +78,7 @@ struct AppConfig {
     std::string voicestick_api_key;
     std::string voicestick_cloud_url = "wss://api.xiaozhi.me/voicestick/asr/";
     std::string volcengine_api_key;
+    std::string openai_api_key;
     std::string llm_base_url = "https://api.openai.com/v1";
     std::string llm_api_key;
     std::string llm_model = "gpt-5.5";
@@ -89,6 +91,8 @@ struct AppConfig {
     std::map<std::string, OverlayPosition> device_overlay_positions;
     OutputProfile default_output_profile;
     std::map<std::string, OutputProfile> device_output_profiles;
+    static constexpr int send_confirmation_options_ms[] = {0, 1000, 2000, 3000, 5000, 10000, 15000, -1};
+    int send_confirmation_ms = 1000;
     bool auto_enter = true;
     bool debug_audio_cache = false;
     std::filesystem::path debug_audio_directory;
@@ -98,7 +102,6 @@ struct AppConfig {
     static std::filesystem::path DefaultDebugAudioDirectory();
     static AppConfig Defaults();
     static AppConfig Load();
-    static const std::vector<std::string>& SupportedResourceIds();
 
     void Save() const;
     void SavePairedDevice(const PairedDeviceEntry& entry);
@@ -107,11 +110,13 @@ struct AppConfig {
                               const std::string& firmware_version);
     void RemovePairedDevice(const std::string& device_id);
     std::string ActiveApiKey() const;
+    void SetActiveApiKey(std::string key);
     std::string ActiveWebsocketUrl() const;
     OutputProfile OutputProfileForDevice(const std::optional<std::string>& device_id) const;
 };
 
 std::string AsrProviderName(AsrProvider provider);
+std::string AsrProviderDisplayName(AsrProvider provider);
 AsrProvider AsrProviderFromName(std::string_view name);
 std::string InteractionModeName(InteractionMode mode);
 InteractionMode InteractionModeFromName(std::string_view name);

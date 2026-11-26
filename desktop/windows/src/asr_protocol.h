@@ -52,6 +52,12 @@ struct AsrSessionOptions {
     std::vector<std::string> hotwords;
     AsrResultType result_type = AsrResultType::kFull;
     bool show_utterances = false;
+    std::optional<OutputProfile> cloud_text_profile;
+};
+
+struct AsrFinalResult {
+    std::string text;
+    bool handled_by_cloud = false;
 };
 
 struct AsrSegment {

@@ -37,6 +37,7 @@ constexpr UINT kMenuClickToTalk = 1010;
 constexpr UINT kMenuAutoEnter = 1011;
 constexpr UINT kMenuOutputFocusedApp = 1012;
 constexpr UINT kMenuOutputSubtitle = 1013;
+constexpr UINT kMenuConfirmationBase = 1014;
 constexpr UINT kMenuForgetBase = 2100;
 constexpr UINT kMenuForgetEnd = 2199;
 constexpr UINT kMenuUpdateFirmwareBase = 2200;
@@ -145,6 +146,18 @@ constexpr TranslationTarget kTranslationTargets[] = {
     {"th", L"Thai"},
 };
 
+std::string OverlayOutputMode(const OutputProfile& profile) {
+    if (profile.transform == TextTransform::kRefine) return TextTransformDisplayName(profile.transform);
+    if (profile.transform != TextTransform::kTranslate) return {};
+    const auto* target = std::ranges::find_if(kTranslationTargets, [&profile](const auto& entry) {
+        return std::ranges::equal(profile.translation_target, std::string_view(entry.code),
+            [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); });
+    });
+    const auto name = target == std::end(kTranslationTargets)
+        ? profile.translation_target : winrt::to_string(target->name);
+    return "\xE2\x86\x92 " + name;
+}
+
 } // namespace
 
 Win32App::Win32App(HINSTANCE instance) : instance_(instance), config_(AppConfig::Load()) {
@@ -156,6 +169,7 @@ Win32App::Win32App(HINSTANCE instance) : instance_(instance), config_(AppConfig:
                 entry.device_id,
                 entry.hardware,
                 entry.firmware_version,
+                std::nullopt,
             };
         }
     }
@@ -170,6 +184,7 @@ int Win32App::Run() {
             LogLine("CreateWindowInternal failed");
             return 1;
         }
+        input_injector_.SetClipboardOwner(hwnd_);
         LogLine("Main window created");
 
         RegisterTaskbarMessage();
@@ -198,7 +213,8 @@ int Win32App::Run() {
             &input_injector_,
             [post_to_ui](const AppConfig& config) {
                 return std::make_unique<AsrClientWin>(config, post_to_ui);
-            });
+            },
+            post_to_ui);
         LogLine("Starting coordinator");
         coordinator_->Start();
         LogLine("Coordinator started");
@@ -225,6 +241,7 @@ int Win32App::Run() {
 
         MSG message{};
         while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+            if (overlay_ && overlay_->HandleDialogMessage(&message)) continue;
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
@@ -253,6 +270,7 @@ void Win32App::SetStatus(const std::string& status) {
 void Win32App::SetConnectedDevices(const std::vector<ConnectedDevice>& devices) {
     DispatchToUi([this, devices] {
         connected_devices_ = devices;
+        for (const auto& device : devices) reconnecting_devices_.erase(device.id);
         std::erase_if(battery_status_by_device_id_, [&devices](const auto& entry) {
             return std::none_of(devices.begin(), devices.end(), [&entry](const ConnectedDevice& device) {
                 return device.id == entry.first;
@@ -338,6 +356,10 @@ void Win32App::SetPairingError(const std::string& device_id, const std::string& 
     DispatchToUi([this, device_id, message] {
         if (pending_pairing_entry_ && pending_pairing_entry_->device_id == device_id) {
             pending_pairing_entry_.reset();
+        }
+        if (message != "cancelled" &&
+            std::ranges::find(paired_device_ids_, device_id) != paired_device_ids_.end()) {
+            reconnecting_devices_.insert(device_id);
         }
         if (pair_device_dialog_) pair_device_dialog_->SetPairingError(device_id, message);
         LogLine("Pairing error VS-" + device_id + ": " + message);
@@ -428,33 +450,63 @@ void Win32App::SetHasRecoverableInput(bool has_recoverable_input) {
     });
 }
 
-void Win32App::ShowListening(const std::optional<std::string>& device_id) {
-    DispatchToUi([this, device_id] {
-        ApplyOverlayStyle(std::optional<std::string>(device_id));
-        if (overlay_) overlay_->ShowListening();
+void Win32App::ShowListening(const OutputProfile& profile, const std::optional<std::string>& device_id) {
+    DispatchToUi([this, profile, device_id] {
+        if (profile.target == OutputTarget::kFocusedApp) {
+            input_injector_.CaptureForegroundTarget();
+        }
+        ApplyOverlayStyle(device_id);
+        if (overlay_) overlay_->ShowListening(OverlayOutputMode(profile));
     });
 }
 
 void Win32App::ShowPartial(const std::string& text, const std::optional<std::string>& device_id) {
     DispatchToUi([this, text, device_id] {
-        ApplyOverlayStyle(std::optional<std::string>(device_id));
-        if (overlay_) overlay_->ShowPartial(text);
+        ApplyOverlayStyle(device_id);
+        if (overlay_) overlay_->ShowPartial(text, OverlayOutputMode(config_.OutputProfileForDevice(device_id)));
     });
 }
 
 void Win32App::ShowFinalCountdown(const std::string& text,
                                   const std::optional<std::string>& device_id,
-                                  std::function<void()> on_complete) {
-    DispatchToUi([this, text, device_id, on_complete = std::move(on_complete)]() mutable {
+                                  int duration_ms, std::function<void()> on_complete) {
+    DispatchToUi([this, text, device_id, duration_ms, on_complete = std::move(on_complete)]() mutable {
         ApplyOverlayStyle(device_id);
-        if (overlay_) overlay_->ShowFinalCountdown(text, std::move(on_complete));
+        if (overlay_) overlay_->ShowFinalCountdown(text, duration_ms, std::move(on_complete));
     });
 }
 
 void Win32App::ShowPausedFinal(const std::string& text, const std::optional<std::string>& device_id) {
     DispatchToUi([this, text, device_id] {
         ApplyOverlayStyle(device_id);
-        if (overlay_) overlay_->ShowPausedFinal(text);
+        const auto info = device_id ? device_info_map_.find(*device_id) : device_info_map_.end();
+        const std::string hardware = info != device_info_map_.end() ? info->second.hardware : "";
+        const bool stick_s3 = hardware == "stick_s3" || hardware == "sticks3" || hardware == "m5stack_stick_s3";
+        const bool supports_shake = hardware == "magiclick_2p5" ||
+            (stick_s3 && !info->second.firmware_version.empty() &&
+             !FirmwareVersion::IsOlderThan(info->second.firmware_version, "0.4.4"));
+        const auto* buttons = info != device_info_map_.end() && info->second.buttons ? &*info->second.buttons : nullptr;
+        const bool has_primary = buttons ? std::ranges::find(*buttons, "primary") != buttons->end()
+                                         : !hardware.empty();
+        const bool has_secondary = buttons ? std::ranges::find(*buttons, "secondary") != buttons->end()
+                                           : stick_s3 || hardware == "voicestick_c3";
+        if (overlay_) overlay_->ShowPausedFinal(text, supports_shake, has_secondary, has_primary);
+    });
+}
+
+std::optional<std::string> Win32App::EditedConfirmationText() const {
+    return overlay_ ? overlay_->ConfirmationDraftForSending() : std::nullopt;
+}
+
+void Win32App::ConcealConfirmation() {
+    DispatchToUi([this] {
+        if (overlay_) overlay_->ConcealConfirmation();
+    });
+}
+
+void Win32App::ShowPasteFailure() {
+    DispatchToUi([this] {
+        if (overlay_) overlay_->ShowPasteFailure();
     });
 }
 
@@ -595,13 +647,37 @@ LRESULT Win32App::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
             return 0;
         default: {
             UINT cmd = LOWORD(w_param);
-            if (cmd >= kMenuForgetBase && cmd <= kMenuForgetEnd) {
+            if (cmd >= kMenuConfirmationBase &&
+                cmd - kMenuConfirmationBase < std::size(AppConfig::send_confirmation_options_ms)) {
+                const int duration = AppConfig::send_confirmation_options_ms[cmd - kMenuConfirmationBase];
+                try {
+                    auto updated = config_;
+                    updated.send_confirmation_ms = duration;
+                    updated.Save();
+                    config_ = std::move(updated);
+                    if (coordinator_) coordinator_->SetSendConfirmationDuration(duration);
+                } catch (const std::exception& error) {
+                    LogLine(std::string("Confirmation setting save failed: ") + error.what());
+                    SetStatus("Input save failed");
+                }
+            } else if (cmd >= kMenuForgetBase && cmd <= kMenuForgetEnd) {
                 std::size_t index = cmd - kMenuForgetBase;
                 if (index < paired_device_ids_.size() && coordinator_) {
                     auto device_id = paired_device_ids_[index];
-                    coordinator_->RemovePairedDevice(device_id);
-                    config_.RemovePairedDevice(device_id);
-                    LogLine("Forgot device VS-" + device_id);
+                    try {
+                        auto updated = config_;
+                        updated.RemovePairedDevice(device_id);
+                        config_ = std::move(updated);
+                        coordinator_->RemovePairedDevice(device_id);
+                        device_info_map_.erase(device_id);
+                        reconnecting_devices_.erase(device_id);
+                        battery_status_by_device_id_.erase(device_id);
+                        RebuildTooltip();
+                        LogLine("Forgot device VS-" + device_id);
+                    } catch (const std::exception& error) {
+                        LogLine(std::string("Device removal failed: ") + error.what());
+                        SetStatus("Device removal failed");
+                    }
                 }
             } else if (cmd >= kMenuUpdateFirmwareBase && cmd <= kMenuUpdateFirmwareEnd) {
                 std::size_t index = cmd - kMenuUpdateFirmwareBase;
@@ -637,6 +713,8 @@ LRESULT Win32App::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
                     auto profile = config_.OutputProfileForDevice(paired_device_ids_[index]);
                     if (translation_index == 0) {
                         profile.transform = TextTransform::kOriginal;
+                    } else if (translation_index == kMenuTranslationsPerDevice - 1) {
+                        profile.transform = TextTransform::kRefine;
                     } else {
                         const std::size_t target_index = translation_index - 1;
                         if (target_index < std::size(kTranslationTargets)) {
@@ -709,6 +787,12 @@ bool Win32App::CreateWindowInternal() {
 
     LogLine("Creating overlay window object");
     overlay_ = std::make_unique<OverlayWindow>(instance_, hwnd_);
+    overlay_->on_send_confirmation = [this] {
+        if (coordinator_) coordinator_->ConfirmPendingPaste();
+    };
+    overlay_->on_cancel_confirmation = [this] {
+        if (coordinator_) coordinator_->DismissPendingConfirmation();
+    };
     LogLine("Creating subtitle window object");
     subtitles_ = std::make_unique<SubtitleWindow>(instance_, hwnd_);
     return true;
@@ -776,7 +860,8 @@ void Win32App::ShowTrayMenu() {
         HMENU submenu = CreatePopupMenu();
 
         // Status
-        const wchar_t* status_text = connected ? L"Connected" : L"Scanning...";
+        const wchar_t* status_text = connected ? L"Connected" :
+            (reconnecting_devices_.contains(id) ? L"Reconnecting..." : L"Scanning...");
         AppendMenuW(submenu, MF_STRING | MF_DISABLED, 0, status_text);
         if (const auto battery = battery_status_by_device_id_.find(id);
             connected && battery != battery_status_by_device_id_.end()) {
@@ -836,6 +921,10 @@ void Win32App::ShowTrayMenu() {
             MF_STRING | (current_profile.transform == TextTransform::kOriginal ? MF_CHECKED : 0),
             kMenuTranslationBase + static_cast<UINT>(i * kMenuTranslationsPerDevice),
             L"Original");
+        AppendMenuW(translation_menu,
+                    MF_STRING | (current_profile.transform == TextTransform::kRefine ? MF_CHECKED : 0),
+                    kMenuTranslationBase + static_cast<UINT>((i + 1) * kMenuTranslationsPerDevice - 1),
+                    L"Refine");
         AppendMenuW(translation_menu, MF_SEPARATOR, 0, nullptr);
         for (std::size_t target_index = 0; target_index < std::size(kTranslationTargets); ++target_index) {
             const auto& target = kTranslationTargets[target_index];
@@ -848,7 +937,7 @@ void Win32App::ShowTrayMenu() {
                 kMenuTranslationBase + static_cast<UINT>(i * kMenuTranslationsPerDevice + target_index + 1),
                 title.c_str());
         }
-        AppendMenuW(submenu, MF_POPUP, reinterpret_cast<UINT_PTR>(translation_menu), L"Translation");
+        AppendMenuW(submenu, MF_POPUP, reinterpret_cast<UINT_PTR>(translation_menu), L"Text Output");
 
         AppendMenuW(submenu, MF_SEPARATOR, 0, nullptr);
         const auto identity_text = FirmwareIdentityText(hardware, firmware_version);
@@ -900,6 +989,22 @@ void Win32App::ShowTrayMenu() {
                 kMenuOutputSubtitle,
                 L"Subtitle");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(output_menu), L"Output");
+
+    HMENU confirmation_menu = CreatePopupMenu();
+    for (UINT index = 0; index < std::size(AppConfig::send_confirmation_options_ms); ++index) {
+        const int duration = AppConfig::send_confirmation_options_ms[index];
+        std::wstring label;
+        if (duration == 0) {
+            label = L"Immediately";
+        } else if (duration < 0) {
+            label = L"Manual";
+        } else {
+            label = std::to_wstring(duration / 1000) + (duration == 1000 ? L" second" : L" seconds");
+        }
+        AppendMenuW(confirmation_menu, MF_STRING | (duration == config_.send_confirmation_ms ? MF_CHECKED : 0),
+                    kMenuConfirmationBase + index, label.c_str());
+    }
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(confirmation_menu), L"Send Confirmation");
 
     AppendMenuW(menu,
                 MF_STRING | (config_.auto_enter ? MF_CHECKED : 0),
@@ -1060,7 +1165,9 @@ void Win32App::ShowPairDeviceDialog() {
         if (coordinator_) coordinator_->CancelPendingConnect(device_id);
         LogLine("Pairing timed out VS-" + device_id);
     };
+    if (ble_central_) ble_central_->SetPairingDialogOpen(true);
     pair_device_dialog_->Show();
+    if (ble_central_) ble_central_->SetPairingDialogOpen(false);
 }
 
 void Win32App::ShowSettings() {

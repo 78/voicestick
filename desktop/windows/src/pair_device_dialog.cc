@@ -95,9 +95,17 @@ std::optional<bool> AdvertisesPairingWindow(
     const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementReceivedEventArgs& args) {
     static const winrt::guid pairing_uuid{BleProtocol::pairing_advertisement_uuid};
     static const winrt::guid reconnect_uuid{BleProtocol::reconnect_advertisement_uuid};
+    bool advertises_reconnect = false;
     for (const auto& uuid : args.Advertisement().ServiceUuids()) {
         if (uuid == pairing_uuid) return true;
-        if (uuid == reconnect_uuid) return false;
+        if (uuid == reconnect_uuid) advertises_reconnect = true;
+    }
+    using winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementType;
+    // When an already-bonded device opens pairing, its scan response contains
+    // the reconnect UUID alongside the device name. Only the primary
+    // advertisement can say that the pairing window is closed.
+    if (advertises_reconnect && args.AdvertisementType() != BluetoothLEAdvertisementType::ScanResponse) {
+        return false;
     }
     return std::nullopt;
 }
@@ -404,9 +412,10 @@ void PairDeviceDialog::StartScan() {
     {
         std::lock_guard lock(mutex_);
         devices_.clear();
+        pairing_window_addresses_.clear();
     }
     RebuildList();
-    SetWindowTextW(status_label_, L"Scanning");
+    SetWindowTextW(status_label_, L"Press the voice button to pair");
     watcher_ = winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher();
     watcher_.ScanningMode(
         winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEScanningMode::Active);
@@ -531,7 +540,7 @@ void PairDeviceDialog::RebuildList() {
         SendMessageW(device_list_, LVM_ENSUREVISIBLE, static_cast<WPARAM>(selection), FALSE);
     }
 
-    const auto status = devices.empty() ? L"Scanning" : Utf16(std::to_string(devices.size()) + " found");
+    const auto status = devices.empty() ? L"Press the voice button to pair" : Utf16(std::to_string(devices.size()) + " found");
     SetWindowTextW(status_label_, status.c_str());
 }
 

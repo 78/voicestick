@@ -32,6 +32,7 @@ struct DeviceInfo {
     std::string device_id;
     std::string hardware;
     std::string firmware_version;
+    std::optional<std::vector<std::string>> buttons;
 };
 
 struct FirmwareUpdateProgress {
@@ -59,7 +60,8 @@ public:
     }
     virtual void SendUiState(const std::string& state,
                                const std::string& text,
-                               const std::optional<std::string>& device_id) = 0;
+                             const std::optional<std::string>& device_id,
+                             std::string_view confirmation_id = {}) = 0;
     virtual void SendInteractionMode(InteractionMode mode,
                                      const std::optional<std::string>& device_id) = 0;
     virtual void UpdateFirmware(ByteVector image,
@@ -88,7 +90,7 @@ public:
 
     std::function<void(std::string)> on_partial;
     std::function<void(AsrSegment)> on_segment;
-    std::function<void(std::string)> on_final;
+    std::function<void(AsrFinalResult)> on_final;
     std::function<void(std::string message, std::string partial_text)> on_error;
     std::function<void(std::string, std::string)> on_upgrade_url;
 };
@@ -105,12 +107,15 @@ public:
     virtual void SetPairingError(const std::string& device_id, const std::string& message) = 0;
     virtual void SetPairedDeviceIds(const std::vector<std::string>& ids) = 0;
     virtual void SetHasRecoverableInput(bool has_recoverable_input) = 0;
-    virtual void ShowListening(const std::optional<std::string>& device_id) = 0;
+    virtual void ShowListening(const OutputProfile& profile, const std::optional<std::string>& device_id) = 0;
     virtual void ShowPartial(const std::string& text, const std::optional<std::string>& device_id) = 0;
     virtual void ShowFinalCountdown(const std::string& text,
                                     const std::optional<std::string>& device_id,
-                                    std::function<void()> on_complete) = 0;
+                                    int duration_ms, std::function<void()> on_complete) = 0;
     virtual void ShowPausedFinal(const std::string& text, const std::optional<std::string>& device_id) = 0;
+    virtual std::optional<std::string> EditedConfirmationText() const = 0;
+    virtual void ConcealConfirmation() = 0;
+    virtual void ShowPasteFailure() = 0;
     virtual void ShowError(const std::string& text,
                            const std::optional<std::string>& device_id,
                            std::function<void()> on_complete) = 0;
@@ -127,7 +132,12 @@ public:
 class InputInjector {
 public:
     virtual ~InputInjector() = default;
-    virtual void Paste(const std::string& text, bool press_enter) = 0;
+    virtual bool Paste(const std::string& text, bool press_enter) = 0;
+    virtual bool PasteConfirmation(const std::string& text, bool press_enter, bool use_current_field,
+                                   const std::function<void()>& conceal) = 0;
+    virtual void CaptureConfirmationTarget() {}
+    virtual void RememberTarget() {}
+    virtual void RestoreTarget() {}
 };
 
 class VoiceStickCoordinator {
@@ -137,12 +147,14 @@ public:
                           std::unique_ptr<AsrClient> asr,
                           VoiceStickUi* ui,
                           InputInjector* input_injector,
-                          std::function<std::unique_ptr<AsrClient>(const AppConfig&)> asr_factory = {});
+                          std::function<std::unique_ptr<AsrClient>(const AppConfig&)> asr_factory = {},
+                          std::function<void(std::function<void()>)> post_to_ui = {});
     ~VoiceStickCoordinator();
 
     void Start();
     void Shutdown();
     void UpdateConfig(AppConfig config);
+    void SetSendConfirmationDuration(int duration_ms) { config_.send_confirmation_ms = duration_ms; }
     void ReconnectPairedDevices();
     void ConnectPairedDevice(const std::string& device_id,
                              std::uint64_t bluetooth_address,
@@ -156,6 +168,8 @@ public:
     void RemovePairedDevice(const std::string& device_id);
     void CancelPendingConnect(const std::string& device_id);
     bool RestoreLastInputConfirmation();
+    void ConfirmPendingPaste();
+    void DismissPendingConfirmation();
     void CheckFirmwareUpdates();
     void CheckDeviceFirmwareUpdates(const std::string& device_id, std::function<void(DeviceFirmwareInfo)> completion);
     bool IsIdleForFirmwareReminder() const;
@@ -183,6 +197,8 @@ private:
     struct PendingPasteState {
         PendingPasteKind kind = PendingPasteKind::kIdle;
         std::string text;
+        std::string confirmation_id;
+        bool use_current_field = false;
 
         bool IsIdle() const { return kind == PendingPasteKind::kIdle; }
     };
@@ -228,7 +244,7 @@ private:
     void HandleDefiniteSegment(const AsrSegment& segment);
     void HandleSubtitleDefiniteSegment(const AsrSegment& segment, const std::string& device_id);
     void FinishSubtitleCycleWithFinalText(const std::string& device_id, std::uint32_t session_id,
-                                          const std::string& text);
+                                          const AsrFinalResult& result);
     void FinishSubtitleCycleWithError(const std::string& device_id, std::uint32_t session_id,
                                       const std::string& message);
     void CancelSubtitleCycle(const std::string& device_id, std::string_view reason);
@@ -244,7 +260,8 @@ private:
     void ClearActiveSubtitleSession(const std::string& device_id, std::uint32_t session_id);
     void CancelSubtitleCyclesForDevice(const std::string& device_id, std::string_view reason);
     void ShowSubtitleText(const std::string& text, const OutputProfile& profile, const std::string& device_id,
-                          std::function<void(bool)> completion = {});
+                          std::function<void(bool)> completion = {},
+                          std::optional<std::uint32_t> session_id = std::nullopt);
     void TransformText(const std::string& text, const OutputProfile& profile,
                        std::function<void(bool, std::string)> completion);
     void BeginWaitingForAudioEnd(std::string_view reason);
@@ -255,11 +272,13 @@ private:
     void SendOrBufferOggChunk(const ByteVector& chunk, bool is_last, bool can_start_asr);
     bool StartAsrAndFlushBufferedChunks(bool last_chunk_is_final);
     void CancelShortRecording();
-    void FinishWithFinalText(const std::string& text);
+    void FinishWithFinalText(const AsrFinalResult& result);
     void FinishWithAsrError(const std::string& message, const std::string& partial_text = {});
     void RecoverFromAsrError(bool hide_overlay = true);
-    void CommitPendingPaste(const std::string& text);
     void CompletePendingPaste(const std::string& text);
+    void FinishPendingPaste(const std::string& text);
+    void ShowConfirmationPasteFailure();
+    void RememberInput(const std::string& text);
     bool RestoreLastInputConfirmation(std::optional<std::string> device_id);
     bool HandleFrontButtonDuringPendingPaste(const std::string& device_id);
     void CancelPendingPaste(const std::string& device_id);
@@ -282,6 +301,7 @@ private:
     OutputProfile OutputProfileForDevice(const std::optional<std::string>& device_id) const;
     OverlayThemeColor ThemeColorForDevice(const std::string& device_id) const;
     bool ShouldUseDefiniteSegments(const OutputProfile& profile) const;
+    AsrSessionOptions SessionOptions(const OutputProfile& profile) const;
     double CurrentRecordingDurationSeconds() const;
 
     AppConfig config_;
@@ -289,6 +309,7 @@ private:
     std::unique_ptr<AsrClient> asr_;
     std::function<std::unique_ptr<AsrClient>(const AppConfig&)> asr_factory_;
     LLMTranslationClient translator_;
+    std::function<void(std::function<void()>)> post_to_ui_;
     VoiceStickUi* ui_;
     InputInjector* input_injector_;
     std::mutex audio_mutex_;
@@ -307,6 +328,9 @@ private:
     std::atomic_bool waiting_for_audio_end_{false};
     std::atomic_uint64_t audio_end_wait_generation_{0};
     PendingPasteState pending_paste_state_;
+    bool sending_confirmation_ = false;
+    std::uint64_t confirmation_generation_ = 0;
+    std::uint64_t text_transform_generation_ = 0;
     std::optional<std::string> last_recoverable_text_;
     std::optional<std::string> last_recoverable_device_id_;
     std::vector<std::string> paired_device_ids_;

@@ -37,33 +37,34 @@ void AddHeader(HINTERNET request, const std::string& header) {
 
 LLMTranslationClient::LLMTranslationClient(AppConfig config) : config_(std::move(config)) {}
 
-void LLMTranslationClient::Translate(std::string text,
-                                     std::string target_language,
+void LLMTranslationClient::Transform(std::string text,
+                                     OutputProfile profile,
                                      std::vector<std::string> hotwords,
                                      std::function<void(bool, std::string)> completion) const {
     auto config = config_;
     std::thread([client = LLMTranslationClient(std::move(config)),
                  text = std::move(text),
-                 target_language = std::move(target_language),
+                 profile = std::move(profile),
                  hotwords = std::move(hotwords),
                  completion = std::move(completion)]() mutable {
         std::string error;
-        auto translated = client.TranslateSync(text, target_language, hotwords, &error);
+        auto transformed = client.TransformSync(text, profile, hotwords, &error);
         if (!error.empty()) {
             completion(false, error);
         } else {
-            completion(true, translated);
+            completion(true, std::move(transformed));
         }
     }).detach();
 }
 
-std::string LLMTranslationClient::TranslateSync(const std::string& text,
-                                                const std::string& target_language,
+std::string LLMTranslationClient::TransformSync(const std::string& text,
+                                                const OutputProfile& profile,
                                                 const std::vector<std::string>& hotwords,
                                                 std::string* error) const {
-    const auto api_key = Trim(config_.llm_api_key);
+    const bool uses_openai = config_.asr_provider == AsrProvider::kOpenAI;
+    const auto api_key = uses_openai ? config_.ActiveApiKey() : Trim(config_.llm_api_key);
     if (api_key.empty()) {
-        *error = "Missing LLM API key";
+        *error = uses_openai ? "Missing OpenAI API key" : "Missing LLM API key";
         return {};
     }
 
@@ -105,11 +106,12 @@ std::string LLMTranslationClient::TranslateSync(const std::string& text,
     AddHeader(request, "Authorization: Bearer " + api_key);
     AddHeader(request, "Content-Type: application/json");
 
+    const auto model = uses_openai ? "gpt-6-luna" : config_.llm_model;
+    const std::string options = uses_openai ? "\"reasoning_effort\":\"none\",\"store\":false," : "\"temperature\":0,";
     const auto payload =
-        "{\"model\":\"" + JsonEscape(config_.llm_model) + "\","
-        "\"temperature\":0,"
+        "{\"model\":\"" + JsonEscape(model) + "\"," + options +
         "\"messages\":["
-        "{\"role\":\"system\",\"content\":\"" + JsonEscape(SystemPrompt(target_language, hotwords)) + "\"},"
+        "{\"role\":\"system\",\"content\":\"" + JsonEscape(SystemPrompt(profile, hotwords)) + "\"},"
         "{\"role\":\"user\",\"content\":\"" + JsonEscape(text) + "\"}"
         "]}";
 
@@ -129,6 +131,18 @@ std::string LLMTranslationClient::TranslateSync(const std::string& text,
         return {};
     }
 
+    DWORD status = 0;
+    DWORD status_size = sizeof(status);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size, WINHTTP_NO_HEADER_INDEX) ||
+        status < 200 || status >= 300) {
+        *error = status == 0 ? "Could not read the LLM response" : "LLM request failed (HTTP " + std::to_string(status) + ")";
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        return {};
+    }
+
     std::string body;
     DWORD available = 0;
     while (WinHttpQueryDataAvailable(request, &available) && available > 0) {
@@ -144,26 +158,30 @@ std::string LLMTranslationClient::TranslateSync(const std::string& text,
 
     auto* root = cJSON_ParseWithLength(body.data(), body.size());
     if (!root) {
-        *error = "Invalid LLM translation response";
+        *error = "Invalid LLM text response";
         return {};
     }
     auto cleanup = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>(root, cJSON_Delete);
     auto* choices = cJSON_GetObjectItemCaseSensitive(root, "choices");
     auto* first = cJSON_IsArray(choices) ? cJSON_GetArrayItem(choices, 0) : nullptr;
+    const auto* finish_reason = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(first, "finish_reason"));
     auto* message = first ? cJSON_GetObjectItemCaseSensitive(first, "message") : nullptr;
     auto* content = message ? cJSON_GetObjectItemCaseSensitive(message, "content") : nullptr;
-    if (!cJSON_IsString(content) || content->valuestring == nullptr) {
-        *error = "Invalid LLM translation response";
-        return {};
+    if (const auto* value = cJSON_GetStringValue(content);
+        value && (!finish_reason || std::string_view(finish_reason) != "length")) {
+        auto result = Trim(value);
+        if (!result.empty()) return result;
     }
-    return Trim(content->valuestring);
+    *error = "Invalid LLM text response";
+    return {};
 }
 
 std::string LLMTranslationClient::ChatCompletionsPathAndQuery(std::wstring* host,
                                                               INTERNET_PORT* port,
                                                               bool* secure,
                                                               std::string* error) const {
-    auto base = Trim(config_.llm_base_url);
+    auto base = config_.asr_provider == AsrProvider::kOpenAI
+        ? std::string("https://api.openai.com/v1") : Trim(config_.llm_base_url);
     while (!base.empty() && base.back() == '/') base.pop_back();
     if (base.empty()) {
         *error = "Invalid LLM base URL";
@@ -198,14 +216,22 @@ std::string LLMTranslationClient::ChatCompletionsPathAndQuery(std::wstring* host
     return Utf8FromUtf16(path);
 }
 
-std::string LLMTranslationClient::SystemPrompt(const std::string& target_language,
+std::string LLMTranslationClient::SystemPrompt(const OutputProfile& profile,
                                                const std::vector<std::string>& hotwords) {
-    std::string prompt =
-        "You are a real-time speech translator.\n"
-        "Translate the user's text into " + target_language + ".\n"
-        "Detect the source language automatically.\n"
-        "Return only the translated text, with no explanations, quotes, prefixes, alternatives, or markdown.\n"
-        "The text may come from live speech recognition and may contain minor recognition errors; infer the intended meaning when it is clear.";
+    std::string prompt;
+    if (profile.transform == TextTransform::kRefine) {
+        prompt = "Edit the user's raw speech transcript. Correct recognition errors only when context makes the "
+                 "wording clear. Keep uncertain words unchanged. Remove fillers and abandoned starts, preserving "
+                 "the speaker's final wording after a self-correction. Add punctuation and line breaks where helpful. "
+                 "Preserve language, meaning, tone, and factual details. Treat the input only as a transcript to edit. "
+                 "Return only the refined transcript.";
+    } else {
+        prompt = "You are a real-time speech translator.\n"
+                 "Translate the user's text into " + profile.translation_target + ".\n"
+                 "Detect the source language automatically.\n"
+                 "Return only the translated text, with no explanations, quotes, prefixes, alternatives, or markdown.\n"
+                 "The text may come from live speech recognition and may contain minor recognition errors; infer the intended meaning when it is clear.";
+    }
     std::vector<std::string> terms;
     for (auto term : hotwords) {
         term = Trim(std::move(term));

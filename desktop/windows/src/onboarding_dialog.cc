@@ -1,5 +1,6 @@
 #include "onboarding_dialog.h"
 
+#include "api_key_edit.h"
 #include "dpi_util.h"
 #include "voice_stick_cloud_api_win.h"
 
@@ -95,8 +96,6 @@ bool OnboardingDialog::Show() {
     provider_combo_ = nullptr;
     api_key_edit_ = nullptr;
     apply_trial_button_ = nullptr;
-    resource_label_ = nullptr;
-    resource_combo_ = nullptr;
     back_button_ = nullptr;
     next_button_ = nullptr;
     return result == IDOK;
@@ -135,9 +134,9 @@ INT_PTR OnboardingDialog::HandleMessage(UINT message, WPARAM w_param, LPARAM) {
             return TRUE;
         case kIdProviderCombo:
             if (HIWORD(w_param) == CBN_SELCHANGE) {
-                int idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-                const auto& key = idx == 0 ? config_.voicestick_api_key : config_.volcengine_api_key;
-                SetWindowTextW(api_key_edit_, Utf16(key).c_str());
+                config_.SetActiveApiKey(Utf8(GetText(api_key_edit_)));
+                config_.asr_provider = static_cast<AsrProvider>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
+                SetWindowTextW(api_key_edit_, Utf16(config_.ActiveApiKey()).c_str());
                 UpdateProviderVisibility();
             }
             return TRUE;
@@ -215,8 +214,6 @@ void OnboardingDialog::DestroyControls() {
     provider_combo_ = nullptr;
     api_key_edit_ = nullptr;
     apply_trial_button_ = nullptr;
-    resource_label_ = nullptr;
-    resource_combo_ = nullptr;
     back_button_ = nullptr;
     next_button_ = nullptr;
     if (ui_font_) {
@@ -295,37 +292,26 @@ void OnboardingDialog::BuildAsrStep(int x, int y, int w) {
                                   Dp(200), kIdProviderCombo, instance_);
     controls_.push_back(provider_combo_);
     SendMessageW(provider_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"VoiceStick Cloud"));
-    SendMessageW(provider_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Volcengine"));
+    SendMessageW(provider_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"OpenAI Realtime"));
 
     controls_.push_back(CreateStatic(hwnd_, L"API Key:", x, y + Dp(88), Dp(92), Dp(22),
                                      instance_, SS_RIGHT));
     api_key_edit_ = CreateEdit(hwnd_, x + Dp(104), y + Dp(84), w - Dp(222), Dp(24),
                                kIdApiKeyEdit, instance_, ES_PASSWORD);
+    SetWindowSubclass(api_key_edit_, PasteApiKey, 1, 0);
     controls_.push_back(api_key_edit_);
     apply_trial_button_ = CreateButton(hwnd_, L"Apply Trial", x + w - Dp(108),
                                        y + Dp(84), Dp(108), Dp(24),
                                        kIdApplyTrial, instance_);
     controls_.push_back(apply_trial_button_);
-
-    resource_label_ = CreateStatic(hwnd_, L"Resource:", x, y + Dp(128), Dp(92), Dp(22),
-                                   instance_, SS_RIGHT);
-    controls_.push_back(resource_label_);
-    resource_combo_ = CreateCombo(hwnd_, x + Dp(104), y + Dp(124), w - Dp(104),
-                                  Dp(200), kIdResourceCombo, instance_);
-    controls_.push_back(resource_combo_);
-    for (const auto& id : AppConfig::SupportedResourceIds()) {
-        SendMessageW(resource_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(Utf16(id).c_str()));
-    }
 }
 
 void OnboardingDialog::BuildReadyStep(int x, int y, int w) {
     controls_.push_back(CreateStatic(hwnd_, L"VoiceStick is ready.", x, y, w, Dp(28), instance_));
     controls_.push_back(CreateStatic(hwnd_, DeviceSummary().c_str(), x, y + Dp(46), w, Dp(24),
                                      instance_));
-    const auto provider = config_.asr_provider == AsrProvider::kVoiceStickCloud
-                              ? L"ASR: VoiceStick Cloud"
-                              : L"ASR: Volcengine";
-    controls_.push_back(CreateStatic(hwnd_, provider, x, y + Dp(82), w, Dp(24), instance_));
+    const auto provider = Utf16("ASR: " + AsrProviderDisplayName(config_.asr_provider));
+    controls_.push_back(CreateStatic(hwnd_, provider.c_str(), x, y + Dp(82), w, Dp(24), instance_));
     controls_.push_back(CreateStatic(hwnd_,
         L"Press the front button on your device to dictate into the focused app.",
         x, y + Dp(124), w, Dp(40), instance_));
@@ -333,44 +319,19 @@ void OnboardingDialog::BuildReadyStep(int x, int y, int w) {
 
 void OnboardingDialog::LoadConfigIntoControls() {
     if (!provider_combo_) return;
-    SendMessageW(provider_combo_, CB_SETCURSEL,
-                 config_.asr_provider == AsrProvider::kVoiceStickCloud ? 0 : 1, 0);
-    const auto& key = config_.asr_provider == AsrProvider::kVoiceStickCloud
-                          ? config_.voicestick_api_key
-                          : config_.volcengine_api_key;
-    SetWindowTextW(api_key_edit_, Utf16(key).c_str());
-    const auto resource = Utf16(config_.resource_id);
-    int idx = static_cast<int>(SendMessageW(resource_combo_, CB_FINDSTRINGEXACT, -1,
-                                            reinterpret_cast<LPARAM>(resource.c_str())));
-    SendMessageW(resource_combo_, CB_SETCURSEL, idx >= 0 ? idx : 0, 0);
+    SendMessageW(provider_combo_, CB_SETCURSEL, static_cast<WPARAM>(config_.asr_provider), 0);
+    SetWindowTextW(api_key_edit_, Utf16(config_.ActiveApiKey()).c_str());
     UpdateProviderVisibility();
 }
 
 void OnboardingDialog::SaveControlsIntoConfig() {
     if (!provider_combo_) return;
-    const int provider_idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-    config_.asr_provider = provider_idx == 0 ? AsrProvider::kVoiceStickCloud : AsrProvider::kVolcengine;
-    const auto api_key = Utf8(GetText(api_key_edit_));
-    if (config_.asr_provider == AsrProvider::kVoiceStickCloud) {
-        config_.voicestick_api_key = api_key;
-    } else {
-        config_.volcengine_api_key = api_key;
-    }
-    wchar_t resource_buf[256]{};
-    const int resource_idx = static_cast<int>(SendMessageW(resource_combo_, CB_GETCURSEL, 0, 0));
-    if (resource_idx >= 0) {
-        SendMessageW(resource_combo_, CB_GETLBTEXT, resource_idx,
-                     reinterpret_cast<LPARAM>(resource_buf));
-        config_.resource_id = Utf8(resource_buf);
-    }
+    config_.SetActiveApiKey(Utf8(GetText(api_key_edit_)));
 }
 
 void OnboardingDialog::UpdateProviderVisibility() {
-    const int provider_idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-    const bool is_cloud = provider_idx == 0;
+    const bool is_cloud = config_.asr_provider == AsrProvider::kVoiceStickCloud;
     const bool api_key_empty = GetText(api_key_edit_).empty();
-    ShowWindow(resource_label_, is_cloud ? SW_HIDE : SW_SHOW);
-    ShowWindow(resource_combo_, is_cloud ? SW_HIDE : SW_SHOW);
     ShowWindow(apply_trial_button_, is_cloud && api_key_empty ? SW_SHOW : SW_HIDE);
     const int full_w = Dp(430 - 104);
     const int api_w = is_cloud && api_key_empty ? full_w - Dp(116) : full_w;

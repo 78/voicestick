@@ -1,4 +1,5 @@
 #include "settings_dialog.h"
+#include "api_key_edit.h"
 #include "dpi_util.h"
 #include "voice_stick_cloud_api_win.h"
 
@@ -184,14 +185,24 @@ INT_PTR SettingsDialog::HandleMessage(UINT message, WPARAM w_param, LPARAM l_par
         case kIdChooseDir:
             ChooseDebugDirectory();
             return TRUE;
+        case kIdOpenConfigFolder: {
+            const auto path = AppConfig::ConfigDirectory();
+            std::error_code error;
+            std::filesystem::create_directories(path, error);
+            if (error || reinterpret_cast<INT_PTR>(ShellExecuteW(
+                    hwnd_, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32) {
+                MessageBoxW(hwnd_, L"Could not open the config folder.", L"VoiceStick Settings", MB_ICONERROR | MB_OK);
+            }
+            return TRUE;
+        }
         case kIdApplyTrialApiKey:
             ApplyTrialApiKey();
             return TRUE;
         case kIdProviderCombo:
             if (HIWORD(w_param) == CBN_SELCHANGE) {
-                int idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-                const auto& key = idx == 0 ? config_.voicestick_api_key : config_.volcengine_api_key;
-                SetWindowTextW(api_key_edit_, Utf16(key).c_str());
+                config_.SetActiveApiKey(Utf8(GetWindowText(api_key_edit_)));
+                config_.asr_provider = static_cast<AsrProvider>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
+                SetWindowTextW(api_key_edit_, Utf16(config_.ActiveApiKey()).c_str());
                 UpdateProviderVisibility();
             }
             return TRUE;
@@ -229,14 +240,9 @@ INT_PTR SettingsDialog::HandleMessage(UINT message, WPARAM w_param, LPARAM l_par
         provider_combo_ = nullptr;
         api_key_edit_ = nullptr;
         apply_trial_button_ = nullptr;
-        resource_combo_ = nullptr;
         hotwords_edit_ = nullptr;
-        llm_base_url_edit_ = nullptr;
-        llm_api_key_edit_ = nullptr;
-        llm_model_edit_ = nullptr;
         debug_audio_check_ = nullptr;
         debug_dir_edit_ = nullptr;
-        resource_label_ = nullptr;
         all_controls_.clear();
         label_controls_.clear();
         return TRUE;
@@ -291,14 +297,9 @@ void SettingsDialog::DestroyControls() {
     provider_combo_ = nullptr;
     api_key_edit_ = nullptr;
     apply_trial_button_ = nullptr;
-    resource_combo_ = nullptr;
     hotwords_edit_ = nullptr;
-    llm_base_url_edit_ = nullptr;
-    llm_api_key_edit_ = nullptr;
-    llm_model_edit_ = nullptr;
     debug_audio_check_ = nullptr;
     debug_dir_edit_ = nullptr;
-    resource_label_ = nullptr;
     if (ui_font_) {
         DeleteObject(ui_font_);
         ui_font_ = nullptr;
@@ -329,7 +330,7 @@ void SettingsDialog::BuildControls() {
     provider_combo_ = remember(CreateCombo(hwnd_, ctrl_x, y, ctrl_w, Dp(200),
                                            kIdProviderCombo, instance_));
     SendMessageW(provider_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"VoiceStick Cloud"));
-    SendMessageW(provider_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Volcengine"));
+    SendMessageW(provider_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"OpenAI Realtime"));
     y += row_h + Dp(10);
 
     remember_label(CreateLabel(hwnd_, L"API Key:", Dp(10), y + Dp(3), label_w,
@@ -337,21 +338,12 @@ void SettingsDialog::BuildControls() {
     const int apply_btn_w = Dp(102);
     api_key_edit_ = remember(CreateEdit(hwnd_, ctrl_x, y, ctrl_w - apply_btn_w - Dp(8), Dp(24),
                                         kIdApiKeyEdit, instance_, ES_PASSWORD));
+    SetWindowSubclass(api_key_edit_, PasteApiKey, 1, 0);
     apply_trial_button_ = remember(CreateButton(hwnd_, L"Apply Trial",
                                                 ctrl_x + ctrl_w - apply_btn_w, y,
                                                 apply_btn_w, Dp(24),
                                                 kIdApplyTrialApiKey, instance_));
     y += row_h + Dp(10);
-
-    resource_label_ = remember_label(CreateLabel(hwnd_, L"Resource ID:", Dp(10),
-                                                 y + Dp(3), label_w, Dp(20), instance_));
-    resource_combo_ = remember(CreateCombo(hwnd_, ctrl_x, y, ctrl_w, Dp(200),
-                                           kIdResourceCombo, instance_));
-    for (const auto& id : AppConfig::SupportedResourceIds()) {
-        SendMessageW(resource_combo_, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(Utf16(id).c_str()));
-    }
-    y += row_h + Dp(16);
 
     remember_label(CreateLabel(hwnd_, L"Hotwords:", Dp(10), y + Dp(3), label_w,
                                Dp(20), instance_));
@@ -361,24 +353,6 @@ void SettingsDialog::BuildControls() {
     remember_label(CreateLeftLabel(hwnd_, L"Separate hotwords with commas or new lines.",
                                    ctrl_x, y, ctrl_w, Dp(16), instance_));
     y += Dp(26);
-
-    remember_label(CreateLabel(hwnd_, L"LLM Base URL:", Dp(10), y + Dp(3), label_w,
-                               Dp(20), instance_));
-    llm_base_url_edit_ = remember(CreateEdit(hwnd_, ctrl_x, y, ctrl_w, Dp(24),
-                                             kIdLlmBaseUrlEdit, instance_));
-    y += row_h + Dp(10);
-
-    remember_label(CreateLabel(hwnd_, L"LLM API Key:", Dp(10), y + Dp(3), label_w,
-                               Dp(20), instance_));
-    llm_api_key_edit_ = remember(CreateEdit(hwnd_, ctrl_x, y, ctrl_w, Dp(24),
-                                            kIdLlmApiKeyEdit, instance_, ES_PASSWORD));
-    y += row_h + Dp(10);
-
-    remember_label(CreateLabel(hwnd_, L"LLM Model:", Dp(10), y + Dp(3), label_w,
-                               Dp(20), instance_));
-    llm_model_edit_ = remember(CreateEdit(hwnd_, ctrl_x, y, ctrl_w, Dp(24),
-                                          kIdLlmModelEdit, instance_));
-    y += row_h + Dp(16);
 
     remember_label(CreateLabel(hwnd_, L"Debug:", Dp(10), y + Dp(3), label_w,
                                Dp(20), instance_));
@@ -397,6 +371,8 @@ void SettingsDialog::BuildControls() {
 
     const int btn_w = Dp(80);
     const int btn_h = Dp(30);
+    remember(CreateButton(hwnd_, L"Open Config Folder", ctrl_x, y, Dp(140), btn_h,
+                          kIdOpenConfigFolder, instance_));
     remember(CreateButton(hwnd_, L"Save", Dp(kClientWidth - 200), y, btn_w, btn_h,
                           kIdSave, instance_));
     remember(CreateButton(hwnd_, L"Cancel", Dp(kClientWidth - 105), y, btn_w, btn_h,
@@ -408,23 +384,10 @@ void SettingsDialog::BuildControls() {
 }
 
 void SettingsDialog::LoadConfigIntoControls() {
-    SendMessageW(provider_combo_, CB_SETCURSEL,
-                 config_.asr_provider == AsrProvider::kVoiceStickCloud ? 0 : 1, 0);
-
-    const auto& key = config_.asr_provider == AsrProvider::kVoiceStickCloud
-                          ? config_.voicestick_api_key
-                          : config_.volcengine_api_key;
-    SetWindowTextW(api_key_edit_, Utf16(key).c_str());
-
-    auto resource_wide = Utf16(config_.resource_id);
-    int idx = static_cast<int>(SendMessageW(resource_combo_, CB_FINDSTRINGEXACT, -1,
-                                            reinterpret_cast<LPARAM>(resource_wide.c_str())));
-    SendMessageW(resource_combo_, CB_SETCURSEL, idx >= 0 ? idx : 0, 0);
+    SendMessageW(provider_combo_, CB_SETCURSEL, static_cast<WPARAM>(config_.asr_provider), 0);
+    SetWindowTextW(api_key_edit_, Utf16(config_.ActiveApiKey()).c_str());
 
     SetWindowTextW(hotwords_edit_, Utf16(JoinHotwords(config_.asr_hotwords)).c_str());
-    SetWindowTextW(llm_base_url_edit_, Utf16(config_.llm_base_url).c_str());
-    SetWindowTextW(llm_api_key_edit_, Utf16(config_.llm_api_key).c_str());
-    SetWindowTextW(llm_model_edit_, Utf16(config_.llm_model).c_str());
 
     SendMessageW(debug_audio_check_, BM_SETCHECK, config_.debug_audio_cache ? BST_CHECKED : BST_UNCHECKED, 0);
     SetWindowTextW(debug_dir_edit_, config_.debug_audio_directory.c_str());
@@ -433,46 +396,31 @@ void SettingsDialog::LoadConfigIntoControls() {
 }
 
 void SettingsDialog::SaveSettings() {
-    int provider_idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-    AsrProvider new_provider = (provider_idx == 0) ? AsrProvider::kVoiceStickCloud
-                                                   : AsrProvider::kVolcengine;
+    config_.SetActiveApiKey(Utf8(GetWindowText(api_key_edit_)));
+    AppConfig updated = AppConfig::Load();
+    updated.asr_provider = config_.asr_provider;
+    updated.voicestick_api_key = config_.voicestick_api_key;
+    updated.openai_api_key = config_.openai_api_key;
+    updated.asr_hotwords = ParseHotwordList(Utf8(GetWindowText(hotwords_edit_)));
 
-    auto api_key = Utf8(GetWindowText(api_key_edit_));
-    if (new_provider == AsrProvider::kVoiceStickCloud) {
-        config_.voicestick_api_key = api_key;
-    } else {
-        config_.volcengine_api_key = api_key;
-    }
-    config_.asr_provider = new_provider;
-    config_.llm_base_url = Utf8(GetWindowText(llm_base_url_edit_));
-    config_.llm_api_key = Utf8(GetWindowText(llm_api_key_edit_));
-    config_.llm_model = Utf8(GetWindowText(llm_model_edit_));
-    config_.asr_hotwords = ParseHotwordList(Utf8(GetWindowText(hotwords_edit_)));
-
-    wchar_t resource_buf[256]{};
-    int res_idx = static_cast<int>(SendMessageW(resource_combo_, CB_GETCURSEL, 0, 0));
-    if (res_idx >= 0) {
-        SendMessageW(resource_combo_, CB_GETLBTEXT, res_idx,
-                     reinterpret_cast<LPARAM>(resource_buf));
-        config_.resource_id = Utf8(resource_buf);
-    }
-
-    config_.debug_audio_cache = SendMessageW(debug_audio_check_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    updated.debug_audio_cache = SendMessageW(debug_audio_check_, BM_GETCHECK, 0, 0) == BST_CHECKED;
 
     auto dir = GetWindowText(debug_dir_edit_);
-    if (!dir.empty()) config_.debug_audio_directory = dir;
+    if (!dir.empty()) updated.debug_audio_directory = dir;
 
-    config_.Save();
+    try {
+        updated.Save();
+    } catch (const std::exception& error) {
+        MessageBoxW(hwnd_, Utf16(error.what()).c_str(), L"Could Not Save Settings", MB_ICONERROR | MB_OK);
+        return;
+    }
+    config_ = std::move(updated);
     EndDialog(hwnd_, IDOK);
     if (on_config_changed) on_config_changed(config_);
 }
 
 void SettingsDialog::UpdateProviderVisibility() {
-    int idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-    bool is_volcengine = (idx == 1);
-    ShowWindow(resource_combo_, is_volcengine ? SW_SHOW : SW_HIDE);
-    ShowWindow(resource_label_, is_volcengine ? SW_SHOW : SW_HIDE);
-    const bool is_cloud = (idx == 0);
+    const bool is_cloud = config_.asr_provider == AsrProvider::kVoiceStickCloud;
     const bool api_key_empty = GetWindowText(api_key_edit_).empty();
     const bool show_trial_button = is_cloud && api_key_empty;
     ShowWindow(apply_trial_button_, show_trial_button ? SW_SHOW : SW_HIDE);
@@ -486,8 +434,7 @@ void SettingsDialog::UpdateProviderVisibility() {
 }
 
 void SettingsDialog::ApplyTrialApiKey() {
-    int idx = static_cast<int>(SendMessageW(provider_combo_, CB_GETCURSEL, 0, 0));
-    if (idx != 0) return;
+    if (config_.asr_provider != AsrProvider::kVoiceStickCloud) return;
 
     EnableWindow(apply_trial_button_, FALSE);
     SetWindowTextW(apply_trial_button_, L"Applying...");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app_config.h"
+#include "openai_realtime_protocol.h"
 #include "voice_stick_coordinator.h"
 
 #include <Windows.h>
@@ -8,6 +9,8 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -41,6 +44,7 @@ private:
         kStarting,
         kStreaming,
         kFinishing,
+        kTransforming,
     };
 
     struct QueuedAudioChunk {
@@ -48,16 +52,29 @@ private:
         bool is_last = false;
     };
 
-    bool StartReusableSession();
+    bool StartReusableSession(AsrSessionOptions options);
+    bool SendStartSession();
     void CancelReusableSession();
     void ShutdownReusableConnection();
     void RunReusableWebSocket();
     void FlushQueuedAudioChunks();
-    void ReceiveOneReusable(HINTERNET websocket);
+    void ReceiveOneReusable(HINTERNET websocket, ByteVector* message);
+    void HandleCloudTextMessage(std::string_view message);
+    void RunSessionTimeouts(std::stop_token stop);
+    void SetSessionTimeout(std::chrono::seconds duration);
+    void MarkSessionIdle();
+    void FinishCloudText(std::string_view session_id, std::optional<std::string> text, std::string error);
+    void HandleOpenAIEvent(std::string_view message);
+    void SendOpenAIAudio(std::span<const std::uint8_t> data, bool is_last);
+    std::string SendOpenAIAudioLocked(std::span<const std::uint8_t> data, bool is_last);
+    static bool SendTextFrame(HINTERNET websocket, std::string_view json);
+    bool UsesOpenAI() const { return config_.asr_provider == AsrProvider::kOpenAI; }
     void HandleReusableResponse(std::span<const std::uint8_t> data, HINTERNET websocket);
     void SendReusableAudio(std::span<const std::uint8_t> data, bool is_last);
     void FinishReusableSessionIfNeeded();
-    void FailReusableSession(const std::string& message, std::optional<std::string> upgrade_url = {});
+    void FailReusableSession(const std::string& message, std::optional<std::string> upgrade_url = {},
+                             std::string_view expected_session_id = {},
+                             std::optional<SessionState> expected_state = {});
     void SetLastStartError(std::string message);
     bool SendReusableFrameOrFail(const ByteVector& frame, const std::string& context);
     void PostSessionCallback(std::uint64_t generation, std::function<void()> callback) const;
@@ -87,6 +104,15 @@ private:
     std::string latest_session_transcript_;
     std::set<std::string> emitted_definite_segment_keys_;
     AsrSessionOptions session_options_;
+    bool cloud_supports_text_ = false;
+    bool cloud_text_requested_ = false;
+    OpenAIOpusDecoder decoder_;
+    std::size_t openai_pcm_samples_ = 0;
+    std::string realtime_item_;
+    std::string last_realtime_item_;
+    std::condition_variable_any timeout_changed_;
+    std::chrono::steady_clock::time_point timeout_at_{};
+    std::jthread session_timeout_worker_;
     HINTERNET websocket_ = nullptr;
     std::string last_start_error_;
 };

@@ -20,7 +20,6 @@ namespace voicestick {
 
 namespace {
 
-constexpr const char* kVolcengineUrl = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
 
 std::filesystem::path KnownFolder(REFKNOWNFOLDERID folder_id, const wchar_t* fallback_env) {
     PWSTR path = nullptr;
@@ -155,18 +154,6 @@ std::string FormatDeviceValueMap(const std::map<std::string, Value>& values,
 
 } // namespace
 
-const std::vector<std::string>& AppConfig::SupportedResourceIds() {
-    // Mirrors macOS AppConfig.supportedResourceIDs so both platforms expose the
-    // same Volcengine model options.
-    static const std::vector<std::string> ids = {
-        "volc.seedasr.sauc.duration",
-        "volc.seedasr.sauc.concurrent",
-        "volc.bigasr.sauc.duration",
-        "volc.bigasr.sauc.concurrent",
-    };
-    return ids;
-}
-
 std::filesystem::path AppConfig::ConfigDirectory() {
     return KnownFolder(FOLDERID_RoamingAppData, L"APPDATA") / L"VoiceStick";
 }
@@ -230,6 +217,7 @@ void ApplyConfigValue(AppConfig& config, const std::string& key, const std::stri
     if (key == "asr_provider") config.asr_provider = AsrProviderFromName(value);
     if (key == "voicestick_api_key") config.voicestick_api_key = value;
     if (key == "voicestick_cloud_url") config.voicestick_cloud_url = value;
+    if (key == "openai_api_key") config.openai_api_key = value;
     if (key == "volcengine_api_key" || key == "api_key") config.volcengine_api_key = value;
     if (key == "llm_base_url") config.llm_base_url = value;
     if (key == "llm_api_key") config.llm_api_key = value;
@@ -298,6 +286,7 @@ AppConfig AppConfig::Load() {
         if (auto value = TomlString(table, "asr_provider")) config.asr_provider = AsrProviderFromName(*value);
         if (auto value = TomlString(table, "voicestick_api_key")) config.voicestick_api_key = *value;
         if (auto value = TomlString(table, "voicestick_cloud_url")) config.voicestick_cloud_url = *value;
+        if (auto value = TomlString(table, "openai_api_key")) config.openai_api_key = *value;
         if (auto value = TomlString(table, "volcengine_api_key")) config.volcengine_api_key = *value;
         if (auto value = TomlString(table, "api_key")) config.volcengine_api_key = *value;
         if (auto value = TomlString(table, "llm_base_url")) config.llm_base_url = *value;
@@ -339,6 +328,11 @@ AppConfig AppConfig::Load() {
                 config.device_output_profiles[device_id].target = config.default_output_profile.target;
             }
         }
+        if (const auto value = table["send_confirmation_ms"].value<int>();
+            value && std::ranges::find(send_confirmation_options_ms, *value) !=
+                         std::end(send_confirmation_options_ms)) {
+            config.send_confirmation_ms = *value;
+        }
         if (auto value = TomlBool(table, "auto_enter")) config.auto_enter = *value;
         if (auto value = TomlBool(table, "debug_audio_cache")) config.debug_audio_cache = *value;
         if (auto value = TomlString(table, "debug_audio_dir"); value && !value->empty()) {
@@ -371,6 +365,7 @@ void AppConfig::Save() const {
     output << "asr_provider = \"" << AsrProviderName(asr_provider) << "\"\n";
     output << "voicestick_api_key = \"" << TomlEscape(voicestick_api_key) << "\"\n";
     output << "voicestick_cloud_url = \"" << TomlEscape(voicestick_cloud_url) << "\"\n";
+    output << "openai_api_key = \"" << TomlEscape(openai_api_key) << "\"\n";
     output << "volcengine_api_key = \"" << TomlEscape(volcengine_api_key) << "\"\n";
     output << "llm_base_url = \"" << TomlEscape(llm_base_url) << "\"\n";
     output << "llm_api_key = \"" << TomlEscape(llm_api_key) << "\"\n";
@@ -388,6 +383,7 @@ void AppConfig::Save() const {
         device_theme_colors, paired_device_ids, OverlayThemeColor::kWhite, OverlayThemeColorName)) << "\"\n";
     output << "device_overlay_positions = \"" << TomlEscape(FormatDeviceValueMap<OverlayPosition>(
         device_overlay_positions, paired_device_ids, OverlayPosition::kCenter, OverlayPositionName)) << "\"\n";
+    output << "send_confirmation_ms = " << send_confirmation_ms << "\n";
     output << "auto_enter = " << (auto_enter ? "true" : "false") << "\n";
     output << "debug_audio_cache = " << (debug_audio_cache ? "true" : "false") << "\n";
     output << "debug_audio_dir = \"" << TomlEscape(debug_audio_directory.string()) << "\"\n";
@@ -417,11 +413,19 @@ void AppConfig::Save() const {
 }
 
 std::string AppConfig::ActiveApiKey() const {
-    return asr_provider == AsrProvider::kVoiceStickCloud ? voicestick_api_key : volcengine_api_key;
+    if (asr_provider == AsrProvider::kOpenAI) return Trim(openai_api_key);
+    return voicestick_api_key;
+}
+
+void AppConfig::SetActiveApiKey(std::string key) {
+    switch (asr_provider) {
+    case AsrProvider::kOpenAI: openai_api_key = std::move(key); break;
+    case AsrProvider::kVoiceStickCloud: voicestick_api_key = std::move(key); break;
+    }
 }
 
 std::string AppConfig::ActiveWebsocketUrl() const {
-    if (asr_provider == AsrProvider::kVolcengine) return kVolcengineUrl;
+    if (asr_provider == AsrProvider::kOpenAI) return "wss://api.openai.com/v1/realtime?intent=transcription";
     auto url = Trim(voicestick_cloud_url);
     return url.empty() ? AppConfig{}.voicestick_cloud_url : url;
 }
@@ -494,11 +498,18 @@ OutputProfile AppConfig::OutputProfileForDevice(const std::optional<std::string>
 }
 
 std::string AsrProviderName(AsrProvider provider) {
-    return provider == AsrProvider::kVoiceStickCloud ? "voicestick_cloud" : "volcengine";
+    if (provider == AsrProvider::kOpenAI) return "openai";
+    return "voicestick_cloud";
+}
+
+std::string AsrProviderDisplayName(AsrProvider provider) {
+    if (provider == AsrProvider::kOpenAI) return "OpenAI Realtime";
+    return "VoiceStick Cloud";
 }
 
 AsrProvider AsrProviderFromName(std::string_view name) {
-    return name == "voicestick_cloud" ? AsrProvider::kVoiceStickCloud : AsrProvider::kVolcengine;
+    if (name == "openai") return AsrProvider::kOpenAI;
+    return AsrProvider::kVoiceStickCloud;
 }
 
 std::string InteractionModeName(InteractionMode mode) {
@@ -589,14 +600,17 @@ std::string OutputTargetDisplayName(OutputTarget target) {
 }
 
 std::string TextTransformName(TextTransform transform) {
+    if (transform == TextTransform::kRefine) return "polish";
     return transform == TextTransform::kTranslate ? "translate" : "original";
 }
 
 TextTransform TextTransformFromName(std::string_view name) {
+    if (name == "refine" || name == "polish") return TextTransform::kRefine;
     return name == "translate" ? TextTransform::kTranslate : TextTransform::kOriginal;
 }
 
 std::string TextTransformDisplayName(TextTransform transform) {
+    if (transform == TextTransform::kRefine) return "Refine";
     return transform == TextTransform::kTranslate ? "Translate" : "Original";
 }
 

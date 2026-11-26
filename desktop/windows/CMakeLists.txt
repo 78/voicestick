@@ -19,6 +19,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(winsparkle)
 
+FetchContent_Declare(
+    opus
+    URL https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+    URL_HASH SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+set(OPUS_BUILD_SHARED_LIBRARY OFF)
+set(OPUS_BUILD_TESTING OFF)
+set(OPUS_STATIC_RUNTIME ON)
+set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF)
+set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF)
+FetchContent_MakeAvailable(opus)
+configure_file("${opus_SOURCE_DIR}/COPYING" "${CMAKE_CURRENT_BINARY_DIR}/Opus-License.txt" COPYONLY)
+
 add_library(winsparkle_lib SHARED IMPORTED GLOBAL)
 set_target_properties(winsparkle_lib PROPERTIES
     IMPORTED_IMPLIB "${winsparkle_SOURCE_DIR}/x64/Release/WinSparkle.lib"
@@ -39,6 +53,7 @@ add_library(voicestick_core
     src/log.cc
     src/ogg_crc.cc
     src/ogg_opus_muxer.cc
+    src/openai_realtime_protocol.cc
     src/voice_stick_coordinator.cc
 )
 
@@ -48,7 +63,7 @@ target_include_directories(voicestick_core
 )
 target_compile_definitions(voicestick_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(voicestick_core PUBLIC winhttp)
-target_link_libraries(voicestick_core PUBLIC bcrypt)
+target_link_libraries(voicestick_core PUBLIC bcrypt PRIVATE Opus::opus crypt32)
 
 add_executable(VoiceStickApp WIN32
     src/main.cc

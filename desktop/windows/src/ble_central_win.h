@@ -27,6 +27,7 @@ public:
     ~BleCentralWin() override;
 
     void Start() override;
+    void SetPairingDialogOpen(bool open);
     void UpdatePairedDeviceIds(const std::vector<std::string>& ids) override;
     void ConnectPairedDevice(const std::string& device_id,
                              std::uint64_t bluetooth_address,
@@ -37,8 +38,9 @@ public:
                     BluetoothAddressKind address_kind,
                     const std::string& name) override;
     void SendUiState(const std::string& state,
-                       const std::string& text,
-                       const std::optional<std::string>& device_id) override;
+                     const std::string& text,
+                     const std::optional<std::string>& device_id,
+                     std::string_view confirmation_id = {}) override;
     void SendInteractionMode(InteractionMode mode,
                              const std::optional<std::string>& device_id) override;
     void UpdateFirmware(ByteVector image,
@@ -129,6 +131,7 @@ private:
     std::map<std::string, std::shared_ptr<DeviceSession>> sessions_by_device_id_;
     std::shared_ptr<FirmwareUpdateSession> firmware_update_session_;
     std::set<std::uint64_t> connecting_addresses_;
+    bool pairing_dialog_open_ = false;
     // The service UUID and the device name arrive in separate advertising
     // reports, so remember which addresses are in their pairing window.
     std::set<std::uint64_t> pairing_window_addresses_;

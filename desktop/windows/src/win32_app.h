@@ -35,12 +35,15 @@ public:
     void SetPairingError(const std::string& device_id, const std::string& message) override;
     void SetPairedDeviceIds(const std::vector<std::string>& ids) override;
     void SetHasRecoverableInput(bool has_recoverable_input) override;
-    void ShowListening(const std::optional<std::string>& device_id) override;
+    void ShowListening(const OutputProfile& profile, const std::optional<std::string>& device_id) override;
     void ShowPartial(const std::string& text, const std::optional<std::string>& device_id) override;
     void ShowFinalCountdown(const std::string& text,
                             const std::optional<std::string>& device_id,
-                            std::function<void()> on_complete) override;
+                            int duration_ms, std::function<void()> on_complete) override;
     void ShowPausedFinal(const std::string& text, const std::optional<std::string>& device_id) override;
+    std::optional<std::string> EditedConfirmationText() const override;
+    void ConcealConfirmation() override;
+    void ShowPasteFailure() override;
     void ShowError(const std::string& text,
                    const std::optional<std::string>& device_id,
                    std::function<void()> on_complete) override;
@@ -102,6 +105,7 @@ private:
     std::string status_ = "Ready";
     std::vector<ConnectedDevice> connected_devices_;
     std::vector<std::string> paired_device_ids_;
+    std::set<std::string> reconnecting_devices_;
     std::map<std::string, DeviceInfo> device_info_map_;
     std::map<std::string, DeviceBatteryStatus> battery_status_by_device_id_;
     std::map<std::string, DeviceFirmwareInfo> firmware_info_map_;
