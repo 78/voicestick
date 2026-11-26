@@ -521,11 +521,7 @@ final class StatusController {
     }
 
     func showListening(deviceID: String? = nil) {
-        setStatus("Listening")
-        let overlay = overlay(for: deviceID)
-        markOverlayVisible(for: deviceID)
-        applyOverlayStyle(for: deviceID, overlay: overlay)
-        overlay.showListening(text: "")
+        showPartial("", deviceID: deviceID)
     }
 
     func showPartial(_ text: String, deviceID: String? = nil) {
@@ -533,7 +529,7 @@ final class StatusController {
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
-        overlay.showListening(text: text)
+        overlay.showListening(text: text, outputMode: outputMode(for: deviceID))
     }
 
     func showFinal(
@@ -726,8 +722,8 @@ final class StatusController {
         key == "__default__" ? nil : key
     }
 
-    private func outputProfile(for deviceID: String) -> OutputProfile {
-        guard let deviceProfile = deviceOutputProfiles[AppConfig.normalizedDeviceID(deviceID)] else {
+    private func outputProfile(for deviceID: String?) -> OutputProfile {
+        guard let deviceID, let deviceProfile = deviceOutputProfiles[AppConfig.normalizedDeviceID(deviceID)] else {
             return defaultOutputProfile
         }
         return OutputProfile(
@@ -735,6 +731,22 @@ final class StatusController {
             transform: deviceProfile.transform,
             translationTarget: deviceProfile.translationTarget
         )
+    }
+
+    private func outputMode(for deviceID: String?) -> (text: String, accessibilityLabel: String)? {
+        let profile = outputProfile(for: deviceID)
+        switch profile.transform {
+        case .original:
+            return nil
+        case .polish:
+            let name = profile.transform.displayName
+            return (name, name)
+        case .translate:
+            let language = Self.translationTargets.first {
+                $0.code.caseInsensitiveCompare(profile.translationTarget) == .orderedSame
+            }?.name ?? profile.translationTarget
+            return ("→ \(language)", "Translate to \(language)")
+        }
     }
 
     private func applyOverlayStyle(for deviceID: String?, overlay: OverlayController) {

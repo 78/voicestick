@@ -241,14 +241,19 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func saveSettings() {
         saveDisplayedAPIKey()
-        config.asrProvider = selectedProvider()
-        config.asrHotwords = AppConfig.hotwordList(hotwordsTextView.string)
-        config.debugAudioCache = debugAudioButton.state == .on
-        config.debugAudioDirectory = URL(fileURLWithPath: debugAudioDirectoryField.stringValue, isDirectory: true)
+        // Pairing and menu preferences can change while this window is open.
+        var updated = AppConfig.configExists ? AppConfig.load() : config
+        updated.asrProvider = selectedProvider()
+        updated.voiceStickAPIKey = config.voiceStickAPIKey
+        updated.openAIAPIKey = config.openAIAPIKey
+        updated.asrHotwords = AppConfig.hotwordList(hotwordsTextView.string)
+        updated.debugAudioCache = debugAudioButton.state == .on
+        updated.debugAudioDirectory = URL(fileURLWithPath: debugAudioDirectoryField.stringValue, isDirectory: true)
 
         do {
-            try config.save()
-            onConfigChanged?(config)
+            try updated.save()
+            config = updated
+            onConfigChanged?(updated)
             statusLabel.stringValue = "Saved."
             window?.close()
         } catch {

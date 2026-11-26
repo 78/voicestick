@@ -413,6 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.deviceOverlayPositions.removeValue(forKey: deviceID)
         do {
             try config.save()
+            self.config = config
             statusController?.setPairedDeviceIDs(config.pairedDeviceIDs)
             statusController?.setDeviceThemeColors(config.deviceThemeColors)
             statusController?.setDeviceOverlayPositions(config.deviceOverlayPositions)

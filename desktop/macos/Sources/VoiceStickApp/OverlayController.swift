@@ -11,6 +11,7 @@ final class OverlayController {
     private let indicator = RecognitionIndicatorView()
     private let textLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
+    private let outputModeLabel = NSTextField(labelWithString: "")
     private let draftScroll = NSScrollView()
     private let draftEditor = OverlayTextView(frame: .zero)
     private lazy var confirmationActions = ConfirmationActions(frame: .zero)
@@ -82,6 +83,15 @@ final class OverlayController {
         hintLabel.lineBreakMode = .byClipping
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        outputModeLabel.font = .systemFont(ofSize: 10)
+        outputModeLabel.textColor = NSColor.black.withAlphaComponent(0.36)
+        outputModeLabel.alignment = .right
+        outputModeLabel.lineBreakMode = .byTruncatingTail
+        outputModeLabel.usesSingleLineMode = true
+        outputModeLabel.translatesAutoresizingMaskIntoConstraints = false
+        outputModeLabel.isHidden = true
+        surface.addSubview(outputModeLabel)
+
         draftScroll.borderType = .noBorder
         draftScroll.drawsBackground = false
         draftScroll.hasVerticalScroller = true
@@ -116,6 +126,9 @@ final class OverlayController {
         self.textCenterYConstraint = textCenterYConstraint
 
         NSLayoutConstraint.activate([
+            outputModeLabel.leadingAnchor.constraint(greaterThanOrEqualTo: surface.leadingAnchor, constant: 23),
+            outputModeLabel.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -11),
+            outputModeLabel.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -11),
             container.topAnchor.constraint(equalTo: surface.topAnchor),
             container.leadingAnchor.constraint(equalTo: surface.leadingAnchor),
             container.trailingAnchor.constraint(equalTo: surface.trailingAnchor),
@@ -159,8 +172,8 @@ final class OverlayController {
         }
     }
 
-    func showListening(text: String) {
-        show(mode: .listening, text: text.isEmpty ? "Listening..." : text, hint: "", autoHideAfter: nil)
+    func showListening(text: String, outputMode: (text: String, accessibilityLabel: String)?) {
+        show(mode: .listening, text: text.isEmpty ? "Listening..." : text, outputMode: outputMode, autoHideAfter: nil)
     }
 
     func showFinal(text: String, duration: TimeInterval, onHidden: (() -> Void)? = nil) {
@@ -183,6 +196,7 @@ final class OverlayController {
         hideWorkItem = nil
         pendingHideCompletion = nil
         presentationGeneration += 1
+        setOutputMode(nil)
 
         // Manual confirmation can arrive without an existing countdown.
         if phase != .countdown || !window.isVisible {
@@ -295,6 +309,7 @@ final class OverlayController {
         mode: RecognitionIndicatorView.Mode,
         text: String,
         hint: String = "",
+        outputMode: (text: String, accessibilityLabel: String)? = nil,
         autoHideAfter delay: TimeInterval?,
         onHidden: (() -> Void)? = nil
     ) {
@@ -314,6 +329,7 @@ final class OverlayController {
             self.hintLabel.stringValue = hint
             self.hintLabel.isHidden = hint.isEmpty
             self.textCenterYConstraint?.constant = hint.isEmpty ? 0 : -10
+            self.setOutputMode(outputMode)
             self.reposition(for: text)
 
             if !self.window.isVisible {
@@ -337,6 +353,12 @@ final class OverlayController {
         } else {
             DispatchQueue.main.async(execute: update)
         }
+    }
+
+    private func setOutputMode(_ mode: (text: String, accessibilityLabel: String)?) {
+        outputModeLabel.stringValue = mode?.text ?? ""
+        outputModeLabel.setAccessibilityLabel(mode?.accessibilityLabel)
+        outputModeLabel.isHidden = mode == nil
     }
 
     private func prepareDraft(_ text: String) {
@@ -403,15 +425,16 @@ final class OverlayController {
             draftEditor.textContainerInset = NSSize(width: 0, height: max(verticalPadding, (height - textHeight) / 2))
         }
 
+        let windowSize = NSSize(width: width, height: height)
         let origin = VoiceOverlayStyle.frameOrigin(
             in: visibleFrame,
-            windowSize: NSSize(width: width, height: height),
+            windowSize: windowSize,
             position: position,
             stackIndex: stackIndex
         )
         let x = origin.x
         let y = max(origin.y, visibleFrame.minY + VoiceOverlayStyle.screenMargin + footerHeight)
-        let frame = NSRect(x: x, y: y, width: width, height: height)
+        let frame = NSRect(origin: NSPoint(x: x, y: y), size: windowSize)
         window.setFrame(frame, display: true)
     }
 
