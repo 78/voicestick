@@ -116,7 +116,7 @@ const board_confirmation_motion_t *board_confirmation_motion(void)
 es8311_input_board_t board_es8311_input_config(void)
 {
     return (es8311_input_board_t){
-        .i2c_port = I2C_NUM_1,
+        .i2c_port = STICK_S3_I2C_PORT,
         .bus = stick_s3_board_i2c_bus(),
         .i2s_port = I2S_NUM_1,
         .pins = {

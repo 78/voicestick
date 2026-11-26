@@ -2,13 +2,18 @@
 
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
+#include "esp_check.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "stick_s3_board";
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_pmic_dev;
 
 #define STICK_S3_I2C_FREQ_HZ 100000
+#define M5PM1_PROBE_ATTEMPTS 3
+#define M5PM1_PROBE_RETRY_DELAY_MS 10
 
 #define M5PM1_ADDR 0x6e
 #define M5PM1_REG_DEVICE_ID 0x00
@@ -88,87 +93,61 @@ static esp_err_t pmic_clear_irq_reg(uint8_t reg, uint8_t *status)
     return pmic_write_reg(reg, value ? (uint8_t)~value : 0x00);
 }
 
-static esp_err_t init_i2c_on(i2c_port_t port, gpio_num_t sda, gpio_num_t scl)
+static esp_err_t init_i2c(uint8_t *device_id)
 {
-    if (s_i2c_bus) {
-        i2c_del_master_bus(s_i2c_bus);
-        s_i2c_bus = NULL;
-        s_pmic_dev = NULL;
-    }
-
     const i2c_master_bus_config_t bus_config = {
-        .i2c_port = port,
-        .sda_io_num = sda,
-        .scl_io_num = scl,
+        .i2c_port = STICK_S3_I2C_PORT,
+        .sda_io_num = STICK_S3_PIN_I2C_SDA,
+        .scl_io_num = STICK_S3_PIN_I2C_SCL,
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
-
-    esp_err_t err = i2c_new_master_bus(&bus_config, &s_i2c_bus);
-    if (err != ESP_OK) {
-        return err;
-    }
+    i2c_master_bus_handle_t bus;
+    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_config, &bus), TAG, "create I2C bus");
 
     const i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = M5PM1_ADDR,
         .scl_speed_hz = STICK_S3_I2C_FREQ_HZ,
     };
-    return i2c_master_bus_add_device(s_i2c_bus, &dev_config, &s_pmic_dev);
-}
+    i2c_master_dev_handle_t pmic;
+    esp_err_t err = i2c_master_bus_add_device(bus, &dev_config, &pmic);
+    if (err != ESP_OK) {
+        ESP_RETURN_ON_ERROR(i2c_del_master_bus(bus), TAG, "delete I2C bus");
+        return err;
+    }
 
-static esp_err_t init_i2c(void)
-{
-    const struct {
-        i2c_port_t port;
-        gpio_num_t sda;
-        gpio_num_t scl;
-    } candidates[] = {
-        {I2C_NUM_1, STICK_S3_PIN_I2C_SDA, STICK_S3_PIN_I2C_SCL},
-        {I2C_NUM_1, STICK_S3_PIN_I2C_SCL, STICK_S3_PIN_I2C_SDA},
-        {I2C_NUM_0, STICK_S3_PIN_I2C_SDA, STICK_S3_PIN_I2C_SCL},
-        {I2C_NUM_0, STICK_S3_PIN_I2C_SCL, STICK_S3_PIN_I2C_SDA},
-    };
-    esp_err_t last_err = ESP_FAIL;
-
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
-        last_err = init_i2c_on(candidates[i].port, candidates[i].sda, candidates[i].scl);
-        if (last_err != ESP_OK) {
-            ESP_LOGW(TAG, "I2C port %d sda=%d scl=%d init failed: %s",
-                     candidates[i].port, candidates[i].sda, candidates[i].scl,
-                     esp_err_to_name(last_err));
-            continue;
-        }
-
-        uint8_t device_id = 0;
-        last_err = pmic_read_reg(M5PM1_REG_DEVICE_ID, &device_id);
-        if (last_err == ESP_OK) {
-            ESP_LOGI(TAG, "I2C probe port %d sda=%d scl=%d -> ok id=0x%02x",
-                     candidates[i].port, candidates[i].sda, candidates[i].scl, device_id);
+    const uint8_t reg = M5PM1_REG_DEVICE_ID;
+    for (int attempt = 1; attempt <= M5PM1_PROBE_ATTEMPTS; ++attempt) {
+        // The first access may only wake the M5PM1 if it was in I2C idle sleep.
+        err = i2c_master_transmit_receive(pmic, &reg, 1, device_id, 1, 100);
+        if (err == ESP_OK) {
+            s_i2c_bus = bus;
+            s_pmic_dev = pmic;
+            ESP_LOGI(TAG, "I2C probe port %d sda=%d scl=%d -> ok id=0x%02x (attempt %d)",
+                     STICK_S3_I2C_PORT, STICK_S3_PIN_I2C_SDA, STICK_S3_PIN_I2C_SCL,
+                     *device_id, attempt);
             return ESP_OK;
         }
-
-        ESP_LOGI(TAG, "I2C probe port %d sda=%d scl=%d -> %s",
-                 candidates[i].port, candidates[i].sda, candidates[i].scl,
-                 esp_err_to_name(last_err));
+        if (attempt == M5PM1_PROBE_ATTEMPTS ||
+            (err != ESP_ERR_INVALID_RESPONSE && err != ESP_ERR_TIMEOUT)) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(M5PM1_PROBE_RETRY_DELAY_MS));
     }
 
-    return last_err;
+    ESP_LOGW(TAG, "M5PM1 probe at 0x%02x failed: %s", M5PM1_ADDR, esp_err_to_name(err));
+    ESP_RETURN_ON_ERROR(i2c_master_bus_rm_device(pmic), TAG, "remove M5PM1 from I2C bus");
+    ESP_RETURN_ON_ERROR(i2c_del_master_bus(bus), TAG, "delete I2C bus");
+    return err;
 }
 
-static void init_pmic(void)
+static void init_pmic(uint8_t device_id)
 {
-    uint8_t device_id = 0;
-    esp_err_t err = pmic_read_reg(M5PM1_REG_DEVICE_ID, &device_id);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "M5PM1 not found at 0x%02x: %s", M5PM1_ADDR, esp_err_to_name(err));
-        return;
-    }
-
     uint8_t pwr_cfg = 0;
     uint8_t hold_cfg = 0;
-    err = pmic_read_reg(M5PM1_REG_PWR_CFG, &pwr_cfg);
+    esp_err_t err = pmic_read_reg(M5PM1_REG_PWR_CFG, &pwr_cfg);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "read PMIC power config failed: %s", esp_err_to_name(err));
         return;
@@ -214,11 +193,12 @@ static void init_pmic(void)
 
 esp_err_t stick_s3_board_init(void)
 {
-    esp_err_t err = init_i2c();
+    uint8_t device_id = 0;
+    esp_err_t err = init_i2c(&device_id);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "I2C init failed: %s", esp_err_to_name(err));
     } else {
-        init_pmic();
+        init_pmic(device_id);
     }
 
     const gpio_config_t button_config = {
