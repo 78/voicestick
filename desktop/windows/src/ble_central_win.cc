@@ -46,7 +46,6 @@ constexpr std::chrono::milliseconds kServiceDiscoveryTimeout{8000};
 constexpr std::chrono::milliseconds kCharacteristicDiscoveryTimeout{8000};
 constexpr std::chrono::milliseconds kAuthorizationReadTimeout{10000};
 constexpr std::chrono::milliseconds kAuthorizationRetryDelay{500};
-constexpr std::chrono::milliseconds kPairedStateTimeout{3000};
 constexpr std::chrono::milliseconds kDeviceReopenDelay{800};
 constexpr std::chrono::milliseconds kConnectionSettleDelay{300};
 constexpr std::chrono::milliseconds kPairAfterConnectDelay{300};
@@ -674,7 +673,7 @@ bool IsPairingSuccess(winrt::Windows::Devices::Enumeration::DevicePairingResultS
 
 // Pairs without showing Windows UI; the device has no input or output.
 winrt::Windows::Foundation::IAsyncOperation<bool> TryCustomPairAsync(
-    winrt::Windows::Devices::Enumeration::DeviceInformationPairing pairing, std::string label) {
+    winrt::Windows::Devices::Enumeration::DeviceInformationPairing pairing) {
     using winrt::Windows::Devices::Enumeration::DeviceInformationCustomPairing;
     using winrt::Windows::Devices::Enumeration::DevicePairingKinds;
     using winrt::Windows::Devices::Enumeration::DevicePairingProtectionLevel;
@@ -689,10 +688,10 @@ winrt::Windows::Foundation::IAsyncOperation<bool> TryCustomPairAsync(
                                                 DevicePairingProtectionLevel::Encryption);
         custom.PairingRequested(token);
         const auto status = result.Status();
-        LogBleLine("Windows " + label + " pair: result=" + std::to_string(static_cast<int>(status)));
+        LogBleLine("Windows custom pair: result=" + std::to_string(static_cast<int>(status)));
         co_return IsPairingSuccess(status);
     } catch (const winrt::hresult_error& error) {
-        LogBleLine("Windows " + label + " pair: exception hr=" + FormatHresult(error.code()));
+        LogBleLine("Windows custom pair: exception hr=" + FormatHresult(error.code()));
     }
     co_return false;
 }
@@ -707,7 +706,7 @@ winrt::Windows::Foundation::IAsyncOperation<bool> TryPairAsync(BluetoothLEDevice
             co_return false;
         }
         const auto pairing = info.Pairing();
-        if (co_await TryCustomPairAsync(pairing, "custom")) co_return true;
+        if (co_await TryCustomPairAsync(pairing)) co_return true;
         if (pairing.IsPaired()) co_return true;
 
         co_await WaitMs(kDeviceReopenDelay);
@@ -726,12 +725,11 @@ winrt::Windows::Foundation::IAsyncOperation<bool> TryPairAsync(BluetoothLEDevice
 
 // The device only returns 0x01 after bonding and authorizing this host.
 winrt::Windows::Foundation::IAsyncOperation<bool> ReadAuthorized(
-    BluetoothLEDevice device, GattCharacteristic characteristic, std::string device_id, bool pairing) {
+    GattCharacteristic characteristic, std::string device_id, bool pairing) {
     using winrt::Windows::Foundation::AsyncStatus;
     constexpr uint8_t kAttInsufficientAuthentication = 0x05;
     constexpr uint8_t kAttInsufficientEncryption = 0x0f;
     const auto deadline = std::chrono::steady_clock::now() + kAuthorizationReadTimeout;
-    bool paired_on_link = false;
     try {
         while (std::chrono::steady_clock::now() < deadline) {
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -754,17 +752,6 @@ winrt::Windows::Foundation::IAsyncOperation<bool> ReadAuthorized(
             if (!pairing || !error || (error.Value() != kAttInsufficientAuthentication &&
                                         error.Value() != kAttInsufficientEncryption)) {
                 co_return false;
-            }
-            // The first pairing attempt can lose to the device's own security
-            // request, which Windows only offers through its "add device"
-            // notification. Pair once more on the link that is now up.
-            if (!paired_on_link) {
-                paired_on_link = true;
-                const auto device_pairing = device.DeviceInformation().Pairing();
-                if (!device_pairing.IsPaired()) {
-                    co_await TryCustomPairAsync(device_pairing, "on-link");
-                    continue;
-                }
             }
             // The peripheral can start security after GATT is already available.
             co_await WaitMs(kAuthorizationRetryDelay);
@@ -1163,7 +1150,7 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
 
         // Firmware without the characteristic predates the pairing window.
         if (auto authorized = find_characteristic(winrt::guid{BleProtocol::authorized_uuid})) {
-            const bool authorized_link = co_await ReadAuthorized(session->ble_device, authorized, device_id, pairing);
+            const bool authorized_link = co_await ReadAuthorized(authorized, device_id, pairing);
             if (cancelled()) {
                 fail("cancelled");
                 co_return;
@@ -1180,17 +1167,9 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
 
         // Windows can complete bonding when the encrypted characteristic is
         // read, even after the explicit pairing request returned a failure.
-        // It marks the device as paired a moment after the link is bonded.
-        if (pairing && !system_paired) {
-            const auto device_pairing = session->ble_device.DeviceInformation().Pairing();
-            const auto paired_deadline = std::chrono::steady_clock::now() + kPairedStateTimeout;
-            while (!device_pairing.IsPaired() && std::chrono::steady_clock::now() < paired_deadline) {
-                co_await WaitMs(kAuthorizationRetryDelay);
-            }
-            if (!device_pairing.IsPaired()) {
-                fail("Windows did not finish pairing VS-" + device_id + ". Open the device's pairing window and try again.");
-                co_return;
-            }
+        if (pairing && !system_paired && !session->ble_device.DeviceInformation().Pairing().IsPaired()) {
+            fail("Windows did not finish pairing VS-" + device_id + ". Open the device's pairing window and try again.");
+            co_return;
         }
 
         session->audio_value_changed_token = session->audio_characteristic.ValueChanged(
