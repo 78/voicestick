@@ -796,6 +796,13 @@ static void on_link_encrypted(uint16_t conn_handle, int status)
     ble_npl_callout_stop(&s_bonded_security);
     set_pairing_open(false);
     ESP_LOGI(TAG, "authorized connection handle=%u", conn_handle);
+    /* Keep the peripheral's MTU request out of the security handshake. */
+    if (ble_att_mtu(conn_handle) == BLE_ATT_MTU_DFLT) {
+        int rc = ble_gattc_exchange_mtu(conn_handle, NULL, NULL);
+        if (rc != 0 && rc != BLE_HS_EALREADY) {
+            ESP_LOGW(TAG, "mtu exchange request failed rc=%d", rc);
+        }
+    }
     if (s_connection_cb) {
         s_connection_cb(true);
     }
@@ -855,11 +862,6 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             ble_npl_callout_reset(&s_bonded_security, pdMS_TO_TICKS(BONDED_SECURITY_GRACE_MS));
         } else if (!request_link_security(s_link_handle)) {
             return 0;
-        }
-        /* Some centrals do not initiate MTU exchange on their own. */
-        int rc = ble_gattc_exchange_mtu(s_link_handle, NULL, NULL);
-        if (rc != 0 && rc != BLE_HS_EALREADY) {
-            ESP_LOGW(TAG, "mtu exchange request failed rc=%d", rc);
         }
         return 0;
     }
