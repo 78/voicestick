@@ -211,7 +211,8 @@ struct AppConfig {
         let base = websiteURL.appendingPathComponent("firmwares", isDirectory: true)
         return [
             "stick_s3": base.appendingPathComponent("m5stack_stick_s3/latest/manifest.json"),
-            "voicestick_c3": base.appendingPathComponent("voicestick_c3/latest/manifest.json")
+            "voicestick_c3": base.appendingPathComponent("voicestick_c3/latest/manifest.json"),
+            "magiclick_2p5": base.appendingPathComponent("magiclick_2p5/latest/manifest.json")
         ]
     }()
     static let minimumCompatibleFirmwareVersion = "0.3.0"
