@@ -26,6 +26,7 @@
 #include "host/ble_sm.h"
 #include "host/ble_store.h"
 #include "host/ble_uuid.h"
+#include "nimble/hci_common.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
@@ -796,6 +797,11 @@ static void on_link_encrypted(uint16_t conn_handle, int status)
     ble_npl_callout_stop(&s_bonded_security);
     set_pairing_open(false);
     ESP_LOGI(TAG, "authorized connection handle=%u", conn_handle);
+    int dle_rc = ble_gap_set_data_len(conn_handle, BLE_HCI_SUGG_DEF_DATALEN_TX_OCTETS_MAX,
+                                     BLE_HCI_SUGG_DEF_DATALEN_TX_TIME_MAX);
+    if (dle_rc != 0) {
+        ESP_LOGD(TAG, "data length update request failed rc=%d", dle_rc);
+    }
     /* Keep the peripheral's MTU request out of the security handshake. */
     if (ble_att_mtu(conn_handle) == BLE_ATT_MTU_DFLT) {
         int rc = ble_gattc_exchange_mtu(conn_handle, NULL, NULL);
@@ -807,6 +813,18 @@ static void on_link_encrypted(uint16_t conn_handle, int status)
         s_connection_cb(true);
     }
     announce_state_subscription();
+}
+
+int __real_ble_hs_hci_util_set_data_len(uint16_t conn_handle, uint16_t tx_octets, uint16_t tx_time);
+
+int __wrap_ble_hs_hci_util_set_data_len(uint16_t conn_handle, uint16_t tx_octets, uint16_t tx_time)
+{
+    /* ESP-IDF's NimBLE host requests DLE from its connection callback.
+     * Defer that request until the saved host has restored encryption. */
+    if (!s_connected || conn_handle != s_conn_handle) {
+        return 0;
+    }
+    return __real_ble_hs_hci_util_set_data_len(conn_handle, tx_octets, tx_time);
 }
 
 static bool request_link_security(uint16_t conn_handle)

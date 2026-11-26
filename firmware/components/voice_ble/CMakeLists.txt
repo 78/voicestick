@@ -3,3 +3,5 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES app_update bt nvs_flash board
 )
+
+target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=ble_hs_hci_util_set_data_len")
