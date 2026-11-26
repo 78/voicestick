@@ -55,7 +55,7 @@ public:
     std::optional<FirmwareManifest> FetchManifestSync(std::string& error) const;
     std::optional<ByteVector> DownloadOtaSync(const FirmwareManifest& manifest, std::string& error) const;
 
-    static constexpr std::string_view supported_hardware[] = {"stick_s3", "voicestick_c3"};
+    static constexpr std::string_view supported_hardware[] = {"stick_s3", "voicestick_c3", "magiclick_2p5"};
     static std::string_view ManifestUrlForHardware(std::string_view hardware);
 
 private:

@@ -217,6 +217,9 @@ std::string_view FirmwareManifestClient::ManifestUrlForHardware(std::string_view
     if (normalized == "voicestickc3") {
         return "https://78.github.io/voicestick/firmwares/voicestick_c3/latest/manifest.json";
     }
+    if (normalized == "magiclick2p5") {
+        return "https://78.github.io/voicestick/firmwares/magiclick_2p5/latest/manifest.json";
+    }
     return {};
 }
 

@@ -85,8 +85,15 @@ void FirmwareUpdateDialog::UpdateProgress(const FirmwareUpdateProgress& progress
     displayed_percent_ = percent;
     SendMessageW(progress_bar_, PBM_SETPOS, percent, 0);
     SetText(percent_label_, std::to_wstring(percent) + L"%");
-    SetText(detail_label_, percent >= 100 ? L"Finalizing firmware update..."
-                                          : L"Transferring firmware over BLE...");
+    if (percent >= 100) {
+        SetText(detail_label_, L"Finalizing firmware update...");
+    } else if (progress.written_bytes > 0) {
+        SetText(detail_label_, L"Writing over Bluetooth... " +
+            std::to_wstring(progress.written_bytes / 1024) + L" / " +
+            std::to_wstring(progress.total_bytes / 1024) + L" KiB confirmed");
+    } else {
+        SetText(detail_label_, L"Preparing the device for the firmware transfer...");
+    }
 }
 
 void FirmwareUpdateDialog::Finish(bool success, const std::string& message) {

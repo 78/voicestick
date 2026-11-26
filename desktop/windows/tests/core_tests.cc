@@ -547,14 +547,19 @@ void TestFirmwareManifestParsingAndVersionCompare() {
     assert(IsFirmwareHardwareCompatible("", "", "stick_s3"));
     const auto stick_url = FirmwareManifestClient::ManifestUrlForHardware("stick_s3");
     const auto c3_url = FirmwareManifestClient::ManifestUrlForHardware("voicestick_c3");
+    const auto magiclick_url = FirmwareManifestClient::ManifestUrlForHardware("magiclick_2p5");
     assert(stick_url.ends_with("/m5stack_stick_s3/latest/manifest.json"));
     assert(c3_url.ends_with("/voicestick_c3/latest/manifest.json"));
+    assert(magiclick_url.ends_with("/magiclick_2p5/latest/manifest.json"));
+    assert(FirmwareManifestClient::ManifestUrlForHardware("MagiClick 2P5") == magiclick_url);
     assert(FirmwareManifestClient::ManifestUrlForHardware("sticks3") == stick_url);
     assert(FirmwareManifestClient::ManifestUrlForHardware("m5stack_stick_s3") == stick_url);
     assert(FirmwareManifestClient::ManifestUrlForHardware("").empty());
     assert(FirmwareManifestClient::ManifestUrlForHardware("unknown").empty());
     assert(!IsFirmwareHardwareCompatible("voicestick_c3", "0.3.7", "stick_s3"));
     assert(!IsFirmwareHardwareCompatible("stick_s3", "0.3.7", "voicestick_c3"));
+    assert(IsFirmwareHardwareCompatible("magiclick_2p5", "0.4.2", "magiclick_2p5"));
+    assert(!IsFirmwareHardwareCompatible("magiclick_2p5", "0.4.2", "stick_s3"));
 }
 
 void TestFirmwareWindowsAppVersionRequirement() {

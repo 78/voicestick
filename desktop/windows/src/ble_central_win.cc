@@ -1283,6 +1283,19 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
         session->ota_state_subscribed = session->ota_state_characteristic != nullptr;
         session->device.supports_firmware_update =
             session->ota_rx_characteristic && session->ota_state_subscribed;
+        // A restored notification subscription can send device_info before
+        // this process attaches its handler. Request a fresh snapshot.
+        if (session->control_characteristic) {
+            ByteVector request;
+            AppendAscii(request, R"({"event":"get_device_info"})");
+            try {
+                const auto snapshot_status = co_await session->control_characteristic.WriteValueAsync(
+                    BufferFromBytes(request), GattWriteOption::WriteWithoutResponse);
+                LogBleLine("device info request VS-" + device_id + " status=" + GattStatusName(snapshot_status));
+            } catch (const winrt::hresult_error& error) {
+                LogBleLine("device info request VS-" + device_id + " failed: " + FormatHresult(error.code()));
+            }
+        }
         // The awaits above can resume on a thread pool thread, and the
         // coordinator callbacks must run on the UI thread like state events do.
         DispatchToUiThread([this, session, device_id, bluetooth_address] {
@@ -1401,9 +1414,10 @@ winrt::fire_and_forget BleCentralWin::UpdateFirmwareAsync(
                    " chunk_size=" + std::to_string(chunk_size) +
                    " max_pdu=" + std::to_string(max_pdu) +
                    " packets_per_ack=" + std::to_string(packets_per_ack));
-        std::size_t last_progress = 0;
+        std::size_t last_logged_offset = 0;
         int packets_since_ack = 0;
         const auto data_started = std::chrono::steady_clock::now();
+        auto next_progress = data_started;
         while (offset < update_session->image.size()) {
             if (update_session->finished || shutting_down_) co_return;
             const auto end = std::min(offset + chunk_size, update_session->image.size());
@@ -1427,20 +1441,22 @@ winrt::fire_and_forget BleCentralWin::UpdateFirmwareAsync(
             if (!acknowledge) continue;
             packets_since_ack = 0;
             update_session->confirmed_bytes = offset;
-            if (offset - last_progress >= 32 * 1024 || offset == update_session->image.size()) {
-                last_progress = offset;
+            const auto now = std::chrono::steady_clock::now();
+            if (offset - last_logged_offset >= 32 * 1024 || offset == update_session->image.size()) {
+                last_logged_offset = offset;
                 const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - data_started).count();
+                    now - data_started).count();
                 LogBleLine("OTA write confirmed VS-" + update_session->device_id +
                            " written=" + std::to_string(offset) +
                            "/" + std::to_string(update_session->image.size()) +
                            " elapsed_ms=" + std::to_string(elapsed));
-                if (update_session->progress) {
-                    update_session->progress(FirmwareUpdateProgress{
-                        static_cast<int>(offset),
-                        static_cast<int>(update_session->image.size()),
-                        true});
-                }
+            }
+            if (update_session->progress && (now >= next_progress || offset == update_session->image.size())) {
+                next_progress = now + std::chrono::milliseconds(500);
+                update_session->progress(FirmwareUpdateProgress{
+                    static_cast<int>(offset),
+                    static_cast<int>(update_session->image.size()),
+                    true});
             }
         }
 
