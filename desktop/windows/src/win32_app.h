@@ -96,7 +96,7 @@ private:
     AppConfig config_;
     InputInjectorWin input_injector_;
     std::unique_ptr<VoiceStickCoordinator> coordinator_;
-    std::unique_ptr<PairDeviceDialog> pair_device_dialog_;
+    std::shared_ptr<PairDeviceDialog> pair_device_dialog_;
     std::unique_ptr<SettingsDialog> settings_dialog_;
     std::unique_ptr<FirmwareUpdateDialog> firmware_update_dialog_;
     std::unique_ptr<OverlayWindow> overlay_;

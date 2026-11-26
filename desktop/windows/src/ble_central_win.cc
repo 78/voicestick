@@ -29,7 +29,6 @@ using winrt::Windows::Devices::Bluetooth::BluetoothLEPreferredConnectionParamete
 using winrt::Windows::Devices::Bluetooth::BluetoothCacheMode;
 using winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementReceivedEventArgs;
 using winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher;
-using winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEScanningMode;
 using winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic;
 using winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristicProperties;
 using winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattClientCharacteristicConfigurationDescriptorValue;
@@ -47,8 +46,10 @@ constexpr std::chrono::milliseconds kServiceDiscoveryTimeout{8000};
 constexpr std::chrono::milliseconds kCharacteristicDiscoveryTimeout{8000};
 constexpr std::chrono::milliseconds kAuthorizationReadTimeout{10000};
 constexpr std::chrono::milliseconds kAuthorizationRetryDelay{500};
+constexpr std::chrono::milliseconds kPairedStateTimeout{3000};
 constexpr std::chrono::milliseconds kDeviceReopenDelay{800};
 constexpr std::chrono::milliseconds kConnectionSettleDelay{300};
+constexpr std::chrono::milliseconds kPairAfterConnectDelay{300};
 
 // HRESULT_FROM_WIN32(ERROR_BAD_COMMAND): Windows surfaces this for our
 // scenario when the OS thinks the device is already paired/bonded but the
@@ -232,6 +233,7 @@ void BleCentralWin::DispatchToUiThread(std::function<void()> callback) {
 }
 
 void BleCentralWin::ProcessDispatchedCallbacks() {
+    const auto self = weak_from_this().lock();
     std::queue<std::function<void()>> pending;
     {
         std::lock_guard lock(dispatch_mutex_);
@@ -519,64 +521,48 @@ void BleCentralWin::CancelPendingConnect(const std::string& device_id) {
 
 void BleCentralWin::StartScan() {
     if (shutting_down_) return;
-    StopScan();
+    const auto self = weak_from_this().lock();
+    bool can_scan = false;
     bool has_paired_devices = false;
     {
         std::lock_guard lock(mutex_);
-        if (firmware_update_session_) return;
+        can_scan = !firmware_update_session_;
         has_paired_devices = !paired_device_ids_.empty();
     }
+    if (!can_scan || !has_paired_devices) StopScan();
+    if (!can_scan) return;
     if (!has_paired_devices) {
         LogBleLine("scan skipped: no paired devices");
         PublishConnections();
         return;
     }
-    watcher_ = BluetoothLEAdvertisementWatcher();
-    watcher_.ScanningMode(BluetoothLEScanningMode::Active);
     // No AdvertisementFilter here: the firmware puts its 128-bit service UUID
     // in the ADV PDU but the LocalName "VS-XXXX" only in the scan response,
     // and WinRT's per-PDU filter would drop the scan response so we'd never
     // see the device id. Filter on device_id in HandleAdvertisement instead.
-    received_token_ = watcher_.Received({this, &BleCentralWin::HandleAdvertisement});
     try {
-        watcher_.Start();
-        LogBleLine("scan started");
+        if (scan_.Start([weak_self = weak_from_this()](const auto& watcher, const auto& args) {
+                if (auto self = weak_self.lock(); self && !self->shutting_down_) {
+                    self->HandleAdvertisement(watcher, args);
+                }
+            })) {
+            LogBleLine("scan started");
+        }
     } catch (const winrt::hresult_error& error) {
         const auto message = ScanStartFailureMessage(error);
         LogBleLine("scan start failed: " + message);
-        try {
-            watcher_.Received(received_token_);
-        } catch (...) {
-        }
-        watcher_ = nullptr;
         PublishConnections();
         if (on_scan_error) on_scan_error(message);
     } catch (...) {
         const std::string message = "Bluetooth LE scan failed with an unknown error.";
         LogBleLine("scan start failed: unknown error");
-        try {
-            watcher_.Received(received_token_);
-        } catch (...) {
-        }
-        watcher_ = nullptr;
         PublishConnections();
         if (on_scan_error) on_scan_error(message);
     }
 }
 
 void BleCentralWin::StopScan() {
-    if (watcher_) {
-        try {
-            watcher_.Received(received_token_);
-            watcher_.Stop();
-        } catch (const winrt::hresult_error& error) {
-            LogBleLine("scan stop failed: hr=" + FormatHresult(error.code()));
-        } catch (...) {
-            LogBleLine("scan stop failed: unknown error");
-        }
-        watcher_ = nullptr;
-        LogBleLine("scan stopped");
-    }
+    scan_.Stop();
 }
 
 void BleCentralWin::HandleAdvertisement(const BluetoothLEAdvertisementWatcher&,
@@ -681,34 +667,19 @@ winrt::Windows::Foundation::IAsyncOperation<bool> TryUnpairAsync(winrt::hstring 
     }
 }
 
-// Complete Windows pairing before opening a GATT session for the device.
-winrt::Windows::Foundation::IAsyncOperation<bool> TryPairAsync(BluetoothLEDevice device) {
+bool IsPairingSuccess(winrt::Windows::Devices::Enumeration::DevicePairingResultStatus status) {
+    using winrt::Windows::Devices::Enumeration::DevicePairingResultStatus;
+    return status == DevicePairingResultStatus::Paired || status == DevicePairingResultStatus::AlreadyPaired;
+}
+
+// Pairs without showing Windows UI; the device has no input or output.
+winrt::Windows::Foundation::IAsyncOperation<bool> TryCustomPairAsync(
+    winrt::Windows::Devices::Enumeration::DeviceInformationPairing pairing, std::string label) {
     using winrt::Windows::Devices::Enumeration::DeviceInformationCustomPairing;
     using winrt::Windows::Devices::Enumeration::DevicePairingKinds;
     using winrt::Windows::Devices::Enumeration::DevicePairingProtectionLevel;
     using winrt::Windows::Devices::Enumeration::DevicePairingRequestedEventArgs;
-    using winrt::Windows::Devices::Enumeration::DevicePairingResultStatus;
     try {
-        auto info = device.DeviceInformation();
-        if (!info) {
-            LogBleLine("pair: DeviceInformation not found");
-            co_return false;
-        }
-        const auto pairing = info.Pairing();
-        const auto is_success = [](DevicePairingResultStatus status) {
-            return status == DevicePairingResultStatus::Paired ||
-                   status == DevicePairingResultStatus::AlreadyPaired;
-        };
-        const auto system_result = co_await pairing.PairAsync(DevicePairingProtectionLevel::Encryption);
-        const auto system_status = system_result.Status();
-        LogBleLine("Windows system pair: result=" + std::to_string(static_cast<int>(system_status)));
-        if (is_success(system_status)) co_return true;
-        if (system_status != DevicePairingResultStatus::Failed &&
-            system_status != DevicePairingResultStatus::NotReadyToPair) {
-            co_return false;
-        }
-
-        co_await WaitMs(kDeviceReopenDelay);
         auto custom = pairing.Custom();
         auto token = custom.PairingRequested(
             [](const DeviceInformationCustomPairing&, const DevicePairingRequestedEventArgs& args) {
@@ -718,8 +689,32 @@ winrt::Windows::Foundation::IAsyncOperation<bool> TryPairAsync(BluetoothLEDevice
                                                 DevicePairingProtectionLevel::Encryption);
         custom.PairingRequested(token);
         const auto status = result.Status();
-        LogBleLine("Windows custom pair: result=" + std::to_string(static_cast<int>(status)));
-        co_return is_success(status);
+        LogBleLine("Windows " + label + " pair: result=" + std::to_string(static_cast<int>(status)));
+        co_return IsPairingSuccess(status);
+    } catch (const winrt::hresult_error& error) {
+        LogBleLine("Windows " + label + " pair: exception hr=" + FormatHresult(error.code()));
+    }
+    co_return false;
+}
+
+// Pairs without Windows UI first and falls back to the system pairing dialog.
+winrt::Windows::Foundation::IAsyncOperation<bool> TryPairAsync(BluetoothLEDevice device) {
+    using winrt::Windows::Devices::Enumeration::DevicePairingProtectionLevel;
+    try {
+        auto info = device.DeviceInformation();
+        if (!info) {
+            LogBleLine("pair: DeviceInformation not found");
+            co_return false;
+        }
+        const auto pairing = info.Pairing();
+        if (co_await TryCustomPairAsync(pairing, "custom")) co_return true;
+        if (pairing.IsPaired()) co_return true;
+
+        co_await WaitMs(kDeviceReopenDelay);
+        const auto system_result = co_await pairing.PairAsync(DevicePairingProtectionLevel::Encryption);
+        const auto system_status = system_result.Status();
+        LogBleLine("Windows system pair: result=" + std::to_string(static_cast<int>(system_status)));
+        co_return IsPairingSuccess(system_status);
     } catch (const winrt::hresult_error& error) {
         LogBleLine("pair: exception hr=" + FormatHresult(error.code()));
         co_return false;
@@ -731,11 +726,12 @@ winrt::Windows::Foundation::IAsyncOperation<bool> TryPairAsync(BluetoothLEDevice
 
 // The device only returns 0x01 after bonding and authorizing this host.
 winrt::Windows::Foundation::IAsyncOperation<bool> ReadAuthorized(
-    GattCharacteristic characteristic, std::string device_id, bool pairing) {
+    BluetoothLEDevice device, GattCharacteristic characteristic, std::string device_id, bool pairing) {
     using winrt::Windows::Foundation::AsyncStatus;
     constexpr uint8_t kAttInsufficientAuthentication = 0x05;
     constexpr uint8_t kAttInsufficientEncryption = 0x0f;
     const auto deadline = std::chrono::steady_clock::now() + kAuthorizationReadTimeout;
+    bool paired_on_link = false;
     try {
         while (std::chrono::steady_clock::now() < deadline) {
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -758,6 +754,17 @@ winrt::Windows::Foundation::IAsyncOperation<bool> ReadAuthorized(
             if (!pairing || !error || (error.Value() != kAttInsufficientAuthentication &&
                                         error.Value() != kAttInsufficientEncryption)) {
                 co_return false;
+            }
+            // The first pairing attempt can lose to the device's own security
+            // request, which Windows only offers through its "add device"
+            // notification. Pair once more on the link that is now up.
+            if (!paired_on_link) {
+                paired_on_link = true;
+                const auto device_pairing = device.DeviceInformation().Pairing();
+                if (!device_pairing.IsPaired()) {
+                    co_await TryCustomPairAsync(device_pairing, "on-link");
+                    continue;
+                }
             }
             // The peripheral can start security after GATT is already available.
             co_await WaitMs(kAuthorizationRetryDelay);
@@ -895,14 +902,7 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
         }
         LogBleLine("BluetoothLEDevice opened VS-" + device_id +
                    " device_id=" + winrt::to_string(session->ble_device.DeviceId()));
-        // Pair before opening a GATT session or reading an encrypted
-        // characteristic. Either operation can start a competing system
-        // security procedure on an unpaired link.
         bool system_paired = false;
-        if (pairing) {
-            LogBleLine("starting Windows pairing before GATT VS-" + device_id);
-            system_paired = co_await TryPairAsync(session->ble_device);
-        }
         attach_device_handlers(session);
 
         // Give the controller a brief moment to actually establish the link
@@ -924,8 +924,8 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
 
         // Give MaintainConnection time to establish the link-layer
         // connection before triggering service discovery.
-        constexpr int kConnectionPollIntervalMs = 500;
-        constexpr int kConnectionPollAttempts = 8;
+        constexpr int kConnectionPollIntervalMs = 100;
+        constexpr int kConnectionPollAttempts = 40;
         for (int poll = 0; poll < kConnectionPollAttempts; ++poll) {
             co_await WaitMs(std::chrono::milliseconds(kConnectionPollIntervalMs));
             if (cancelled()) {
@@ -938,6 +938,16 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
                 break;
             }
         }
+        // Pair on the open link, before reading an encrypted characteristic
+        // and before the device sends its own security request. The device
+        // rejects a pairing request from a host it still has keys for if it
+        // arrives right after the link comes up.
+        if (pairing) {
+            co_await WaitMs(kPairAfterConnectDelay);
+            LogBleLine("starting Windows pairing VS-" + device_id);
+            system_paired = co_await TryPairAsync(session->ble_device);
+        }
+
         auto pre_status = session->ble_device.ConnectionStatus();
         LogBleLine("pre-discovery status VS-" + device_id + " = " +
                    (pre_status == BluetoothConnectionStatus::Connected ? "connected" : "disconnected") +
@@ -1153,7 +1163,7 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
 
         // Firmware without the characteristic predates the pairing window.
         if (auto authorized = find_characteristic(winrt::guid{BleProtocol::authorized_uuid})) {
-            const bool authorized_link = co_await ReadAuthorized(authorized, device_id, pairing);
+            const bool authorized_link = co_await ReadAuthorized(session->ble_device, authorized, device_id, pairing);
             if (cancelled()) {
                 fail("cancelled");
                 co_return;
@@ -1170,9 +1180,17 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
 
         // Windows can complete bonding when the encrypted characteristic is
         // read, even after the explicit pairing request returned a failure.
-        if (pairing && !system_paired && !session->ble_device.DeviceInformation().Pairing().IsPaired()) {
-            fail("Windows did not finish pairing VS-" + device_id + ". Open the device's pairing window and try again.");
-            co_return;
+        // It marks the device as paired a moment after the link is bonded.
+        if (pairing && !system_paired) {
+            const auto device_pairing = session->ble_device.DeviceInformation().Pairing();
+            const auto paired_deadline = std::chrono::steady_clock::now() + kPairedStateTimeout;
+            while (!device_pairing.IsPaired() && std::chrono::steady_clock::now() < paired_deadline) {
+                co_await WaitMs(kAuthorizationRetryDelay);
+            }
+            if (!device_pairing.IsPaired()) {
+                fail("Windows did not finish pairing VS-" + device_id + ". Open the device's pairing window and try again.");
+                co_return;
+            }
         }
 
         session->audio_value_changed_token = session->audio_characteristic.ValueChanged(

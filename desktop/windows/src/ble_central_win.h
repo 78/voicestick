@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ble_advertisement_scan.h"
 #include "voice_stick_coordinator.h"
 
 #include <Windows.h>
@@ -136,8 +137,7 @@ private:
     // reports, so remember which addresses are in their pairing window.
     std::set<std::uint64_t> pairing_window_addresses_;
     std::set<std::string> cancelled_device_ids_;
-    winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher watcher_{nullptr};
-    winrt::event_token received_token_{};
+    BleAdvertisementScan scan_;
     std::mutex radio_mutex_;
     winrt::Windows::Devices::Radios::Radio bluetooth_radio_{nullptr};
     winrt::event_token radio_state_token_{};

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ble_advertisement_scan.h"
 #include "voice_stick_coordinator.h"
 
 #include <Windows.h>
@@ -10,6 +11,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -28,6 +30,7 @@ public:
     ~PairDeviceDialog();
 
     void Show();
+    void Close();
     HWND hwnd() const { return hwnd_; }
     void SetConnectedDevices(const std::vector<ConnectedDevice>& devices);
     void SetDeviceInfo(const DeviceInfo& info);
@@ -44,18 +47,29 @@ private:
         int rssi = 0;
     };
 
+    struct ScanResults {
+        ScanResults(HWND window, std::wstring status) : notification_window(window), status(std::move(status)) {}
+
+        std::mutex mutex;
+        HWND notification_window;
+        const std::wstring status;
+        std::vector<PairingDevice> devices;
+        // The service UUID and name can arrive in separate advertising reports.
+        std::set<std::uint64_t> pairing_window_addresses;
+    };
+
     static INT_PTR CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
     INT_PTR HandleMessage(UINT message, WPARAM w_param, LPARAM l_param);
     LPCDLGTEMPLATE BuildDialogTemplate();
     void BuildContent();
-    void StartScan();
+    void StartScan(std::wstring status = {});
     void StopScan();
-    void HandleAdvertisement(
-        const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher& watcher,
+    void ClearScanResults();
+    static void HandleAdvertisement(
+        ScanResults& results,
         const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementReceivedEventArgs& args);
     void RebuildList();
     void PairSelectedDevice();
-    void Close();
     void BeginPairing(const PairingDevice& device);
     void HandlePairingConnected();
     void HandlePairingSucceeded(const DeviceInfo& info);
@@ -84,13 +98,8 @@ private:
     std::function<void(std::string, std::uint64_t, BluetoothAddressKind, std::string)> on_pair_;
     std::function<void(std::string, std::optional<DeviceInfo>)> on_pair_completed_;
     bool pairing_finalized_ = false;
-    std::vector<PairingDevice> devices_;
-    // The service UUID and the device name arrive in separate advertising
-    // reports, so remember which addresses are in their pairing window.
-    std::set<std::uint64_t> pairing_window_addresses_;
-    std::mutex mutex_;
-    winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher watcher_{nullptr};
-    winrt::event_token received_token_{};
+    std::shared_ptr<ScanResults> scan_results_;
+    BleAdvertisementScan scan_;
 };
 
 } // namespace voicestick

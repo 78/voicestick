@@ -749,6 +749,7 @@ LRESULT Win32App::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
 void Win32App::ShutdownAndQuit() {
     if (is_shutting_down_) return;
     is_shutting_down_ = true;
+    if (pair_device_dialog_) pair_device_dialog_->Close();
     pair_device_dialog_.reset();
     if (coordinator_) coordinator_->Shutdown();
     DestroyWindow(hwnd_);
@@ -1151,7 +1152,8 @@ bool Win32App::ShowOnboarding() {
 }
 
 void Win32App::ShowPairDeviceDialog() {
-    pair_device_dialog_ = std::make_unique<PairDeviceDialog>(
+    if (is_shutting_down_ || pair_device_dialog_) return;
+    auto dialog = std::make_shared<PairDeviceDialog>(
         instance_, hwnd_, config_.paired_device_ids,
         [this](std::string device_id, std::uint64_t bluetooth_address,
                BluetoothAddressKind address_kind, std::string name) {
@@ -1160,13 +1162,15 @@ void Win32App::ShowPairDeviceDialog() {
         [this](std::string device_id, std::optional<DeviceInfo> info) {
             HandlePairingCompleted(device_id, std::move(info));
         });
-    pair_device_dialog_->on_pair_timeout = [this](std::string device_id) {
+    dialog->on_pair_timeout = [this](std::string device_id) {
         pending_pairing_entry_.reset();
         if (coordinator_) coordinator_->CancelPendingConnect(device_id);
         LogLine("Pairing timed out VS-" + device_id);
     };
+    pair_device_dialog_ = dialog;
     if (ble_central_) ble_central_->SetPairingDialogOpen(true);
-    pair_device_dialog_->Show();
+    dialog->Show();
+    pair_device_dialog_.reset();
     if (ble_central_) ble_central_->SetPairingDialogOpen(false);
 }
 
