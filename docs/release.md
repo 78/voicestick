@@ -56,7 +56,7 @@ is present. An omitted field or platform entry means every app version meets
 the version requirement for that platform. Older apps ignore the field.
 GitHub Pages serves the manifests for current clients. The release also
 updates the existing OSS manifests for installed clients that use those URLs.
-Verify that both Pages manifests report the new firmware and minimum app
+Verify that the Pages manifests report the new firmware and minimum app
 versions and that their OTA and merged URLs are reachable.
 
 ## macOS-Only Release
@@ -113,8 +113,7 @@ voicestick/firmwares/magiclick_2p5/latest/
 
 After publishing a combined or firmware-only GitHub Release, the workflow
 requests a Pages deployment. The deployment refreshes the appcast and copies
-the StickS3 and C3 manifests from OSS. The MagiClick 2P5 manifest is available
-on GitHub Releases and OSS.
+the three board manifests from OSS.
 
 ## Windows First
 
@@ -185,6 +184,7 @@ Stable update endpoints:
 https://78.github.io/voicestick/appcast.xml
 https://78.github.io/voicestick/firmwares/m5stack_stick_s3/latest/manifest.json
 https://78.github.io/voicestick/firmwares/voicestick_c3/latest/manifest.json
+https://78.github.io/voicestick/firmwares/magiclick_2p5/latest/manifest.json
 ```
 
 For version `0.2.4`, the appcast should contain:
@@ -207,6 +207,7 @@ Use `HEAD` requests or a browser to confirm every URL returns `200`.
 Invoke-WebRequest -UseBasicParsing https://78.github.io/voicestick/appcast.xml
 Invoke-WebRequest -UseBasicParsing https://78.github.io/voicestick/firmwares/m5stack_stick_s3/latest/manifest.json
 Invoke-WebRequest -UseBasicParsing https://78.github.io/voicestick/firmwares/voicestick_c3/latest/manifest.json
+Invoke-WebRequest -UseBasicParsing https://78.github.io/voicestick/firmwares/magiclick_2p5/latest/manifest.json
 
 Invoke-WebRequest -UseBasicParsing -Method Head https://github.com/78/voicestick/releases/download/v0.2.4/VoiceStick_0.2.4.msi
 Invoke-WebRequest -UseBasicParsing -Method Head https://github.com/78/voicestick/releases/download/v0.2.4/VoiceStick-0.2.4.zip
@@ -223,6 +224,6 @@ The release is complete when:
 
 - macOS appcast entry points to the new Sparkle ZIP.
 - Windows appcast entry points to the new signed MSI.
-- both `latest/manifest.json` files report the new firmware and minimum app versions.
+- The three `latest/manifest.json` files report the new firmware and minimum app versions.
 - OTA and merged firmware URLs are reachable.
 - the GitHub Release contains all macOS, Windows, and firmware assets.

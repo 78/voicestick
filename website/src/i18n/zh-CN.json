@@ -7,7 +7,7 @@
   "hero": {
     "eyebrow": "BLE 随身语音输入器",
     "title": "VoiceStick",
-    "lead": "基于 M5Stack StickS3 的小巧语音棒。通过 BLE 低功耗蓝牙连接 macOS 或 Windows，接入豆包语音大模型，并把实时反馈的文本输入到当前光标位置。",
+    "lead": "适用于 M5Stack StickS3、VoiceStick C3 v1 和 MagiClick 2P5 的随身语音输入器。通过 BLE 低功耗蓝牙连接 macOS 或 Windows，并把识别后的文本输入到当前光标位置。",
     "downloadMac": "下载 macOS",
     "downloadWindows": "下载 Windows",
     "flash": "在线烧录固件",
@@ -36,7 +36,7 @@
   },
   "flasher": {
     "title": "在线烧录固件",
-    "body": "使用桌面版 Chrome 或 Edge，通过 USB 为 M5Stack StickS3 或 VoiceStick C3 v1 烧录固件。",
+    "body": "使用桌面版 Chrome 或 Edge，通过 USB 为所选设备烧录固件。",
     "board": "硬件",
     "steps": {
       "usb": "用支持数据传输的 USB-C 线将 {board} 连接到电脑。",
@@ -44,7 +44,8 @@
     },
     "boot": {
       "stick_s3": "如果连接失败，按住侧边复位键直到内部绿色 LED 闪烁，松开后重试。",
-      "voicestick_c3": "如果连接失败，按住取消键（BOOT）并重启设备，进入下载模式后松开，再重试。"
+      "voicestick_c3": "如果连接失败，按住取消键（BOOT）并重启设备，进入下载模式后松开，再重试。",
+      "magiclick_2p5": "如果连接失败，按住左键（BOOT）并重启设备，进入下载模式后松开，再重试。"
     },
     "button": {
       "start": "开始烧录",

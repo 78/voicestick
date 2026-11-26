@@ -27,6 +27,12 @@ const boards = {
     manifestUrl: import.meta.env.VITE_C3_FIRMWARE_MANIFEST_URL || `${firmwareBase}/voicestick_c3/latest/manifest.json`,
     flashFreq: 'keep',
   },
+  magiclick_2p5: {
+    name: 'MagiClick 2P5',
+    chip: 'ESP32-S3',
+    manifestUrl: import.meta.env.VITE_MAGICLICK_FIRMWARE_MANIFEST_URL || `${firmwareBase}/magiclick_2p5/latest/manifest.json`,
+    flashFreq: 'keep',
+  },
 }
 const appResetSequence = 'D0|R1|W100|R0|W500|D0'
 

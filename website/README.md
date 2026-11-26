@@ -72,7 +72,7 @@ cd website
 npm run build
 ```
 
-The generated `dist/` directory is deployed to GitHub Pages. It includes `appcast.xml` and each board's manifest at `firmwares/<board>/latest/manifest.json`. The deployment copies the manifests from OSS into the `m5stack_stick_s3` and `voicestick_c3` directories. The firmware image URLs point to OSS.
+The generated `dist/` directory is deployed to GitHub Pages. It includes `appcast.xml` and each board's manifest at `firmwares/<board>/latest/manifest.json`. The deployment copies the manifests from OSS into the `m5stack_stick_s3`, `voicestick_c3`, and `magiclick_2p5` directories. The firmware image URLs point to OSS.
 
 ## GitHub Actions
 
