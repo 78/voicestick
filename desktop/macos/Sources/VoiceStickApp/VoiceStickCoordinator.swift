@@ -99,7 +99,7 @@ final class VoiceStickCoordinator {
             self.deviceID = deviceID
             self.sessionID = sessionID
             self.startedAt = Date()
-            self.asr = ASRWebSocketClient(config: config)
+            self.asr = VoiceStickCoordinator.makeASRClient(config: config)
             self.debugAudioRecorder = DebugAudioRecorder(
                 enabled: config.debugAudioCache,
                 directory: config.debugAudioDirectory
@@ -124,7 +124,7 @@ final class VoiceStickCoordinator {
     private let statusController: StatusController
     private let ble: BleCentral
     private var asr: any ASRClient
-    private var translator: LLMTranslationClient
+    private var textClient: LLMTextClient
     private let subtitleController = SubtitleController()
     private let oggMuxer = OggOpusMuxer(sampleRate: 16_000, channels: 1)
     private let inputInjector = InputInjector()
@@ -144,6 +144,7 @@ final class VoiceStickCoordinator {
     private var asrStarted = false
     private var sentFinalAudioChunk = false
     private var pastedFinalText = false
+    private var pendingTextTransformID: UUID?
     private var waitingForAudioEnd = false
     private var audioEndTimeoutTimer: Timer?
     private var pendingPasteState = PendingPasteState.idle {
@@ -194,8 +195,8 @@ final class VoiceStickCoordinator {
         self.statusController = statusController
         self.pairedDeviceIDs = config.pairedDeviceIDs
         self.ble = BleCentral(pairedDeviceIDs: config.pairedDeviceIDs)
-        self.asr = ASRWebSocketClient(config: config)
-        self.translator = LLMTranslationClient(config: config)
+        self.asr = Self.makeASRClient(config: config)
+        self.textClient = LLMTextClient(config: config)
         self.debugAudioRecorder = DebugAudioRecorder(
             enabled: config.debugAudioCache,
             directory: config.debugAudioDirectory
@@ -278,8 +279,8 @@ final class VoiceStickCoordinator {
             enabled: config.debugAudioCache,
             directory: config.debugAudioDirectory
         )
-        asr = ASRWebSocketClient(config: config)
-        translator = LLMTranslationClient(config: config)
+        asr = Self.makeASRClient(config: config)
+        textClient = LLMTextClient(config: config)
         configureASRCallbacks()
 
         if pairedDeviceIDs != config.pairedDeviceIDs {
@@ -288,6 +289,15 @@ final class VoiceStickCoordinator {
             recoverFromASRError()
         } else if wasRecognizing {
             statusController.setStatus("Ready")
+        }
+    }
+
+    static func makeASRClient(config: AppConfig) -> any ASRClient {
+        switch config.asrProvider {
+        case .voiceStickCloud:
+            return ASRWebSocketClient(config: config)
+        case .openAI:
+            return OpenAIRealtimeASRClient(config: config)
         }
     }
 
@@ -304,9 +314,9 @@ final class VoiceStickCoordinator {
             self?.handleDefiniteSegment(segment)
         }
 
-        asr.onFinal = { [weak self] text in
+        asr.onFinal = { [weak self] result in
             guard let self, self.asrStarted else { return }
-            self.finishWithFinalText(text)
+            self.finishWithFinalText(result)
         }
 
         asr.onError = { [weak self] message, partialText in
@@ -340,11 +350,11 @@ final class VoiceStickCoordinator {
             }
             self?.handleSubtitleDefiniteSegment(segment, peripheralID: peripheralID)
         }
-        cycle.asr.onFinal = { [weak self] text in
+        cycle.asr.onFinal = { [weak self] result in
             self?.finishSubtitleCycleWithFinalText(
                 peripheralID: peripheralID,
                 sessionID: sessionID,
-                text: text
+                result: result
             )
         }
         cycle.asr.onError = { [weak self] message, _ in
@@ -848,11 +858,13 @@ final class VoiceStickCoordinator {
 
     private func startSubtitleASRAndFlushBufferedChunks(_ cycle: SubtitleCycle, lastChunkIsFinal: Bool) -> Bool {
         guard !cycle.asrStarted else { return true }
-        let useDefiniteSegments = shouldUseDefiniteSegments(for: outputProfile(for: cycle.deviceID))
+        let profile = outputProfile(for: cycle.deviceID)
+        let useDefiniteSegments = shouldUseDefiniteSegments(for: profile)
         guard cycle.asr.start(options: ASRSessionOptions(
             hotwords: config.asrHotwords,
             resultType: useDefiniteSegments ? .single : .full,
-            showUtterances: useDefiniteSegments
+            showUtterances: useDefiniteSegments,
+            cloudTextProfile: cloudTextProfile(for: profile)
         )) else {
             cycle.bufferedOggChunks.removeAll(keepingCapacity: true)
             return false
@@ -920,7 +932,8 @@ final class VoiceStickCoordinator {
         guard asr.start(options: ASRSessionOptions(
             hotwords: config.asrHotwords,
             resultType: useDefiniteSegments ? .single : .full,
-            showUtterances: useDefiniteSegments
+            showUtterances: useDefiniteSegments,
+            cloudTextProfile: cloudTextProfile(for: profile)
         )) else {
             bufferedOggChunks.removeAll(keepingCapacity: true)
             return false
@@ -952,9 +965,11 @@ final class VoiceStickCoordinator {
         mainInputState = .ready
     }
 
-    private func finishWithFinalText(_ text: String) {
+    private func finishWithFinalText(_ result: ASRFinalResult) {
         guard !pastedFinalText else { return }
-        let profile = outputProfile(for: activeDeviceID)
+        let text = result.text
+        var profile = outputProfile(for: activeDeviceID)
+        if result.handledByCloud { profile.transform = .original }
         if profile.target == .subtitle {
             pastedFinalText = true
             pendingPasteState = .idle
@@ -980,14 +995,21 @@ final class VoiceStickCoordinator {
             return
         }
 
-        if profile.transform == .translate {
+        if profile.transform != .original {
             pastedFinalText = true
-            statusController.setStatus("Translating")
-            transformText(text, profile: profile, deviceID: activeDeviceID) { [weak self] result in
-                guard let self else { return }
+            if profile.transform == .polish {
+                statusController.showPartial(text, deviceID: activeDeviceID)
+            } else {
+                statusController.setStatus("Translating")
+            }
+            let transformID = UUID()
+            pendingTextTransformID = transformID
+            transformText(text, profile: profile) { [weak self] result in
+                guard let self, self.pendingTextTransformID == transformID else { return }
+                self.pendingTextTransformID = nil
                 switch result {
-                case .success(let translatedText):
-                    self.enterPendingConfirmation(text: translatedText)
+                case .success(let outputText):
+                    self.enterPendingConfirmation(text: outputText)
                 case .failure(let error):
                     self.finishWithASRError(error.localizedDescription)
                 }
@@ -1078,18 +1100,20 @@ final class VoiceStickCoordinator {
         let profile = outputProfile(for: cycle.deviceID)
         guard shouldUseDefiniteSegments(for: profile) else { return }
         statusController.hideOverlay(deviceID: cycle.deviceID)
-        showSubtitleText(segment.text, profile: profile, deviceID: cycle.deviceID)
+        showSubtitleText(segment.text, profile: profile, deviceID: cycle.deviceID, cycle: cycle)
     }
 
-    private func finishSubtitleCycleWithFinalText(peripheralID: UUID, sessionID: UInt32, text: String) {
+    private func finishSubtitleCycleWithFinalText(peripheralID: UUID, sessionID: UInt32, result: ASRFinalResult) {
         guard let cycle = subtitleCycle(peripheralID: peripheralID, sessionID: sessionID),
               !cycle.finishedFinalText
         else { return }
         cycle.finishedFinalText = true
+        let text = result.text
         NSLog("Subtitle final text dev=VS-\(cycle.deviceID ?? "unknown") session=\(sessionID) text_len=\(text.count)")
-        let profile = outputProfile(for: cycle.deviceID)
+        var profile = outputProfile(for: cycle.deviceID)
+        if result.handledByCloud { profile.transform = .original }
         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            showSubtitleText(text, profile: profile, deviceID: cycle.deviceID) { [weak self] didShowSubtitle in
+            showSubtitleText(text, profile: profile, deviceID: cycle.deviceID, cycle: cycle) { [weak self] didShowSubtitle in
                 guard let self else { return }
                 self.finishSubtitleCycle(
                     peripheralID: peripheralID,
@@ -1211,14 +1235,19 @@ final class VoiceStickCoordinator {
         _ text: String,
         profile: OutputProfile,
         deviceID: String?,
+        cycle: SubtitleCycle? = nil,
         completion: ((Bool) -> Void)? = nil
     ) {
         guard let deviceID else {
             completion?(false)
             return
         }
-        transformText(text, profile: profile, deviceID: deviceID) { [weak self] result in
+        transformText(text, profile: profile) { [weak self] result in
             guard let self else { return }
+            if let cycle,
+               self.subtitleCycle(peripheralID: cycle.peripheralID, sessionID: cycle.sessionID) !== cycle {
+                return
+            }
             switch result {
             case .success(let outputText):
                 NSLog("Subtitle show text dev=VS-\(deviceID) text_len=\(outputText.count)")
@@ -1238,21 +1267,24 @@ final class VoiceStickCoordinator {
     private func transformText(
         _ text: String,
         profile: OutputProfile,
-        deviceID: String?,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
-        guard profile.transform == .translate else {
+        guard profile.transform != .original else {
             completion(.success(text))
             return
         }
-        translator.translate(
+        textClient.transform(
             text,
-            targetLanguage: profile.translationTarget,
+            profile: profile,
             hotwords: config.asrHotwords
-        ) { [weak self] result in
+        ) { result in
             DispatchQueue.main.async {
-                guard self != nil else { return }
-                completion(result)
+                if case .failure(let error) = result, profile.transform == .polish {
+                    NSLog("Text polishing failed: \(error.localizedDescription)")
+                    completion(.success(text))
+                } else {
+                    completion(result)
+                }
             }
         }
     }
@@ -1423,7 +1455,7 @@ final class VoiceStickCoordinator {
             }
             return
         }
-        if isWaitingForFinalText {
+        if isWaitingForFinalText || pendingTextTransformID != nil {
             guard activePeripheralID == peripheralID else { return }
             cancelRecognitionInProgress()
             return
@@ -1486,6 +1518,7 @@ final class VoiceStickCoordinator {
 
     private func finishRecognitionCycle() {
         cancelAudioEndTimeout()
+        pendingTextTransformID = nil
         asrStarted = false
         sentFinalAudioChunk = false
         pastedFinalText = false
@@ -1668,7 +1701,13 @@ final class VoiceStickCoordinator {
     }
 
     private func shouldUseDefiniteSegments(for profile: OutputProfile) -> Bool {
-        profile.target == .subtitle && config.interactionMode == .clickToTalk
+        profile.target == .subtitle && profile.transform != .polish && cloudTextProfile(for: profile) == nil &&
+            config.interactionMode == .clickToTalk
+    }
+
+    private func cloudTextProfile(for profile: OutputProfile) -> OutputProfile? {
+        guard config.asrProvider == .voiceStickCloud, profile.transform != .original else { return nil }
+        return profile
     }
 
     private func deviceID(for peripheralID: UUID) -> String? {

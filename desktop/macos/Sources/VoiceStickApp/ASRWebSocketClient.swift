@@ -10,6 +10,12 @@ struct ASRSessionOptions {
     var hotwords: [String] = []
     var resultType: ASRResultType = .full
     var showUtterances: Bool = false
+    var cloudTextProfile: OutputProfile?
+}
+
+struct ASRFinalResult {
+    let text: String
+    var handledByCloud = false
 }
 
 struct ASRSegment {
@@ -23,7 +29,7 @@ protocol ASRClient: AnyObject {
     // Session control and callbacks are used on the main queue.
     var onPartial: ((String) -> Void)? { get set }
     var onSegment: ((ASRSegment) -> Void)? { get set }
-    var onFinal: ((String) -> Void)? { get set }
+    var onFinal: ((ASRFinalResult) -> Void)? { get set }
     var onError: ((_ message: String, _ partialText: String) -> Void)? { get set }
     var onUpgradeURL: ((URL, String) -> Void)? { get set }
     var lastStartError: String? { get }
@@ -47,6 +53,7 @@ final class ASRWebSocketClient: ASRClient {
         case starting
         case streaming
         case finishing
+        case transforming
     }
 
     private enum ASREvent: UInt32 {
@@ -81,8 +88,8 @@ final class ASRWebSocketClient: ASRClient {
     }
 
     private let config: AppConfig
-    private let resultType: ASRResultType
-    private let showUtterances: Bool
+    private let cloudHeartbeatInterval: TimeInterval
+    private let cloudIdleTimeout: TimeInterval
     private let queue = DispatchQueue(label: "VoiceStick.ASRWebSocketClient")
     // The main queue uses this ID to reject callbacks from canceled or superseded sessions.
     private var callbackSessionID: String?
@@ -94,21 +101,32 @@ final class ASRWebSocketClient: ASRClient {
     private var latestSessionTranscript = ""
     private var emittedDefiniteSegmentKeys: Set<String> = []
     private var sessionOptions = ASRSessionOptions()
+    private var cloudSupportsText = false
+    private var cloudTextRequested = false
+    private var cloudTextTimeout: DispatchWorkItem?
+    private var cloudHeartbeat: DispatchSourceTimer?
+    private var cloudPingPending = false
+    private var cloudIdleSince: Date?
 
     var onPartial: ((String) -> Void)?
     var onSegment: ((ASRSegment) -> Void)?
-    var onFinal: ((String) -> Void)?
+    var onFinal: ((ASRFinalResult) -> Void)?
     var onError: ((_ message: String, _ partialText: String) -> Void)?
     var onUpgradeURL: ((URL, String) -> Void)?
     private(set) var lastStartError: String?
 
-    init(config: AppConfig, resultType: ASRResultType = .full, showUtterances: Bool = false) {
+    init(
+        config: AppConfig,
+        cloudHeartbeatInterval: TimeInterval = 25,
+        cloudIdleTimeout: TimeInterval = 30 * 60
+    ) {
         self.config = config
-        self.resultType = resultType
-        self.showUtterances = showUtterances
+        self.cloudHeartbeatInterval = cloudHeartbeatInterval
+        self.cloudIdleTimeout = cloudIdleTimeout
     }
 
     deinit {
+        cloudHeartbeat?.cancel()
         webSocket?.cancel(with: .goingAway, reason: nil)
     }
 
@@ -125,7 +143,7 @@ final class ASRWebSocketClient: ASRClient {
             return false
         }
 
-        guard URL(string: providerWebSocketURL) != nil else {
+        guard providerWebSocketURL != nil else {
             lastStartError = "Invalid ASR URL"
             return false
         }
@@ -139,21 +157,11 @@ final class ASRWebSocketClient: ASRClient {
     }
 
     private var providerAPIKey: String {
-        switch config.asrProvider {
-        case .voiceStickCloud:
-            return config.voiceStickAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        case .volcengine:
-            return config.volcengineAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+        config.voiceStickAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var providerWebSocketURL: String {
-        switch config.asrProvider {
-        case .voiceStickCloud:
-            return config.voiceStickCloudURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        case .volcengine:
-            return AppConfig.volcengineWebSocketURL
-        }
+    private var providerWebSocketURL: URL? {
+        URL(string: config.voiceStickCloudURL.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     func sendOggOpusChunk(_ data: Data, isLast: Bool) {
@@ -183,6 +191,8 @@ final class ASRWebSocketClient: ASRClient {
             return
         }
 
+        expireIdleCloudConnection()
+        cloudIdleSince = nil
         currentSessionID = sessionID
         sessionOptions = options
         latestSessionTranscript = ""
@@ -204,7 +214,7 @@ final class ASRWebSocketClient: ASRClient {
     }
 
     private func connectWebSocket() {
-        guard let url = URL(string: providerWebSocketURL) else {
+        guard let url = providerWebSocketURL else {
             failSession("Invalid ASR URL")
             return
         }
@@ -213,13 +223,15 @@ final class ASRWebSocketClient: ASRClient {
         let connectID = UUID().uuidString
         request.setValue(providerAPIKey, forHTTPHeaderField: "X-Api-Key")
         request.setValue(config.resourceID, forHTTPHeaderField: "X-Api-Resource-Id")
-        if config.asrProvider == .voiceStickCloud, let deviceID = config.pairedDeviceIDs.first {
+        if let deviceID = config.pairedDeviceIDs.first {
             request.setValue(deviceID, forHTTPHeaderField: "X-Device-Id")
         }
+        request.setValue("1", forHTTPHeaderField: "X-VoiceStick-Text")
         request.setValue(connectID, forHTTPHeaderField: "X-Api-Request-Id")
         request.setValue("-1", forHTTPHeaderField: "X-Api-Sequence")
 
         connectionState = .connecting
+        cloudSupportsText = false
         NSLog("ASR websocket connect provider=\(config.asrProvider.rawValue) request_id=\(connectID)")
         let task = URLSession.shared.webSocketTask(with: request)
         webSocket = task
@@ -233,6 +245,7 @@ final class ASRWebSocketClient: ASRClient {
             failSession("Missing ASR session ID")
             return
         }
+        cloudTextRequested = cloudSupportsText && sessionOptions.cloudTextProfile != nil
 
         NSLog("ASR websocket start_session session_id=\(currentSessionID)")
         sendEvent(.startSession, sessionID: currentSessionID, payload: sessionPayload())
@@ -247,7 +260,7 @@ final class ASRWebSocketClient: ASRClient {
             if isLast {
                 finishSessionIfNeeded()
             }
-        case .finishing:
+        case .finishing, .transforming:
             break
         case .idle:
             queuedAudioChunks.append(QueuedAudioChunk(data: data, isLast: isLast))
@@ -280,16 +293,20 @@ final class ASRWebSocketClient: ASRClient {
     }
 
     private func cancelSession() {
-        if sessionState == .starting || sessionState == .streaming || sessionState == .finishing {
-            if let currentSessionID {
-                sendEvent(.cancelSession, sessionID: currentSessionID, payload: connectionPayload())
-            }
+        if let currentSessionID {
+            sendEvent(.cancelSession, sessionID: currentSessionID, payload: connectionPayload())
         }
 
         resetSession()
     }
 
     private func resetSession() {
+        if connectionState == .ready, sessionState != .idle {
+            cloudIdleSince = Date()
+        }
+        cloudTextTimeout?.cancel()
+        cloudTextTimeout = nil
+        cloudTextRequested = false
         queuedAudioChunks.removeAll(keepingCapacity: true)
         latestSessionTranscript = ""
         emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
@@ -298,6 +315,10 @@ final class ASRWebSocketClient: ASRClient {
     }
 
     private func closeWebSocket(sendFinishConnection: Bool) {
+        cloudHeartbeat?.cancel()
+        cloudHeartbeat = nil
+        cloudPingPending = false
+        cloudIdleSince = nil
         guard let task = webSocket else {
             connectionState = .disconnected
             return
@@ -315,7 +336,48 @@ final class ASRWebSocketClient: ASRClient {
         connectionState = .disconnected
     }
 
+    private func startCloudHeartbeat() {
+        guard cloudHeartbeat == nil else { return }
+        if sessionState == .idle, cloudIdleSince == nil { cloudIdleSince = Date() }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + cloudHeartbeatInterval, repeating: cloudHeartbeatInterval)
+        timer.setEventHandler { [weak self] in self?.sendCloudHeartbeat() }
+        cloudHeartbeat = timer
+        timer.resume()
+    }
+
+    private func expireIdleCloudConnection() {
+        guard connectionState == .ready, sessionState == .idle,
+              let cloudIdleSince, Date().timeIntervalSince(cloudIdleSince) >= cloudIdleTimeout
+        else { return }
+        NSLog("VoiceStick Cloud closing idle ASR connection")
+        closeWebSocket(sendFinishConnection: false)
+    }
+
+    private func sendCloudHeartbeat() {
+        expireIdleCloudConnection()
+        guard connectionState == .ready, let task = webSocket else { return }
+        guard !cloudPingPending else {
+            failSession("VoiceStick Cloud did not respond to a WebSocket ping.")
+            return
+        }
+        cloudPingPending = true
+        task.sendPing { [weak self, weak task] error in
+            guard let self, let task else { return }
+            self.queue.async {
+                guard self.webSocket === task else { return }
+                self.cloudPingPending = false
+                if let error { self.failSession(error.localizedDescription) }
+            }
+        }
+    }
+
     private func failSession(_ message: String, upgradeURL: URL? = nil) {
+        if sessionState == .transforming, let currentSessionID {
+            closeWebSocket(sendFinishConnection: false)
+            finishCloudText(sessionID: currentSessionID, error: message)
+            return
+        }
         let sessionID = currentSessionID
         let partialText = latestSessionTranscript
         closeWebSocket(sendFinishConnection: false)
@@ -412,9 +474,7 @@ final class ASRWebSocketClient: ASRClient {
                 guard closeAfterSend else { return }
                 self?.queue.async {
                     guard let self, self.webSocket === sendingTask else { return }
-                    sendingTask.cancel(with: .goingAway, reason: nil)
-                    self.webSocket = nil
-                    self.connectionState = .disconnected
+                    self.closeWebSocket(sendFinishConnection: false)
                 }
             }
         } catch {
@@ -439,8 +499,7 @@ final class ASRWebSocketClient: ASRClient {
                     guard self.webSocket === receivingTask else { return }
                     NSLog("ASR receive error: \(error.localizedDescription)")
                     if self.sessionState == .idle || self.connectionState == .closing {
-                        self.webSocket = nil
-                        self.connectionState = .disconnected
+                        self.closeWebSocket(sendFinishConnection: false)
                     } else {
                         self.failSession(error.localizedDescription)
                     }
@@ -452,11 +511,48 @@ final class ASRWebSocketClient: ASRClient {
     private func handle(_ message: URLSessionWebSocketTask.Message) {
         switch message {
         case .string(let text):
-            NSLog("ASR ignored text response bytes=\(text.utf8.count)")
+            handleCloudTextMessage(text)
         case .data(let data):
             handleBinaryResponse(data)
         @unknown default:
             break
+        }
+    }
+
+    private func handleCloudTextMessage(_ text: String) {
+        guard let message = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+              let type = message["type"] as? String else { return }
+        if type == "voicestick.text.ready", connectionState == .connecting {
+            cloudSupportsText = true
+        } else if type == "voicestick.text.result",
+                  sessionState == .transforming,
+                  let sessionID = message["session_id"] as? String, sessionID == currentSessionID {
+            finishCloudText(sessionID: sessionID, text: message["text"] as? String, error: message["error"] as? String)
+        }
+    }
+
+    private func waitForCloudText(sessionID: String, raw: String) {
+        latestSessionTranscript = raw
+        sessionState = .transforming
+        postSessionCallback(for: sessionID) { $0.onPartial?(raw) }
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.currentSessionID == sessionID else { return }
+            self.finishCloudText(sessionID: sessionID, error: "VoiceStick Cloud text processing timed out.")
+        }
+        cloudTextTimeout = timeout
+        queue.asyncAfter(deadline: .now() + 8, execute: timeout)
+    }
+
+    private func finishCloudText(sessionID: String, text: String? = nil, error: String? = nil) {
+        let raw = latestSessionTranscript
+        let refine = sessionOptions.cloudTextProfile?.transform == .polish
+        resetSession()
+        if let text, !text.isEmpty || raw.isEmpty {
+            postSessionCallback(for: sessionID) { $0.onFinal?(ASRFinalResult(text: text, handledByCloud: true)) }
+        } else if refine {
+            postSessionCallback(for: sessionID) { $0.onFinal?(ASRFinalResult(text: raw, handledByCloud: true)) }
+        } else {
+            postSessionCallback(for: sessionID) { $0.onError?(error ?? "VoiceStick Cloud translation failed.", "") }
         }
     }
 
@@ -491,6 +587,7 @@ final class ASRWebSocketClient: ASRClient {
         switch response.event {
         case .connectionStarted:
             connectionState = .ready
+            startCloudHeartbeat()
             NSLog("ASR websocket connection_started connect_id=\(response.sessionID ?? "")")
             if sessionState == .starting {
                 sendStartSession()
@@ -534,7 +631,8 @@ final class ASRWebSocketClient: ASRClient {
             break
 
         case .sessionFinished:
-            guard let sessionID = currentSessionID, response.sessionID == sessionID else { return }
+            guard sessionState != .transforming,
+                  let sessionID = currentSessionID, response.sessionID == sessionID else { return }
             let finalText = response.payloadText.flatMap { text in
                 let transcript = extractTranscript(from: text)
                 return transcript.isEmpty ? nil : transcript
@@ -543,12 +641,16 @@ final class ASRWebSocketClient: ASRClient {
                 extractNewDefiniteSegments(from: $0)
             } ?? []
             NSLog("ASR websocket session_finished session_id=\(response.sessionID ?? "") text_len=\(finalText.count)")
+            if cloudTextRequested {
+                waitForCloudText(sessionID: sessionID, raw: finalText)
+                return
+            }
             resetSession()
             postSessionCallback(for: sessionID) { client in
                 for segment in definiteSegments {
                     client.onSegment?(segment)
                 }
-                client.onFinal?(finalText)
+                client.onFinal?(ASRFinalResult(text: finalText))
             }
 
         case .sessionCanceled:
@@ -645,11 +747,17 @@ final class ASRWebSocketClient: ASRClient {
         ]
         addHotwordsIfNeeded(to: &request)
 
-        return [
+        var payload: [String: Any] = [
             "user": ["uid": "voice-stick-local"],
             "audio": ["format": "ogg", "codec": "opus", "rate": 16_000, "bits": 16, "channel": 1],
             "request": request
         ]
+        if cloudTextRequested, let profile = sessionOptions.cloudTextProfile {
+            payload["voicestick_text"] = profile.transform == .translate
+                ? ["operation": "translate", "target_language": profile.translationTarget]
+                : ["operation": "refine"]
+        }
+        return payload
     }
 
     private func addHotwordsIfNeeded(to request: inout [String: Any]) {

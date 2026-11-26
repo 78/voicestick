@@ -2,16 +2,16 @@ import AppKit
 import Foundation
 import TOMLKit
 
-enum ASRProvider: String {
+enum ASRProvider: String, CaseIterable {
     case voiceStickCloud = "voicestick_cloud"
-    case volcengine
+    case openAI = "openai"
 
     var displayName: String {
         switch self {
         case .voiceStickCloud:
             return "VoiceStick Cloud"
-        case .volcengine:
-            return "Volcengine"
+        case .openAI:
+            return "OpenAI Realtime"
         }
     }
 }
@@ -130,12 +130,15 @@ enum OutputTarget: String, CaseIterable {
 
 enum TextTransform: String, CaseIterable {
     case original
+    case polish
     case translate
 
     var displayName: String {
         switch self {
         case .original:
             return "Original"
+        case .polish:
+            return "Refine"
         case .translate:
             return "Translate"
         }
@@ -159,10 +162,13 @@ struct OutputProfile: Equatable {
 }
 
 struct AppConfig {
+    static let openAIBaseURL = "https://api.openai.com/v1"
+
     var asrProvider: ASRProvider
     var voiceStickAPIKey: String
     var voiceStickCloudURL: String
-    var volcengineAPIKey: String
+    private var legacyVolcengineAPIKey: String
+    var openAIAPIKey: String
     var llmBaseURL: String
     var llmAPIKey: String
     var llmModel: String
@@ -200,7 +206,6 @@ struct AppConfig {
     ]
 
     static let defaultVoiceStickCloudURL = "wss://api.xiaozhi.me/voicestick/asr/"
-    static let volcengineWebSocketURL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
     static let websiteURL = URL(string: "https://78.github.io/voicestick/")!
     static let firmwareManifestURLs: [String: URL] = {
         let base = websiteURL.appendingPathComponent("firmwares", isDirectory: true)
@@ -215,13 +220,29 @@ struct AppConfig {
         FileManager.default.fileExists(atPath: configURL.path)
     }
 
+    subscript(apiKey provider: ASRProvider) -> String {
+        get {
+            switch provider {
+            case .voiceStickCloud: return voiceStickAPIKey
+            case .openAI: return openAIAPIKey
+            }
+        }
+        set {
+            switch provider {
+            case .voiceStickCloud: voiceStickAPIKey = newValue
+            case .openAI: openAIAPIKey = newValue
+            }
+        }
+    }
+
     static var defaults: AppConfig {
         AppConfig(
             asrProvider: .voiceStickCloud,
             voiceStickAPIKey: "",
             voiceStickCloudURL: defaultVoiceStickCloudURL,
-            volcengineAPIKey: "",
-            llmBaseURL: "https://api.openai.com/v1",
+            legacyVolcengineAPIKey: "",
+            openAIAPIKey: "",
+            llmBaseURL: openAIBaseURL,
             llmAPIKey: "",
             llmModel: "gpt-5.5",
             interactionMode: .holdToTalk,
@@ -238,10 +259,10 @@ struct AppConfig {
         )
     }
 
-    static func load() -> AppConfig {
+    static func load(from url: URL = configURL) -> AppConfig {
         let defaults = Self.defaults
 
-        guard let text = try? String(contentsOf: configURL) else {
+        guard let text = try? String(contentsOf: url) else {
             return defaults
         }
 
@@ -253,7 +274,8 @@ struct AppConfig {
             asrProvider: asrProviderValue(file.asr_provider, default: defaults.asrProvider),
             voiceStickAPIKey: file.voicestick_api_key ?? defaults.voiceStickAPIKey,
             voiceStickCloudURL: file.voicestick_cloud_url ?? defaults.voiceStickCloudURL,
-            volcengineAPIKey: file.volcengine_api_key ?? file.api_key ?? defaults.volcengineAPIKey,
+            legacyVolcengineAPIKey: file.volcengine_api_key ?? file.api_key ?? "",
+            openAIAPIKey: file.openai_api_key ?? defaults.openAIAPIKey,
             llmBaseURL: file.llm_base_url ?? defaults.llmBaseURL,
             llmAPIKey: file.llm_api_key ?? defaults.llmAPIKey,
             llmModel: file.llm_model ?? defaults.llmModel,
@@ -284,13 +306,17 @@ struct AppConfig {
         )
     }
 
-    func save() throws {
-        try FileManager.default.createDirectory(at: Self.configDirectory, withIntermediateDirectories: true)
+    func save(to url: URL = configURL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // Retain credentials in existing files for users who return to an older build.
+        let legacyKeyLine = legacyVolcengineAPIKey.isEmpty
+            ? ""
+            : "volcengine_api_key = \"\(legacyVolcengineAPIKey.tomlEscaped)\"\n"
         let text = """
         asr_provider = "\(asrProvider.rawValue)"
         voicestick_api_key = "\(voiceStickAPIKey.tomlEscaped)"
         voicestick_cloud_url = "\(voiceStickCloudURL.tomlEscaped)"
-        volcengine_api_key = "\(volcengineAPIKey.tomlEscaped)"
+        \(legacyKeyLine)openai_api_key = "\(openAIAPIKey.tomlEscaped)"
         llm_base_url = "\(llmBaseURL.tomlEscaped)"
         llm_api_key = "\(llmAPIKey.tomlEscaped)"
         llm_model = "\(llmModel.tomlEscaped)"
@@ -310,7 +336,7 @@ struct AppConfig {
         translation_target = "\(defaultOutputProfile.translationTarget.tomlEscaped)"
         """
         let deviceText = deviceOutputProfileText
-        try (text + deviceText).write(to: Self.configURL, atomically: true, encoding: .utf8)
+        try (text + deviceText).write(to: url, atomically: true, encoding: .utf8)
     }
 
     private static func loadLegacy(text: String, defaults: AppConfig) -> AppConfig {
@@ -328,7 +354,8 @@ struct AppConfig {
             asrProvider: asrProviderValue(values["asr_provider"], default: defaults.asrProvider),
             voiceStickAPIKey: values["voicestick_api_key"] ?? defaults.voiceStickAPIKey,
             voiceStickCloudURL: values["voicestick_cloud_url"] ?? defaults.voiceStickCloudURL,
-            volcengineAPIKey: values["volcengine_api_key"] ?? values["api_key"] ?? defaults.volcengineAPIKey,
+            legacyVolcengineAPIKey: values["volcengine_api_key"] ?? values["api_key"] ?? "",
+            openAIAPIKey: values["openai_api_key"] ?? defaults.openAIAPIKey,
             llmBaseURL: values["llm_base_url"] ?? defaults.llmBaseURL,
             llmAPIKey: values["llm_api_key"] ?? defaults.llmAPIKey,
             llmModel: values["llm_model"] ?? defaults.llmModel,
@@ -554,6 +581,7 @@ private struct ConfigFile: Decodable {
     var voicestick_api_key: String?
     var voicestick_cloud_url: String?
     var volcengine_api_key: String?
+    var openai_api_key: String?
     var api_key: String?
     var llm_base_url: String?
     var llm_api_key: String?

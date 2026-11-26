@@ -435,20 +435,22 @@ final class StatusController {
     private func addDeviceTextItems(to submenu: NSMenu, deviceID: String) {
         let profile = outputProfile(for: deviceID)
         let textItem = makeMenuItem(
-            title: "Translation",
+            title: "Text Output",
             symbolName: "textformat",
             action: nil
         )
         let textSubmenu = NSMenu()
-        let originalItem = NSMenuItem(
-            title: "Original",
-            action: #selector(selectDeviceTextMode),
-            keyEquivalent: ""
-        )
-        originalItem.target = self
-        originalItem.representedObject = "\(deviceID):original:"
-        originalItem.state = profile.transform == .original ? .on : .off
-        textSubmenu.addItem(originalItem)
+        for transform: TextTransform in [.original, .polish] {
+            let item = NSMenuItem(
+                title: transform.displayName,
+                action: #selector(selectDeviceTextMode),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = "\(deviceID):\(transform.rawValue):"
+            item.state = profile.transform == transform ? .on : .off
+            textSubmenu.addItem(item)
+        }
         textSubmenu.addItem(NSMenuItem.separator())
 
         for language in Self.translationTargets {

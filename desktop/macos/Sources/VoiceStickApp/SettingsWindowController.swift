@@ -2,27 +2,23 @@ import AppKit
 
 final class SettingsWindowController: NSWindowController {
     private let providerPopup = NSPopUpButton()
-    private let apiKeyField = NSTextField()
+    private let apiKeyField = APIKeyField()
     private let applyTrialAPIKeyButton = NSButton(title: "Apply Trial", target: nil, action: nil)
-    private let resourcePopup = NSPopUpButton()
     private let hotwordsTextView = NSTextView()
     private let hotwordsScrollView = NSScrollView()
-    private let llmBaseURLField = NSTextField()
-    private let llmAPIKeyField = NSTextField()
-    private let llmModelField = NSTextField()
     private let debugAudioButton = NSButton(checkboxWithTitle: "Save debug audio files", target: nil, action: nil)
     private let debugAudioDirectoryField = NSTextField()
     private let statusLabel = NSTextField(labelWithString: "")
-    private var currentDisplayedProvider: ASRProvider = .volcengine
-    private var resourceRow: NSStackView?
+    private var currentDisplayedProvider: ASRProvider
     var onConfigChanged: ((AppConfig) -> Void)?
 
     private var config: AppConfig
 
     init(config: AppConfig = AppConfig.load()) {
         self.config = config
+        currentDisplayedProvider = config.asrProvider
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 490),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -72,18 +68,9 @@ final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(row(label: "Provider", control: providerPopup))
         configureApplyTrialAPIKeyButton()
         stack.addArrangedSubview(row(label: "API Key", control: apiKeyControl()))
-        configureResourcePopup()
-        let resourceRow = row(label: "Resource ID", control: resourcePopup)
-        self.resourceRow = resourceRow
-        stack.addArrangedSubview(resourceRow)
         configureHotwordsTextView()
         stack.addArrangedSubview(row(label: "Hotwords", control: hotwordsScrollView))
         stack.addArrangedSubview(hintRow("Separate hotwords with commas or new lines."))
-
-        stack.addArrangedSubview(sectionTitle("LLM"))
-        stack.addArrangedSubview(row(label: "Base URL", control: llmBaseURLField))
-        stack.addArrangedSubview(row(label: "API Key", control: llmAPIKeyField))
-        stack.addArrangedSubview(row(label: "Model", control: llmModelField))
 
         stack.addArrangedSubview(sectionTitle("Debug"))
         stack.addArrangedSubview(row(label: "Audio Cache", control: debugAudioButton))
@@ -125,15 +112,8 @@ final class SettingsWindowController: NSWindowController {
         ])
     }
 
-    private func configureResourcePopup() {
-        resourcePopup.addItems(withTitles: AppConfig.supportedResourceIDs)
-    }
-
     private func configureProviderPopup() {
-        providerPopup.addItems(withTitles: [
-            ASRProvider.voiceStickCloud.displayName,
-            ASRProvider.volcengine.displayName
-        ])
+        providerPopup.addItems(withTitles: ASRProvider.allCases.map(\.displayName))
         providerPopup.target = self
         providerPopup.action = #selector(providerSelectionChanged)
     }
@@ -186,18 +166,11 @@ final class SettingsWindowController: NSWindowController {
     private func loadConfigIntoFields() {
         currentDisplayedProvider = config.asrProvider
         providerPopup.selectItem(withTitle: config.asrProvider.displayName)
-        apiKeyField.stringValue = apiKey(for: config.asrProvider)
+        apiKeyField.stringValue = config[apiKey: config.asrProvider]
         hotwordsTextView.string = config.asrHotwords.joined(separator: ",")
-        llmBaseURLField.stringValue = config.llmBaseURL
-        llmAPIKeyField.stringValue = config.llmAPIKey
-        llmModelField.stringValue = config.llmModel
         debugAudioButton.state = config.debugAudioCache ? .on : .off
         debugAudioDirectoryField.stringValue = config.debugAudioDirectory.path
 
-        if resourcePopup.itemTitles.contains(config.resourceID) {
-            resourcePopup.selectItem(withTitle: config.resourceID)
-        }
-        updateProviderRows()
         updateApplyTrialButton()
         statusLabel.stringValue = ""
     }
@@ -206,8 +179,7 @@ final class SettingsWindowController: NSWindowController {
         saveDisplayedAPIKey()
         currentDisplayedProvider = selectedProvider()
         config.asrProvider = currentDisplayedProvider
-        apiKeyField.stringValue = apiKey(for: currentDisplayedProvider)
-        updateProviderRows()
+        apiKeyField.stringValue = config[apiKey: currentDisplayedProvider]
         updateApplyTrialButton()
     }
 
@@ -231,7 +203,9 @@ final class SettingsWindowController: NSWindowController {
                 switch result {
                 case .success(.apiKey(let apiKey)):
                     self.config.voiceStickAPIKey = apiKey
-                    self.apiKeyField.stringValue = apiKey
+                    if self.currentDisplayedProvider == .voiceStickCloud {
+                        self.apiKeyField.stringValue = apiKey
+                    }
                     self.statusLabel.stringValue = "Trial API key applied."
                     self.updateApplyTrialButton()
                 case .success(.url(let url)):
@@ -267,29 +241,10 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func saveSettings() {
         saveDisplayedAPIKey()
-        let provider = selectedProvider()
-        let resourceID = resourcePopup.titleOfSelectedItem ?? config.resourceID
-
-        config = AppConfig(
-            asrProvider: provider,
-            voiceStickAPIKey: config.voiceStickAPIKey,
-            voiceStickCloudURL: config.voiceStickCloudURL,
-            volcengineAPIKey: config.volcengineAPIKey,
-            llmBaseURL: llmBaseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            llmAPIKey: llmAPIKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            llmModel: llmModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            interactionMode: config.interactionMode,
-            resourceID: resourceID,
-            asrHotwords: AppConfig.hotwordList(hotwordsTextView.string),
-            pairedDeviceIDs: config.pairedDeviceIDs,
-            deviceThemeColors: config.deviceThemeColors,
-            deviceOverlayPositions: config.deviceOverlayPositions,
-            defaultOutputProfile: config.defaultOutputProfile,
-            deviceOutputProfiles: config.deviceOutputProfiles,
-            autoEnter: config.autoEnter,
-            debugAudioCache: debugAudioButton.state == .on,
-            debugAudioDirectory: URL(fileURLWithPath: debugAudioDirectoryField.stringValue, isDirectory: true)
-        )
+        config.asrProvider = selectedProvider()
+        config.asrHotwords = AppConfig.hotwordList(hotwordsTextView.string)
+        config.debugAudioCache = debugAudioButton.state == .on
+        config.debugAudioDirectory = URL(fileURLWithPath: debugAudioDirectoryField.stringValue, isDirectory: true)
 
         do {
             try config.save()
@@ -307,38 +262,11 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func selectedProvider() -> ASRProvider {
-        switch providerPopup.titleOfSelectedItem {
-        case ASRProvider.voiceStickCloud.displayName:
-            return .voiceStickCloud
-        case ASRProvider.volcengine.displayName:
-            return .volcengine
-        default:
-            return config.asrProvider
-        }
-    }
-
-    private func apiKey(for provider: ASRProvider) -> String {
-        switch provider {
-        case .voiceStickCloud:
-            return config.voiceStickAPIKey
-        case .volcengine:
-            return config.volcengineAPIKey
-        }
+        ASRProvider.allCases.first { $0.displayName == providerPopup.titleOfSelectedItem } ?? config.asrProvider
     }
 
     private func saveDisplayedAPIKey() {
-        let value = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch currentDisplayedProvider {
-        case .voiceStickCloud:
-            config.voiceStickAPIKey = value
-        case .volcengine:
-            config.volcengineAPIKey = value
-        }
-    }
-
-    private func updateProviderRows() {
-        resourceRow?.isHidden = currentDisplayedProvider != .volcengine
-        updateApplyTrialButton()
+        config[apiKey: currentDisplayedProvider] = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func updateApplyTrialButton() {

@@ -33,9 +33,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, NS
     private let tableView = NSTableView()
     private let scanStatusLabel = NSTextField(labelWithString: "Scanning")
     private let providerPopup = NSPopUpButton()
-    private let apiKeyField = NSTextField()
+    private let apiKeyField = APIKeyField()
     private let applyTrialAPIKeyButton = NSButton(title: "Apply Trial", target: nil, action: nil)
-    private let resourcePopup = NSPopUpButton()
     private let accessibilityStatusLabel = NSTextField(labelWithString: "")
     private let accessibilitySettingsButton = NSButton(title: "Open Accessibility Settings", target: nil, action: nil)
 
@@ -177,17 +176,12 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, NS
     }
 
     private func loadConfigIntoFields() {
-        providerPopup.addItems(withTitles: [
-            ASRProvider.voiceStickCloud.displayName,
-            ASRProvider.volcengine.displayName
-        ])
+        providerPopup.addItems(withTitles: ASRProvider.allCases.map(\.displayName))
         providerPopup.target = self
         providerPopup.action = #selector(providerSelectionChanged)
         providerPopup.selectItem(withTitle: config.asrProvider.displayName)
 
-        resourcePopup.addItems(withTitles: AppConfig.supportedResourceIDs)
-        resourcePopup.selectItem(withTitle: config.resourceID)
-        apiKeyField.stringValue = apiKey(for: config.asrProvider)
+        apiKeyField.stringValue = config[apiKey: config.asrProvider]
     }
 
     private func renderStep() {
@@ -204,7 +198,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, NS
             contentStack.addArrangedSubview(deviceView())
         case .provider:
             titleLabel.stringValue = "Choose your speech provider"
-            detailLabel.stringValue = "Pick the ASR provider and enter the key or endpoint settings it needs."
+            detailLabel.stringValue = "Choose a provider and enter its API key."
             contentStack.addArrangedSubview(providerView())
         case .accessibility:
             titleLabel.stringValue = "Allow text insertion"
@@ -271,9 +265,6 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, NS
         stack.spacing = 12
         stack.addArrangedSubview(row(label: "Provider", control: providerPopup))
         stack.addArrangedSubview(row(label: "API Key", control: apiKeyControl()))
-        if selectedProvider() == .volcengine {
-            stack.addArrangedSubview(row(label: "Resource ID", control: resourcePopup))
-        }
         updateApplyTrialButton()
         return stack
     }
@@ -395,8 +386,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, NS
         saveDisplayedProviderFields()
         currentDisplayedProvider = selectedProvider()
         config.asrProvider = currentDisplayedProvider
-        apiKeyField.stringValue = apiKey(for: currentDisplayedProvider)
-        renderStep()
+        apiKeyField.stringValue = config[apiKey: currentDisplayedProvider]
+        updateApplyTrialButton()
     }
 
     @objc private func apiKeyFieldDidChange() {
@@ -419,7 +410,9 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, NS
                 switch result {
                 case .success(.apiKey(let apiKey)):
                     self.config.voiceStickAPIKey = apiKey
-                    self.apiKeyField.stringValue = apiKey
+                    if self.currentDisplayedProvider == .voiceStickCloud {
+                        self.apiKeyField.stringValue = apiKey
+                    }
                     self.statusLabel.stringValue = "Trial API key applied."
                     self.updateApplyTrialButton()
                     self.updateNextButton()
@@ -598,44 +591,16 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, NS
     }
 
     private func selectedProvider() -> ASRProvider {
-        switch providerPopup.titleOfSelectedItem {
-        case ASRProvider.voiceStickCloud.displayName:
-            return .voiceStickCloud
-        case ASRProvider.volcengine.displayName:
-            return .volcengine
-        default:
-            return config.asrProvider
-        }
-    }
-
-    private func apiKey(for provider: ASRProvider) -> String {
-        switch provider {
-        case .voiceStickCloud:
-            return config.voiceStickAPIKey
-        case .volcengine:
-            return config.volcengineAPIKey
-        }
+        ASRProvider.allCases.first { $0.displayName == providerPopup.titleOfSelectedItem } ?? config.asrProvider
     }
 
     private func activeAPIKey() -> String {
-        switch selectedProvider() {
-        case .voiceStickCloud:
-            return config.voiceStickAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        case .volcengine:
-            return config.volcengineAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+        config[apiKey: selectedProvider()].trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func saveDisplayedProviderFields() {
-        let key = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch currentDisplayedProvider {
-        case .voiceStickCloud:
-            config.voiceStickAPIKey = key
-        case .volcengine:
-            config.volcengineAPIKey = key
-        }
+        config[apiKey: currentDisplayedProvider] = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         config.asrProvider = selectedProvider()
-        config.resourceID = resourcePopup.titleOfSelectedItem ?? config.resourceID
     }
 
     private func updateApplyTrialButton() {

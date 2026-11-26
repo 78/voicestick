@@ -136,15 +136,11 @@ cp desktop/macos/Config/config.example.toml "$HOME/Library/Application Support/V
 ```
 
 ```toml
-asr_provider = "volcengine"
+asr_provider = "voicestick_cloud"
 voicestick_api_key = ""
 voicestick_cloud_url = "wss://api.xiaozhi.me/voicestick/asr/"
-volcengine_api_key = "your_volcengine_asr_api_key"
-llm_base_url = "https://api.openai.com/v1"
-llm_api_key = "your_openai_compatible_llm_api_key"
-llm_model = "gpt-5.5"
+openai_api_key = ""
 interaction_mode = "hold_to_talk"
-resource_id = "volc.seedasr.sauc.duration"
 asr_hotwords = "小智,VoiceStick"
 paired_device_ids = ""
 device_theme_colors = ""
@@ -166,17 +162,22 @@ translation_target = "en"
 
 | 配置 | 用途 |
 | --- | --- |
-| `asr_provider` | `volcengine` 表示直连，`voicestick_cloud` 表示中继。两者分别使用对应的 API Key 和服务地址 |
-| `llm_base_url`、`llm_api_key`、`llm_model` | 翻译服务的兼容接口地址、凭据和模型 |
+| `asr_provider` | macOS 可选 `voicestick_cloud` 或 `openai` |
+| `openai_api_key` | macOS 上 OpenAI 实时转写、整理和翻译共用的 API Key |
+| `llm_base_url`、`llm_api_key`、`llm_model` | 旧版自托管 Cloud 中继可用的文本接口配置 |
 | `interaction_mode` | `hold_to_talk` 按住说话，`click_to_talk` 点击切换 |
-| `resource_id` | 火山资源可选 `volc.seedasr.sauc.duration`、`volc.seedasr.sauc.concurrent`、`volc.bigasr.sauc.duration`、`volc.bigasr.sauc.concurrent` |
-| `asr_hotwords` | 逗号分隔的热词，翻译时也用作术语提示 |
+| `asr_hotwords` | 逗号分隔的热词，整理和翻译时也用作术语提示 |
 | `paired_device_ids`、`device_theme_colors`、`device_overlay_positions` | 配对设备 ID、各设备主题色与浮层位置 |
 | `auto_enter` | 粘贴后按回车 |
-| `[output]`、`[device.<id>.output]` | 选择当前输入框或字幕、原文或翻译以及目标语言，可按设备覆盖 |
+| `[output]`、`[device.<id>.output]` | 选择当前输入框或字幕，输出原文、整理稿（macOS）或译文，可按设备覆盖 |
 | `debug_audio_cache`、`debug_audio_dir` | 开启 Ogg Opus 调试录音缓存及设置保存目录 |
 
 API Key 仅保存在本机。开启调试缓存后，有效会话保存到 `~/Library/Application Support/VoiceStick/DebugAudio`，文件名包含设备 ID。短于 0.5 秒的录音会被丢弃。
+
+在 macOS 上，从设备菜单选择 **Text Output → Refine**，即可纠正明确的识别错误，并用原语言整理口述内容。ASR 选 **OpenAI Realtime** 时，整理和翻译自动通过同一把 OpenAI API Key 使用 GPT-6 Luna。
+选择 **VoiceStick Cloud** 时，整理和翻译共用 Cloud Key，处理结果通过转写连接返回。
+
+原先选择火山直连的 macOS 用户打开新版后会看到 **VoiceStick Cloud**。可以使用已有的 Cloud Key，或在设置里点 **Apply Trial**。
 
 ## 许可证
 

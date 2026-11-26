@@ -23,8 +23,7 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - The macOS app only connects to paired `VS-XXXX` devices and can keep multiple paired devices connected at once. The menu bar app lists every paired device and shows whether each one is connected or still scanning.
 - The front button maps to the protocol `primary` role; it starts a recording session on press and ends it on release when the app has put the device in `ready`.
 - The firmware reads 16 kHz mono PCM from the ES8311 microphone, encodes it as Opus, and sends it over BLE notifications.
-- The macOS app wraps incoming Opus payloads into Ogg Opus and forwards them to ASR over WebSocket.
-- ASR providers can be direct Volcengine or VoiceStick Cloud relay.
+- The macOS app supports VoiceStick Cloud and OpenAI Realtime (`gpt-live-transcribe`). It streams Ogg Opus to VoiceStick Cloud or decodes the device audio to 24 kHz PCM for OpenAI.
 - During recognition, the macOS app shows a floating overlay and menu bar status. The firmware display stays in the thinking state after button release until the text is pasted or cancelled.
 - The macOS menu bar's **Send Confirmation** options are immediate paste, a countdown of 1, 2, 3, 5, 10, or 15 seconds, and manual confirmation. The default countdown is 1 second.
 - Pressing the front button during the countdown reveals the confirmation controls below the text in the same overlay. Click the text to edit it. Click **Send** or press the front button again to paste your edits. Click **Cancel** or press the side button to discard them.
@@ -81,7 +80,7 @@ By default the paste flow presses Return after paste. Disable `Press Return afte
 StickS3 mic -> ES8311/I2S PCM -> Opus -> BLE -> macOS -> Ogg Opus -> ASR -> paste
 ```
 
-The desktop app does not decode Opus back to PCM for ASR. It forwards Ogg Opus directly.
+VoiceStick Cloud receives Ogg Opus directly. The macOS client decodes Opus to PCM for OpenAI Realtime.
 
 ## BLE Protocol Summary
 
@@ -246,15 +245,11 @@ cp desktop/macos/Config/config.example.toml "$HOME/Library/Application Support/V
 Example:
 
 ```toml
-asr_provider = "volcengine"
+asr_provider = "voicestick_cloud"
 voicestick_api_key = ""
 voicestick_cloud_url = "wss://api.xiaozhi.me/voicestick/asr/"
-volcengine_api_key = "your_volcengine_asr_api_key"
-llm_base_url = "https://api.openai.com/v1"
-llm_api_key = "your_openai_compatible_llm_api_key"
-llm_model = "gpt-5.5"
+openai_api_key = ""
 interaction_mode = "hold_to_talk"
-resource_id = "volc.seedasr.sauc.duration"
 asr_hotwords = "小智,VoiceStick"
 paired_device_ids = ""
 device_theme_colors = ""
@@ -278,16 +273,13 @@ Fields:
 
 | Field | Description |
 | --- | --- |
-| `asr_provider` | `volcengine` or `voicestick_cloud` |
-| `volcengine_api_key` | Direct Volcengine API key, sent as `X-Api-Key` |
+| `asr_provider` | `voicestick_cloud` or `openai` on macOS |
+| `openai_api_key` | Shared key for OpenAI Realtime ASR, polishing, and translation on macOS |
 | `voicestick_api_key` | VoiceStick Cloud relay API key, sent as `X-Api-Key` |
 | `voicestick_cloud_url` | Cloud relay WebSocket URL |
-| `llm_base_url` | OpenAI-compatible LLM API base URL |
-| `llm_api_key` | API key for the LLM provider |
-| `llm_model` | LLM model name |
+| `llm_base_url`, `llm_api_key`, `llm_model` | Optional text API fallback for legacy self-hosted Cloud relays |
 | `interaction_mode` | Front button interaction: `hold_to_talk` or `click_to_talk` |
-| `resource_id` | Volcengine resource ID |
-| `asr_hotwords` | Comma-separated ASR hotwords; also passed to the LLM as translation terminology hints |
+| `asr_hotwords` | Comma-separated ASR hotwords, also used as terminology hints for polishing and translation |
 | `paired_device_ids` | Comma-separated 4-digit hex IDs, for example `C3D8,09AF` |
 | `device_theme_colors` | Optional per-device overlay colors, for example `C3D8:pink,09AF:green` |
 | `device_overlay_positions` | Optional per-device overlay positions, for example `C3D8:top_left,09AF:bottom_right` |
@@ -295,16 +287,14 @@ Fields:
 | `debug_audio_cache` | Whether to save debug Ogg Opus files |
 | `debug_audio_dir` | Debug audio output directory |
 | `[output].target` | `focused_app` or `subtitle` |
-| `[output].transform` | `original` or `translate` |
+| `[output].transform` | `original`, `polish` (macOS), or `translate` |
 | `[output].translation_target` | Target language code for LLM translation, for example `en` or `zh-Hans` |
 | `[device.<id>.output]` | Optional per-device override for text transform and translation target |
 
-Supported Volcengine `resource_id` values:
+On macOS, choose **Text Output → Refine** in the device menu to correct clear speech recognition errors and clean up dictated text in its original language. With **OpenAI Realtime** selected, refinement and translation automatically use GPT-6 Luna with the same OpenAI API key.
+With **VoiceStick Cloud** selected, Refine and translation use the Cloud key and return over the same connection as the transcript.
 
-- `volc.seedasr.sauc.duration`
-- `volc.seedasr.sauc.concurrent`
-- `volc.bigasr.sauc.duration`
-- `volc.bigasr.sauc.concurrent`
+Older macOS configs set to `volcengine` open with VoiceStick Cloud selected. Use an existing Cloud key or **Apply Trial** in Settings.
 
 Do not commit API keys.
 

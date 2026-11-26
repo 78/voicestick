@@ -1,12 +1,9 @@
-asr_provider = "volcengine"
+asr_provider = "voicestick_cloud"
 voicestick_api_key = ""
 voicestick_cloud_url = "wss://api.xiaozhi.me/voicestick/asr/"
-volcengine_api_key = "your_volcengine_asr_api_key"
-llm_base_url = "https://api.openai.com/v1"
-llm_api_key = "your_openai_compatible_llm_api_key"
-llm_model = "gpt-5.5"
+# With asr_provider = "openai", this key covers transcription, polishing, and translation.
+openai_api_key = ""
 interaction_mode = "hold_to_talk"
-resource_id = "volc.seedasr.sauc.duration"
 asr_hotwords = "小智,VoiceStick"
 paired_device_ids = ""
 device_theme_colors = ""
@@ -17,7 +14,7 @@ debug_audio_cache = false
 
 [output]
 target = "focused_app"
-transform = "original"
+transform = "original" # original, polish, or translate
 translation_target = "en"
 
 # Optional per-device output overrides:
