@@ -40,12 +40,13 @@
     "board": "Hardware",
     "steps": {
       "usb": "Connect your {board} to your computer with a USB-C data cable.",
-      "flash": "Click Start flashing and choose the device’s USB serial port."
+      "flash": "Click Start flashing and choose the device’s USB serial port.",
+      "flashEspUsb": "Click Start flashing and choose the USB JTAG/serial debug unit port."
     },
     "boot": {
       "stick_s3": "If the connection fails, hold the side reset button until the internal green LED blinks, then release it and try again.",
       "voicestick_c3": "If the connection fails, hold the cancel (BOOT) button while restarting the device. Release it once the device enters download mode, then try again.",
-      "magiclick_2p5": "If the connection fails, hold the left (BOOT) button while restarting the device. Release it once the device enters download mode, then try again."
+      "magiclick_2p5": "Hold the left (BOOT) button while restarting the device, then release it once the device enters download mode."
     },
     "button": {
       "start": "Start flashing",
@@ -61,6 +62,7 @@
       "flashing": "Writing Flash",
       "resetting": "Resetting device",
       "done": "Flash complete",
+      "restartRequired": "Flashing is complete. Restart the device with the left button released to start the new firmware.",
       "error": "Flash failed"
     },
     "firmware": {
@@ -79,6 +81,7 @@
     "error": {
       "manifestUnavailable": "Could not load the firmware manifest for the selected model.",
       "downloadFailed": "Firmware download failed, HTTP {status}",
+      "portLost": "The USB serial port disconnected. Check the data cable, then hold the left (BOOT) button while restarting the device and try again.",
       "wrongChip": "Detected {chip}. The selected {board} uses {expected}. Check the model and serial port, then try again."
     }
   },
