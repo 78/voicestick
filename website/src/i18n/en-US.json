@@ -46,7 +46,7 @@
     "boot": {
       "stick_s3": "If the connection fails, hold the side reset button until the internal green LED blinks, then release it and try again.",
       "voicestick_c3": "If the connection fails, hold the cancel (BOOT) button while restarting the device. Release it once the device enters download mode, then try again.",
-      "magiclick_2p5": "Hold the left (BOOT) button while restarting the device, then release it once the device enters download mode."
+      "magiclick_2p5": "The page will put the device into download mode over USB."
     },
     "button": {
       "start": "Start flashing",
@@ -62,7 +62,7 @@
       "flashing": "Writing Flash",
       "resetting": "Resetting device",
       "done": "Flash complete",
-      "restartRequired": "Flashing is complete. Restart the device with the left button released to start the new firmware.",
+      "restartRequired": "Flashing is complete. Restart the device to start the new firmware.",
       "error": "Flash failed"
     },
     "firmware": {
@@ -81,7 +81,8 @@
     "error": {
       "manifestUnavailable": "Could not load the firmware manifest for the selected model.",
       "downloadFailed": "Firmware download failed, HTTP {status}",
-      "portLost": "The USB serial port disconnected. Check the data cable, then hold the left (BOOT) button while restarting the device and try again.",
+      "portLost": "The USB serial port disconnected. Check the data cable and reconnect the device before trying again.",
+      "usbBootFailed": "Could not connect to the device in download mode over USB. Reconnect the data cable and try again.",
       "wrongChip": "Detected {chip}. The selected {board} uses {expected}. Check the model and serial port, then try again."
     }
   },

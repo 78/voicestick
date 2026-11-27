@@ -46,7 +46,7 @@
     "boot": {
       "stick_s3": "如果连接失败，按住侧边复位键直到内部绿色 LED 闪烁，松开后重试。",
       "voicestick_c3": "如果连接失败，按住取消键（BOOT）并重启设备，进入下载模式后松开，再重试。",
-      "magiclick_2p5": "按住左键（BOOT）重启设备，进入下载模式后松开左键。"
+      "magiclick_2p5": "网页会通过 USB 让设备进入下载模式。"
     },
     "button": {
       "start": "开始烧录",
@@ -62,7 +62,7 @@
       "flashing": "正在写入 Flash",
       "resetting": "正在重启设备",
       "done": "烧录完成",
-      "restartRequired": "烧录完成，请重启设备以启动新固件。重启时无需按住左键。",
+      "restartRequired": "烧录完成，请重启设备以启动新固件。",
       "error": "烧录失败"
     },
     "firmware": {
@@ -81,7 +81,8 @@
     "error": {
       "manifestUnavailable": "暂时无法加载所选型号的固件清单。",
       "downloadFailed": "固件下载失败，HTTP {status}",
-      "portLost": "USB 串口已断开。请检查数据线，再按住左键（BOOT）重启设备并重试。",
+      "portLost": "USB 串口已断开。请检查数据线，重新连接设备后再试。",
+      "usbBootFailed": "未能通过 USB 连接设备的下载模式。请重新插拔数据线后再试。",
       "wrongChip": "检测到 {chip}。所选型号 {board} 使用 {expected}，请确认型号和串口后重试。"
     }
   },

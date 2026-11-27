@@ -31,7 +31,7 @@ const boards = {
     name: 'MagiClick 2P5',
     chip: 'ESP32-S3',
     manifestUrl: import.meta.env.VITE_MAGICLICK_FIRMWARE_MANIFEST_URL || `${firmwareBase}/magiclick_2p5/latest/manifest.json`,
-    manualBoot: true,
+    usbSerialBoot: true,
     portFilters: [{ usbVendorId: 0x303a, usbProductId: 0x1001 }],
     flashMode: 'keep',
     flashFreq: 'keep',
@@ -39,6 +39,8 @@ const boards = {
   },
 }
 const appResetSequence = 'D0|R1|W100|R0|W500|D0'
+const usbDownloadReset = [[false, false], [true, false], [true, true], [false, true], [false, false]]
+const usbAppReset = [[false, false], [false, true], [false, false]]
 
 const languageLabel = computed(() => (locale.value === 'zh-CN' ? t('language.en') : t('language.zh')))
 const nextLocale = computed(() => (locale.value === 'zh-CN' ? 'en-US' : 'zh-CN'))
@@ -113,6 +115,14 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
+async function resetUsbSerial(transport, sequence) {
+  // Allow the host driver to deliver each DTR/RTS state to the ESP32-S3.
+  for (const [dtr, rts] of sequence) {
+    await transport.setSignals(dtr, rts)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+}
+
 async function fetchFirmware(boardID) {
   flashStatus.value = 'downloading'
   appendLog(t('flasher.log.downloading'))
@@ -181,13 +191,18 @@ async function flashFirmware() {
     const loader = new ESPLoader({
       transport,
       // Keeping the ROM baud rate avoids reopening the native USB port mid-session.
-      baudrate: board.manualBoot ? 115200 : 460800,
+      baudrate: board.usbSerialBoot ? 115200 : 460800,
+      resetConstructors: board.usbSerialBoot ? {
+        usbJTAGSerialReset: (usbTransport) => ({
+          reset: () => resetUsbSerial(usbTransport, usbDownloadReset),
+        }),
+      } : undefined,
       terminal,
       debugLogging: false,
     })
 
     appendLog(t('flasher.log.connecting'))
-    const chip = await loader.main(board.manualBoot ? 'no_reset' : 'default_reset')
+    const chip = await loader.main(board.usbSerialBoot ? 'usb_reset' : 'default_reset')
     connectedChip.value = chip
 
     if (loader.chip.CHIP_NAME !== board.chip) {
@@ -211,12 +226,18 @@ async function flashFirmware() {
     })
 
     flashProgress.value = 100
-    if (board.manualBoot) {
-      flashStatus.value = 'restartRequired'
-      return
-    }
     flashStatus.value = 'resetting'
-    await loader.after('custom_reset', undefined, appResetSequence)
+    if (board.usbSerialBoot) {
+      try {
+        await resetUsbSerial(transport, usbAppReset)
+      } catch (error) {
+        flashStatus.value = 'restartRequired'
+        appendLog(error?.message || String(error))
+        return
+      }
+    } else {
+      await loader.after('custom_reset', undefined, appResetSequence)
+    }
     flashStatus.value = 'done'
     appendLog(t('flasher.log.done'))
   } catch (error) {
@@ -225,10 +246,10 @@ async function flashFirmware() {
     } else {
       const message = error?.message || String(error)
       flashError.value = message
-      if (board.manualBoot && port?.connected === false) {
+      if (board.usbSerialBoot && port?.connected === false) {
         flashError.value = t('flasher.error.portLost')
-      } else if (board.manualBoot && flashStatus.value === 'connecting' && !connectedChip.value) {
-        flashError.value = `${message} ${t(`flasher.boot.${boardID}`)}`
+      } else if (board.usbSerialBoot && flashStatus.value === 'connecting' && !connectedChip.value) {
+        flashError.value = t('flasher.error.usbBootFailed')
       }
       flashStatus.value = 'error'
       appendLog(message)
@@ -317,9 +338,8 @@ async function flashFirmware() {
           <p>{{ t('flasher.body') }}</p>
           <ol class="flash-steps">
             <li>{{ t('flasher.steps.usb', { board: selectedBoard.name }) }}</li>
-            <li v-if="!selectedBoard.manualBoot">{{ t('flasher.steps.flash') }}</li>
+            <li>{{ t(selectedBoard.usbSerialBoot ? 'flasher.steps.flashEspUsb' : 'flasher.steps.flash') }}</li>
             <li>{{ t(`flasher.boot.${selectedBoardID}`) }}</li>
-            <li v-if="selectedBoard.manualBoot">{{ t('flasher.steps.flashEspUsb') }}</li>
           </ol>
         </div>
 
