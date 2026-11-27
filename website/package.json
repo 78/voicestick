@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^6.0.2",
-    "esptool-js": "^0.6.0",
+    "esptool-js": "^0.7.1",
     "vite": "^7.3.1",
     "vue": "^3.5.25",
     "vue-i18n": "^11.2.8"
