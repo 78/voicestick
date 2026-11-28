@@ -12,6 +12,8 @@ final class MotionWebBridge {
     static let authorizedOriginsDefaultsKey = "authorizedMotionOrigins"
     static let didRevokeOriginsNotification = Notification.Name("VoiceStickMotionWebBridgeDidRevokeOrigins")
 
+    private static let handshakeTokenHeader = "X-VoiceStick-Handshake"
+
     private let ble: BleCentral
     private let queue = DispatchQueue(label: "VoiceStickApp.MotionWebBridge")
 
@@ -19,7 +21,7 @@ final class MotionWebBridge {
     private var wsListener: NWListener?
     private var activeClient: NWConnection?
     private var activeClientOrigin: String?
-    private var pendingOrigins: [String] = []
+    private var pendingOriginsByToken: [String: (origin: String, createdAt: TimeInterval)] = [:]
     private var sessionAuthorizedOrigins = Set<String>()
     private var isPromptingAuthorization = false
     private var inFlightBinaryFrames = 0
@@ -35,7 +37,6 @@ final class MotionWebBridge {
     private var streaming = Set<UUID>()
     private var unavailable = Set<UUID>()
     private var voiceBusy: (() -> Bool)?
-    var onClientActivated: (() -> Void)?
     var onDeviceReleased: ((UUID) -> Void)?
 
     private(set) var isRunning = false
@@ -204,8 +205,17 @@ final class MotionWebBridge {
                 NSLog("MotionWebBridge rejected malformed WS origin: %@", rawOrigin)
                 return .init(status: .reject, subprotocol: nil, additionalHeaders: nil)
             }
-            self?.pendingOrigins.append(normalized)
-            return .init(status: .accept, subprotocol: nil, additionalHeaders: nil)
+            let token = UUID().uuidString
+            if let self {
+                let now = ProcessInfo.processInfo.systemUptime
+                self.pendingOriginsByToken = self.pendingOriginsByToken.filter { now - $0.value.createdAt < 30 }
+                self.pendingOriginsByToken[token] = (origin: normalized, createdAt: now)
+            }
+            return .init(
+                status: .accept,
+                subprotocol: nil,
+                additionalHeaders: [(name: Self.handshakeTokenHeader, value: token)]
+            )
         }
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
@@ -229,20 +239,46 @@ final class MotionWebBridge {
     }
 
     private func acceptWSConnection(_ connection: NWConnection) {
-        let origin = pendingOrigins.isEmpty ? "" : pendingOrigins.removeFirst()
-        DispatchQueue.main.async { [weak self] in
+        var handled = false
+        connection.stateUpdateHandler = { [weak self] state in
             guard let self else { connection.cancel(); return }
-            if self.isOriginAuthorized(origin) {
-                self.activateAuthorizedConnection(connection, origin: origin)
-                return
-            }
-            // If an authorization dialog is already open, do not stack another prompt.
-            if self.isPromptingAuthorization {
+            switch state {
+            case .ready:
+                guard !handled else { return }
+                handled = true
+                let origin = self.extractHandshakeOrigin(for: connection)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { connection.cancel(); return }
+                    if self.isOriginAuthorized(origin) {
+                        self.activateAuthorizedConnection(connection, origin: origin, alreadyStarted: true)
+                        return
+                    }
+                    // If an authorization dialog is already open, do not stack another prompt.
+                    if self.isPromptingAuthorization {
+                        connection.cancel()
+                        return
+                    }
+                    self.requestAuthorization(for: connection, origin: origin)
+                }
+            case .failed, .cancelled:
+                handled = true
                 connection.cancel()
-                return
+            default:
+                break
             }
-            self.requestAuthorization(for: connection, origin: origin)
         }
+        connection.start(queue: queue)
+    }
+
+    private func extractHandshakeOrigin(for connection: NWConnection) -> String {
+        guard let meta = connection.metadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata,
+              let token = meta.additionalServerHeaders?.first(where: {
+                  $0.0.caseInsensitiveCompare(Self.handshakeTokenHeader) == .orderedSame
+              })?.1,
+              let entry = pendingOriginsByToken.removeValue(forKey: token) else {
+            return ""
+        }
+        return entry.origin
     }
 
     private func isOriginAuthorized(_ origin: String) -> Bool {
@@ -252,6 +288,10 @@ final class MotionWebBridge {
     }
 
     private func requestAuthorization(for connection: NWConnection, origin: String) {
+        guard connection.state == .ready else {
+            connection.cancel()
+            return
+        }
         isPromptingAuthorization = true
         let displayOrigin = origin.isEmpty ? "Unknown local client" : origin
 
@@ -259,16 +299,13 @@ final class MotionWebBridge {
         connection.stateUpdateHandler = { state in
             if case .failed = state { connectionClosed = true }
             if case .cancelled = state { connectionClosed = true }
-            if case .ready = state {
-                let payload: [String: Any] = ["type": "auth_required", "origin": displayOrigin]
-                if let data = try? JSONSerialization.data(withJSONObject: payload) {
-                    let meta = NWProtocolWebSocket.Metadata(opcode: .text)
-                    let ctx = NWConnection.ContentContext(identifier: "auth_required", metadata: [meta])
-                    connection.send(content: data, contentContext: ctx, isComplete: true, completion: .contentProcessed { _ in })
-                }
-            }
         }
-        connection.start(queue: queue)
+        let authPayload: [String: Any] = ["type": "auth_required", "origin": displayOrigin]
+        if let data = try? JSONSerialization.data(withJSONObject: authPayload) {
+            let meta = NWProtocolWebSocket.Metadata(opcode: .text)
+            let ctx = NWConnection.ContentContext(identifier: "auth_required", metadata: [meta])
+            connection.send(content: data, contentContext: ctx, isComplete: true, completion: .contentProcessed { _ in })
+        }
 
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
@@ -282,7 +319,7 @@ final class MotionWebBridge {
         let response = alert.runModal()
         isPromptingAuthorization = false
 
-        guard !connectionClosed else {
+        guard !connectionClosed && connection.state == .ready else {
             connection.cancel()
             return
         }
@@ -309,7 +346,6 @@ final class MotionWebBridge {
     }
 
     private func activateAuthorizedConnection(_ connection: NWConnection, origin: String, alreadyStarted: Bool = false) {
-        onClientActivated?()
         disconnectClient(notifySuperseded: true)
         activeClient = connection
         activeClientOrigin = origin

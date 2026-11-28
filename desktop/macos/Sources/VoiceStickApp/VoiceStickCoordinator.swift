@@ -238,9 +238,6 @@ final class VoiceStickCoordinator {
         motionWebBridge.onDeviceReleased = { [weak self] id in
             self?.restoreVoiceMode(for: id)
         }
-        motionWebBridge.onClientActivated = { [weak self] in
-            self?.secondaryButtonClicks.cancelAll()
-        }
         do {
             try motionWebBridge.start { [weak self] in
                 self?.isVoiceBusy() ?? true
@@ -692,7 +689,6 @@ final class VoiceStickCoordinator {
                 sendDisplayState("thinking", to: peripheralID)
             }
         case ("secondary", _):
-            guard !motionWebBridge.hasActiveClient else { return }
             handleSecondaryButton(button, heldFor: heldFor, peripheralID: peripheralID)
         default:
             break
@@ -700,8 +696,7 @@ final class VoiceStickCoordinator {
     }
 
     private func canDoubleClick(_ peripheralID: UUID) -> Bool {
-        pendingPasteState.isIdle && !isVoiceBusy() && !motionWebBridge.hasActiveClient &&
-            ble.supportsProtocolV2(peripheralID)
+        pendingPasteState.isIdle && !isVoiceBusy() && ble.supportsProtocolV2(peripheralID)
     }
 
     private func handleSecondaryButton(_ button: ButtonInput, heldFor: UInt64?, peripheralID: UUID) {
