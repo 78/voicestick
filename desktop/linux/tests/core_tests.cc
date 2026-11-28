@@ -21,15 +21,41 @@ using namespace voicestick;
 
 namespace {
 
-struct SentUiState {
-    std::string state;
+struct SentDisplay {
+    std::string scene;
     std::string text;
     std::optional<std::string> device_id;
 };
 
 class FakeBleCentral : public BleCentral {
 public:
-    void Start() override {}
+    void Start() override {
+        if (announce_v2) {
+            AnnounceV2("5A74");
+            AnnounceV2("6B85");
+        }
+    }
+    void AnnounceV2(const std::string& device_id, bool supported = true) {
+        if (supported) {
+            DeviceInfoResult info;
+            info.protocol_versions = {2};
+            info.hardware = "m5stack_stick_s3";
+            info.firmware_version = "0.5.0";
+            info.buttons = {"primary", "secondary"};
+            info.has_audio_in = true;
+            info.has_display = true;
+            ready_device_ids.insert(device_id);
+            if (on_device_info) on_device_info(device_id, info);
+            if (on_device_ready) on_device_ready(device_id, info);
+        } else {
+            LegacyDeviceInfo legacy;
+            legacy.hardware = "m5stack_stick_s3";
+            legacy.firmware_version = "0.4.2";
+            ready_device_ids.erase(device_id);
+            if (on_legacy_device_info) on_legacy_device_info(device_id, legacy);
+        }
+    }
+    bool announce_v2 = true;
     void UpdatePairedDeviceIds(const std::vector<std::string>& ids) override {
         paired_device_ids = ids;
     }
@@ -37,14 +63,19 @@ public:
                              std::uint64_t,
                              BluetoothAddressKind,
                              const std::string&) override {}
-    void SendUiState(const std::string& state,
-                     const std::string& text,
-                     const std::optional<std::string>& device_id) override {
-        sent_ui_states.push_back(SentUiState{state, text, device_id});
+    void SetDisplay(const std::string& scene,
+                    const std::string& text,
+                    const std::optional<std::string>& device_id) override {
+        sent_displays.push_back(SentDisplay{scene, text, device_id});
     }
-    void SendInteractionMode(InteractionMode mode,
-                             const std::optional<std::string>& device_id) override {
-        sent_interaction_modes.push_back(std::pair{mode, device_id});
+    void StartAudioIn(const std::string& device_id, InteractionMode mode) override {
+        started_audio_in.emplace_back(device_id, mode);
+    }
+    void StopAudioIn(const std::string& device_id) override {
+        stopped_audio_in.push_back(device_id);
+    }
+    std::vector<std::string> ConnectedReadyDeviceIds() const override {
+        return std::vector<std::string>(ready_device_ids.begin(), ready_device_ids.end());
     }
     void UpdateFirmware(ByteVector,
                         const std::string&,
@@ -59,8 +90,10 @@ public:
 
     std::vector<std::string> paired_device_ids;
     std::set<std::string> connected_device_ids;
-    std::vector<SentUiState> sent_ui_states;
-    std::vector<std::pair<InteractionMode, std::optional<std::string>>> sent_interaction_modes;
+    std::set<std::string> ready_device_ids;
+    std::vector<SentDisplay> sent_displays;
+    std::vector<std::pair<std::string, InteractionMode>> started_audio_in;
+    std::vector<std::string> stopped_audio_in;
 };
 
 class FakeAsrClient : public AsrClient {
@@ -191,49 +224,47 @@ public:
     bool pasted_enter = false;
 };
 
-StateEvent ButtonEvent(const std::string& event,
-                       const std::string& button,
-                       std::optional<std::uint32_t> session_id = std::nullopt) {
-    StateEvent state_event;
-    state_event.event = event;
-    state_event.button = button;
-    state_event.session_id = session_id;
-    return state_event;
+AudioStreamFrame AudioStartFrame(std::uint16_t stream_id = 1, std::uint32_t seq = 0) {
+    AudioStreamFrame frame;
+    frame.stream_id = stream_id;
+    frame.seq = seq;
+    frame.flags = 0x01;
+    return frame;
 }
 
-AudioFrame AudioDataFrame(std::uint32_t session_id, std::uint32_t seq, bool is_end = false) {
-    AudioFrame frame;
-    frame.session_id = session_id;
+AudioStreamFrame AudioDataFrame(std::uint16_t stream_id, std::uint32_t seq, bool is_end = false) {
+    AudioStreamFrame frame;
+    frame.stream_id = stream_id;
     frame.seq = seq;
     frame.flags = is_end ? 0x02 : 0;
     frame.payload = {1, 2, 3, 4};
     return frame;
 }
 
-AudioFrame EmptyEndFrame(std::uint32_t session_id, std::uint32_t seq) {
-    AudioFrame frame;
-    frame.session_id = session_id;
+AudioStreamFrame EmptyEndFrame(std::uint16_t stream_id, std::uint32_t seq) {
+    AudioStreamFrame frame;
+    frame.stream_id = stream_id;
     frame.seq = seq;
     frame.flags = 0x02;
     return frame;
 }
 
-bool HasUiState(const FakeBleCentral& ble, const std::string& state, const std::string& device_id) {
-    return std::any_of(ble.sent_ui_states.begin(), ble.sent_ui_states.end(),
-                       [&](const SentUiState& sent) {
-                           return sent.state == state &&
+bool HasDisplayScene(const FakeBleCentral& ble, const std::string& scene, const std::string& device_id) {
+    return std::any_of(ble.sent_displays.begin(), ble.sent_displays.end(),
+                       [&](const SentDisplay& sent) {
+                           return sent.scene == scene &&
                                   sent.device_id.has_value() &&
                                   *sent.device_id == device_id;
                        });
 }
 
-bool HasUiStateText(const FakeBleCentral& ble,
-                    const std::string& state,
+bool HasDisplayText(const FakeBleCentral& ble,
+                    const std::string& scene,
                     const std::string& text,
                     const std::string& device_id) {
-    return std::any_of(ble.sent_ui_states.begin(), ble.sent_ui_states.end(),
-                       [&](const SentUiState& sent) {
-                           return sent.state == state &&
+    return std::any_of(ble.sent_displays.begin(), ble.sent_displays.end(),
+                       [&](const SentDisplay& sent) {
+                           return sent.scene == scene &&
                                   sent.text == text &&
                                   sent.device_id.has_value() &&
                                   *sent.device_id == device_id;
@@ -247,35 +278,67 @@ void TestDeviceIds() {
     assert(BleProtocol::DeviceIdFromName("VS-C3D8").value() == "C3D8");
 }
 
-void TestAudioFrameParsing() {
-    ByteVector frame = {1, 0x01, 16, 0};
-    AppendLe32(frame, 123);
-    AppendLe32(frame, 7);
+void TestAudioAndInputFrameParsingV2() {
+    ByteVector frame = {2, 0x01, 18, 0};
+    AppendLe16(frame, 4);
     frame.push_back(0x03);
     frame.push_back(0);
+    AppendLe32(frame, 7);
+    AppendLe32(frame, 12345);
     AppendLe16(frame, 3);
     frame.push_back(10);
     frame.push_back(11);
     frame.push_back(12);
-    auto parsed = BleProtocol::ParseAudioFrame(frame);
+    auto parsed = BleProtocol::ParseAudioStreamFrame(frame);
     assert(parsed.has_value());
-    assert(parsed->session_id == 123);
+    assert(parsed->stream_id == 4);
     assert(parsed->seq == 7);
-    assert(parsed->IsStart());
-    assert(parsed->IsEnd());
+    assert(parsed->timestamp_ms == 12345);
+    assert(parsed->IsStart() && parsed->IsEnd());
     assert(parsed->payload.size() == 3);
+
+    frame[2] = 21;
+    frame.insert(frame.begin() + 18, {0xAA, 0xBB, 0xCC});
+    const auto extended = BleProtocol::ParseAudioStreamFrame(frame);
+    assert(extended && extended->payload == parsed->payload);
+    frame.pop_back();
+    assert(!BleProtocol::ParseAudioStreamFrame(frame));
+
+    ByteVector input_frame = {2, 0x04, 12, 0};
+    AppendLe16(input_frame, 1);
+    AppendLe16(input_frame, 5);
+    AppendLe32(input_frame, 200);
+    AppendLe32(input_frame, 0x01);
+    auto parsed_input = BleProtocol::ParseInputStreamFrame(input_frame);
+    assert(parsed_input && parsed_input->stream_id == 1 && parsed_input->buttons_mask == 1);
 }
 
-void TestStateParsing() {
-    const std::string json = "{\"event\":\"button_down\",\"button\":\"primary\",\"session_id\":42}";
-    ByteVector frame = {1, 0x10};
-    AppendLe16(frame, static_cast<std::uint16_t>(json.size()));
-    frame.insert(frame.end(), json.begin(), json.end());
-    auto event = BleProtocol::ParseStateEvent(frame);
-    assert(event.has_value());
-    assert(event->event == "button_down");
-    assert(event->button == "primary");
-    assert(event->session_id == 42);
+void TestControlParsingAndChunkingV2() {
+    const auto rpc = BleProtocol::ParseControlMessage(
+        R"({"id":1,"result":{"protocol_version":2,"hardware":"voicestick_c3","firmware_version":"0.5.0",)"
+        R"("buttons":["primary","secondary"],)"
+        R"("streams":{"input":{},"audio_in":{"codecs":["opus"],"frame_ms":[60]}},)"
+        R"("display":{"scenes":["idle","recording","busy","error"]}}})");
+    assert(rpc && rpc->kind == ControlMessage::Kind::kRpcResponse && !rpc->rpc_response.is_error);
+    assert(rpc->rpc_response.device_info && rpc->rpc_response.device_info->SupportsProtocolV2());
+
+    const auto closed = BleProtocol::ParseControlMessage(
+        R"({"event":"stream.closed","data":{"stream_id":2,"reason":"ota"}})");
+    assert(closed && closed->kind == ControlMessage::Kind::kEvent);
+    assert(closed->control_event.stream_id == 2 && closed->control_event.reason == "ota");
+
+    assert(!BleProtocol::ParseControlMessage(R"({"id":1,"event":"stream.closed","data":{"stream_id":2}})"));
+
+    std::uint8_t next_msg_id = 1;
+    const std::string long_rpc = BleProtocol::RpcDisplaySet(2, "busy", std::string(64, 'a'));
+    const auto chunks = BleProtocol::EncodeControlFrames(long_rpc, 20, next_msg_id);
+    assert(chunks.size() > 1);
+    ControlReassembler reassembler;
+    std::optional<std::string> assembled;
+    for (const auto& chunk : chunks) {
+        assembled = reassembler.Push(chunk);
+    }
+    assert(assembled && *assembled == long_rpc);
 }
 
 void TestOggMuxer() {
@@ -467,6 +530,29 @@ void TestFirmwareLinuxAppVersionRequirement() {
         "{" + required_fields + R"(,"minimum_app_versions":{"linux":"invalid"}})"));
 }
 
+void TestCoordinatorRequiresInputProtocolOnEachConnection() {
+    auto ble = std::make_unique<FakeBleCentral>();
+    auto* ble_ptr = ble.get();
+    ble_ptr->announce_v2 = false;
+    FakeUi ui;
+    FakeInputInjector input;
+    VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble),
+                                      std::make_unique<FakeAsrClient>(), &ui, &input);
+    coordinator.Start();
+
+    ble_ptr->AnnounceV2("5A74", false);
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    assert(ui.show_listening_count == 0);
+
+    ble_ptr->AnnounceV2("5A74", true);
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    assert(ui.show_listening_count == 1);
+
+    ble_ptr->on_connection_change({});
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 1));
+    assert(ui.show_listening_count == 1);
+}
+
 void TestCoordinatorCancelsShortPrimaryPress() {
     auto ble = std::make_unique<FakeBleCentral>();
     auto* ble_ptr = ble.get();
@@ -477,14 +563,14 @@ void TestCoordinatorCancelsShortPrimaryPress() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 42));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 42));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 1));
 
     assert(asr_ptr->cancelled);
     assert(ui.show_listening_count == 1);
     assert(ui.hide_overlay_count == 1);
-    assert(HasUiState(*ble_ptr, "recording", "5A74"));
-    assert(HasUiState(*ble_ptr, "ready", "5A74"));
+    assert(HasDisplayScene(*ble_ptr, "recording", "5A74"));
+    assert(HasDisplayScene(*ble_ptr, "idle", "5A74"));
 }
 
 void TestCoordinatorPrimaryDuringFinalizingRefreshesThinking() {
@@ -497,22 +583,19 @@ void TestCoordinatorPrimaryDuringFinalizingRefreshesThinking() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 7));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(7, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 7));
-    assert(!asr_ptr->started);
-
-    const auto before = ble_ptr->sent_ui_states.size();
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", std::nullopt));
-
-    assert(ble_ptr->sent_ui_states.size() == before + 1);
-    assert(ble_ptr->sent_ui_states.back().state == "thinking");
-    assert(ble_ptr->sent_ui_states.back().device_id == std::optional<std::string>("5A74"));
-
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(7, 2));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 2));
     assert(asr_ptr->started);
     assert(asr_ptr->last_chunk_was_final);
+
+    const auto before = ble_ptr->sent_displays.size();
+    ble_ptr->on_button_event("5A74", "primary", true, 1600);
+
+    assert(ble_ptr->sent_displays.size() == before + 1);
+    assert(ble_ptr->sent_displays.back().scene == "busy");
+    assert(ble_ptr->sent_displays.back().device_id == std::optional<std::string>("5A74"));
 }
 
 void TestCoordinatorSecondaryCancelsFinalizing() {
@@ -525,19 +608,20 @@ void TestCoordinatorSecondaryCancelsFinalizing() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 8));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(8, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 8));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 2));
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "secondary"));
+    ble_ptr->on_button_event("5A74", "secondary", true, 1000);
+    ble_ptr->on_button_event("5A74", "secondary", false, 1100);
 
     assert(asr_ptr->cancelled);
     assert(ui.hide_overlay_count == 1);
-    assert(HasUiState(*ble_ptr, "ready", "5A74"));
+    assert(HasDisplayScene(*ble_ptr, "idle", "5A74"));
 }
 
-void TestCoordinatorAcceptsAudioFramesAfterButtonUpUntilEnd() {
+void TestCoordinatorAcceptsAudioFramesUntilEnd() {
     auto ble = std::make_unique<FakeBleCentral>();
     auto* ble_ptr = ble.get();
     auto asr = std::make_unique<FakeAsrClient>();
@@ -547,17 +631,14 @@ void TestCoordinatorAcceptsAudioFramesAfterButtonUpUntilEnd() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 14));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(14, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 14));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(14, 2));
-
-    assert(!asr_ptr->started);
-
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(14, 3));
-
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 2));
     assert(asr_ptr->started);
+    assert(!asr_ptr->last_chunk_was_final);
+
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 3));
     assert(asr_ptr->sent_chunks >= 3);
     assert(asr_ptr->last_chunk_was_final);
 }
@@ -572,20 +653,20 @@ void TestCoordinatorPrimaryPausesPendingConfirmation() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 9));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(9, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 9));
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(9, 2));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 2));
     asr_ptr->on_final("hello");
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary"));
+    assert(!ble_ptr->stopped_audio_in.empty() && ble_ptr->stopped_audio_in.back() == "5A74");
+    ble_ptr->on_button_event("5A74", "primary", true, 2000);
 
     assert(ui.final_countdowns.size() == 1);
     assert(ui.final_countdowns.back() == "hello");
     assert(ui.paused_finals.size() == 1);
     assert(ui.paused_finals.back() == "hello");
-    assert(ble_ptr->sent_ui_states.back().state == "pending_confirmation");
+    assert(ble_ptr->sent_displays.back().scene == "busy");
 }
 
 void TestCoordinatorZeroCountdownHidesOverlayAndPastes() {
@@ -600,11 +681,10 @@ void TestCoordinatorZeroCountdownHidesOverlayAndPastes() {
     VoiceStickCoordinator coordinator(config, std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 33));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(33, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 33));
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(33, 2));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 2));
     const int hides_before = ui.hide_overlay_count;
     asr_ptr->on_final("hello");
 
@@ -623,8 +703,8 @@ void TestCoordinatorDisconnectDuringRecordingPausesConfirmation() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 32));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(32, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
     ble_ptr->on_connection_change({});
     asr_ptr->on_final("hello");
@@ -644,14 +724,14 @@ void TestCoordinatorOtherDeviceDuringRecordingGetsReady() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 10));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
 
-    const auto before = ble_ptr->sent_ui_states.size();
-    ble_ptr->on_state_event("6B85", ButtonEvent("button_down", "primary", 11));
+    const auto before = ble_ptr->sent_displays.size();
+    ble_ptr->on_audio_frame("6B85", AudioStartFrame(2, 0));
 
-    assert(ble_ptr->sent_ui_states.size() == before + 1);
-    assert(ble_ptr->sent_ui_states.back().state == "ready");
-    assert(ble_ptr->sent_ui_states.back().device_id == std::optional<std::string>("6B85"));
+    assert(ble_ptr->sent_displays.size() == before + 1);
+    assert(ble_ptr->sent_displays.back().scene == "idle");
+    assert(ble_ptr->sent_displays.back().device_id == std::optional<std::string>("6B85"));
 }
 
 void TestCoordinatorSubtitleOutputSkipsPaste() {
@@ -678,17 +758,16 @@ void TestCoordinatorSubtitleOutputSkipsPaste() {
         });
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 12));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(12, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 12));
     assert(subtitle_asr_ptr != nullptr);
     assert(!subtitle_asr_ptr->started);
     subtitle_asr_ptr->on_partial("early subtitle");
     assert(!ui.partials.empty());
     assert(ui.partials.back() == "early subtitle");
-    assert(ble_ptr->sent_ui_states.back().text != "early subtitle");
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(12, 2));
+    assert(ble_ptr->sent_displays.back().text != "early subtitle");
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 2));
     assert(subtitle_asr_ptr->started);
     assert(subtitle_asr_ptr->last_options.show_utterances);
     assert(subtitle_asr_ptr->last_options.result_type == AsrResultType::kSingle);
@@ -701,7 +780,7 @@ void TestCoordinatorSubtitleOutputSkipsPaste() {
     assert(!ui.subtitles.empty());
     assert(ui.subtitles.back() == "5A74:hello subtitle:blue");
     assert(ui.hide_overlay_count > 0);
-    assert(HasUiState(*ble_ptr, "ready", "5A74"));
+    assert(HasDisplayScene(*ble_ptr, "idle", "5A74"));
 }
 
 void TestCoordinatorSubtitleFinalDoesNotBlockNextSession() {
@@ -728,33 +807,31 @@ void TestCoordinatorSubtitleFinalDoesNotBlockNextSession() {
         });
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 12));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(12, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 12));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 2));
     assert(subtitle_asrs.size() == 1);
-    assert(!subtitle_asrs[0]->started);
-    assert(HasUiState(*ble_ptr, "ready", "5A74"));
+    assert(subtitle_asrs[0]->started);
+    assert(HasDisplayScene(*ble_ptr, "idle", "5A74"));
 
-    const auto ready_count_after_first_release = std::count_if(
-        ble_ptr->sent_ui_states.begin(), ble_ptr->sent_ui_states.end(), [](const SentUiState& sent) {
-            return sent.state == "ready" && sent.device_id == std::optional<std::string>("5A74");
+    const auto idle_count_after_first_release = std::count_if(
+        ble_ptr->sent_displays.begin(), ble_ptr->sent_displays.end(), [](const SentDisplay& sent) {
+            return sent.scene == "idle" && sent.device_id == std::optional<std::string>("5A74");
         });
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 13));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 3));
     assert(subtitle_asrs.size() == 2);
-    assert(ble_ptr->sent_ui_states.back().state == "recording");
+    assert(ble_ptr->sent_displays.back().scene == "recording");
 
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(12, 2));
-    assert(subtitle_asrs[0]->started);
     subtitle_asrs[0]->on_final("first late subtitle");
     assert(!ui.subtitles.empty());
     assert(ui.subtitles.back() == "5A74:first late subtitle:blue");
-    const auto ready_count_after_late_final = std::count_if(
-        ble_ptr->sent_ui_states.begin(), ble_ptr->sent_ui_states.end(), [](const SentUiState& sent) {
-            return sent.state == "ready" && sent.device_id == std::optional<std::string>("5A74");
+    const auto idle_count_after_late_final = std::count_if(
+        ble_ptr->sent_displays.begin(), ble_ptr->sent_displays.end(), [](const SentDisplay& sent) {
+            return sent.scene == "idle" && sent.device_id == std::optional<std::string>("5A74");
         });
-    assert(ready_count_after_late_final == ready_count_after_first_release);
+    assert(idle_count_after_late_final == idle_count_after_first_release);
 }
 
 void TestCoordinatorShortSubtitleEndReturnsReady() {
@@ -777,40 +854,14 @@ void TestCoordinatorShortSubtitleEndReturnsReady() {
         });
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 12));
-    assert(ble_ptr->sent_ui_states.back().state == "recording");
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(12, 1));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 12));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    assert(ble_ptr->sent_displays.back().scene == "recording");
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 1));
 
     assert(ui.hide_overlay_count > 0);
     assert(!ui.statuses.empty());
     assert(ui.statuses.back() == "Ready");
-    assert(HasUiState(*ble_ptr, "ready", "5A74"));
-}
-
-void TestCoordinatorClickToTalkPrimaryClickTogglesRecording() {
-    auto ble = std::make_unique<FakeBleCentral>();
-    auto* ble_ptr = ble.get();
-    auto asr = std::make_unique<FakeAsrClient>();
-    auto* asr_ptr = asr.get();
-    FakeUi ui;
-    FakeInputInjector input;
-    AppConfig config = AppConfig::Defaults();
-    config.interaction_mode = InteractionMode::kClickToTalk;
-    VoiceStickCoordinator coordinator(config, std::move(ble), std::move(asr), &ui, &input);
-    coordinator.Start();
-
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_click", "primary", 21));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(21, 1));
-    std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_click", "primary", 21));
-
-    assert(!asr_ptr->started);
-    assert(ble_ptr->sent_ui_states.back().state == "thinking");
-
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(21, 2));
-    assert(asr_ptr->started);
-    assert(asr_ptr->last_chunk_was_final);
+    assert(HasDisplayScene(*ble_ptr, "idle", "5A74"));
 }
 
 void TestCoordinatorMainPartialSentToDeviceOnlyAfterFinalAudio() {
@@ -823,20 +874,19 @@ void TestCoordinatorMainPartialSentToDeviceOnlyAfterFinalAudio() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 22));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
     asr_ptr->on_partial("early");
     assert(!ui.partials.empty());
     assert(ui.partials.back() == "early");
-    assert(ble_ptr->sent_ui_states.back().text != "early");
+    assert(ble_ptr->sent_displays.back().text != "early");
 
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(22, 1));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 22));
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(22, 2));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 2));
     asr_ptr->on_partial("late");
 
-    assert(ble_ptr->sent_ui_states.back().state == "thinking");
-    assert(ble_ptr->sent_ui_states.back().text == "late");
+    assert(ble_ptr->sent_displays.back().scene == "busy");
+    assert(ble_ptr->sent_displays.back().text == "late");
 }
 
 void TestCoordinatorShowsDetailedAsrStartError() {
@@ -851,15 +901,14 @@ void TestCoordinatorShowsDetailedAsrStartError() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 23));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(23, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 23));
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(23, 2));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 2));
 
     assert(!ui.errors.empty());
     assert(ui.errors.back() == "Missing ASR API key");
-    assert(HasUiStateText(*ble_ptr, "error", "Missing ASR API key", "5A74"));
+    assert(HasDisplayText(*ble_ptr, "error", "Missing ASR API key", "5A74"));
 }
 
 void TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError() {
@@ -872,17 +921,16 @@ void TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError() {
     VoiceStickCoordinator coordinator(AppConfig::Defaults(), std::move(ble), std::move(asr), &ui, &input);
     coordinator.Start();
 
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_down", "primary", 24));
-    ble_ptr->on_audio_frame("5A74", AudioDataFrame(24, 1));
+    ble_ptr->on_audio_frame("5A74", AudioStartFrame(1, 0));
+    ble_ptr->on_audio_frame("5A74", AudioDataFrame(1, 1));
     std::this_thread::sleep_for(std::chrono::milliseconds(520));
-    ble_ptr->on_state_event("5A74", ButtonEvent("button_up", "primary", 24));
-    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(24, 2));
+    ble_ptr->on_audio_frame("5A74", EmptyEndFrame(1, 2));
     asr_ptr->on_error("ASR 44002: VoiceStick Cloud API key is invalid.");
     asr_ptr->on_upgrade_url("https://example.test/upgrade",
                             "ASR 44002: VoiceStick Cloud API key is invalid.");
 
-    assert(HasUiStateText(*ble_ptr, "error", "ASR 44002: VoiceStick Cloud API key is invalid.", "5A74"));
-    assert(HasUiState(*ble_ptr, "ready", "5A74"));
+    assert(HasDisplayText(*ble_ptr, "error", "ASR 44002: VoiceStick Cloud API key is invalid.", "5A74"));
+    assert(HasDisplayScene(*ble_ptr, "idle", "5A74"));
     assert(!ui.cloud_upgrades.empty());
 }
 
@@ -890,17 +938,18 @@ void TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError() {
 
 int main() {
     TestDeviceIds();
-    TestAudioFrameParsing();
-    TestStateParsing();
+    TestAudioAndInputFrameParsingV2();
+    TestControlParsingAndChunkingV2();
     TestOggMuxer();
     TestAsrProtocol();
     TestAppConfig();
     TestFirmwareManifestParsingAndVersionCompare();
     TestFirmwareLinuxAppVersionRequirement();
+    TestCoordinatorRequiresInputProtocolOnEachConnection();
     TestCoordinatorCancelsShortPrimaryPress();
     TestCoordinatorPrimaryDuringFinalizingRefreshesThinking();
     TestCoordinatorSecondaryCancelsFinalizing();
-    TestCoordinatorAcceptsAudioFramesAfterButtonUpUntilEnd();
+    TestCoordinatorAcceptsAudioFramesUntilEnd();
     TestCoordinatorPrimaryPausesPendingConfirmation();
     TestCoordinatorZeroCountdownHidesOverlayAndPastes();
     TestCoordinatorDisconnectDuringRecordingPausesConfirmation();
@@ -908,7 +957,6 @@ int main() {
     TestCoordinatorSubtitleOutputSkipsPaste();
     TestCoordinatorSubtitleFinalDoesNotBlockNextSession();
     TestCoordinatorShortSubtitleEndReturnsReady();
-    TestCoordinatorClickToTalkPrimaryClickTogglesRecording();
     TestCoordinatorMainPartialSentToDeviceOnlyAfterFinalAudio();
     TestCoordinatorShowsDetailedAsrStartError();
     TestCoordinatorCloudUpgradeRecoversDeviceAfterAsrError();

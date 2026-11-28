@@ -40,6 +40,7 @@ struct DeviceFirmwareInfo {
     var buttons: [String]?
     var currentVersion: String?
     var latestVersion: String?
+    var requiresInputFirmware = false
     var updateAvailable = false
     var isChecking = false
     var errorMessage: String?
@@ -113,6 +114,7 @@ final class FirmwareManifestClient {
     enum FirmwareManifestError: LocalizedError {
         case appUpdateRequired(String)
         case deviceInfoUnavailable
+        case compatibleFirmwareUnavailable
         case invalidResponse
         case checksumMismatch
         case sizeMismatch
@@ -123,6 +125,8 @@ final class FirmwareManifestClient {
                 return "Update VoiceStick for macOS to version \(version) or later before installing this firmware."
             case .deviceInfoUnavailable:
                 return "Connect to the device and wait for its firmware version to appear."
+            case .compatibleFirmwareUnavailable:
+                return "A firmware update that supports this version of VoiceStick is not available yet."
             case .invalidResponse:
                 return "Firmware update server returned an invalid response."
             case .checksumMismatch:

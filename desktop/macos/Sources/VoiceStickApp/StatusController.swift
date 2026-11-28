@@ -72,6 +72,8 @@ final class StatusController {
     private var visibleOverlayKeys: Set<String> = []
 
     var onQuit: (() -> Void)?
+    var onPlayTennis: (() -> Void)?
+    var onOpenTennisStudio: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onPairDevice: (() -> Void)?
     var onForgetDevice: ((String) -> Void)?
@@ -213,6 +215,17 @@ final class StatusController {
         menu.addItem(batteryPercentageItem)
 
         addInputItems()
+        menu.addItem(makeMenuItem(
+            title: "体感网球 · 动作训练室 (Chrome)",
+            symbolName: "figure.tennis",
+            action: #selector(openTennisStudio)
+        ))
+        menu.addItem(makeMenuItem(
+            title: "休息一下 · 3D 网球 (旧版)",
+            symbolName: "sportscourt",
+            action: #selector(playTennis)
+        ))
+
 
         menu.addItem(makeMenuItem(
             title: "Pair Device...",
@@ -440,32 +453,35 @@ final class StatusController {
             action: nil
         )
         let textSubmenu = NSMenu()
-        for transform: TextTransform in [.original, .polish] {
+        for transform in TextTransform.allCases {
             let item = NSMenuItem(
                 title: transform.displayName,
                 action: #selector(selectDeviceTextMode),
                 keyEquivalent: ""
             )
             item.target = self
-            item.representedObject = "\(deviceID):\(transform.rawValue):"
+            item.representedObject = [deviceID, transform.rawValue]
             item.state = profile.transform == transform ? .on : .off
-            textSubmenu.addItem(item)
-        }
-        textSubmenu.addItem(NSMenuItem.separator())
-
-        for language in Self.translationTargets {
-            let item = NSMenuItem(
-                title: "Translate to \(language.name)",
-                action: #selector(selectDeviceTextMode),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = "\(deviceID):translate:\(language.code)"
-            item.state = profile.transform == .translate && profile.translationTarget == language.code ? .on : .off
             textSubmenu.addItem(item)
         }
         textItem.submenu = textSubmenu
         submenu.addItem(textItem)
+
+        let languageItem = makeMenuItem(title: "Translation Language", symbolName: "globe", action: nil)
+        let languageSubmenu = NSMenu()
+        for language in Self.translationTargets {
+            let item = NSMenuItem(
+                title: language.name,
+                action: #selector(selectDeviceTranslationLanguage),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = [deviceID, language.code]
+            item.state = profile.translationTarget.caseInsensitiveCompare(language.code) == .orderedSame ? .on : .off
+            languageSubmenu.addItem(item)
+        }
+        languageItem.submenu = languageSubmenu
+        submenu.addItem(languageItem)
     }
 
     private func addFirmwareItems(to submenu: NSMenu, deviceID: String, isConnected: Bool) {
@@ -475,6 +491,12 @@ final class StatusController {
         currentItem.isEnabled = false
         currentItem.image = Self.symbolImage(named: "info.circle", accessibilityDescription: currentTitle)
         submenu.addItem(currentItem)
+
+        if info?.requiresInputFirmware == true {
+            let required = NSMenuItem(title: "Firmware Update Required for Voice and Games", action: nil, keyEquivalent: "")
+            required.image = Self.symbolImage(named: "exclamationmark.triangle", accessibilityDescription: required.title)
+            submenu.addItem(required)
+        }
 
         if info?.isChecking == true {
             let checkingItem = NSMenuItem(title: "Checking for Firmware Updates…", action: nil, keyEquivalent: "")
@@ -530,6 +552,17 @@ final class StatusController {
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
         overlay.showListening(text: text, outputMode: outputMode(for: deviceID))
+    }
+
+    func showOutputModeChange(deviceID: String) {
+        let text = outputMode(for: deviceID)?.accessibilityLabel ?? TextTransform.original.displayName
+        NSLog("Output mode for VS-%@: %@", deviceID, text)
+        let overlay = overlay(for: deviceID)
+        markOverlayVisible(for: deviceID)
+        applyOverlayStyle(for: deviceID, overlay: overlay)
+        overlay.showOutputModeChange(text) { [weak self] in
+            self?.markOverlayHidden(for: deviceID)
+        }
     }
 
     func showFinal(
@@ -760,6 +793,9 @@ final class StatusController {
         rebuildMenu()
     }
 
+    @objc private func playTennis() { onPlayTennis?() }
+    @objc private func openTennisStudio() { onOpenTennisStudio?() }
+
     @objc private func openSettings() {
         onOpenSettings?()
     }
@@ -814,33 +850,20 @@ final class StatusController {
     }
 
     @objc private func selectDeviceTextMode(_ sender: NSMenuItem) {
-        guard let selection = sender.representedObject as? String else { return }
-        let parts = selection.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
-        guard parts.count >= 2,
-              let transform = TextTransform(rawValue: parts[1]) else { return }
-        let deviceID = AppConfig.normalizedDeviceID(parts[0])
+        guard let selection = sender.representedObject as? [String], selection.count == 2,
+              let transform = TextTransform(rawValue: selection[1]) else { return }
+        let deviceID = selection[0]
         var profile = outputProfile(for: deviceID)
         profile.transform = transform
-        if transform == .translate, parts.count == 3, !parts[2].isEmpty {
-            profile.translationTarget = parts[2]
-        }
-        setDeviceOutputProfile(deviceID: deviceID, profile: profile)
+        onSetDeviceOutputProfile?(deviceID, profile)
     }
 
-    private func setDeviceOutputProfile(deviceID: String, profile: OutputProfile) {
-        let storedProfile = OutputProfile(
-            target: defaultOutputProfile.target,
-            transform: profile.transform,
-            translationTarget: profile.translationTarget
-        )
-        if storedProfile.transform == defaultOutputProfile.transform &&
-            storedProfile.translationTarget == defaultOutputProfile.translationTarget {
-            deviceOutputProfiles.removeValue(forKey: deviceID)
-        } else {
-            deviceOutputProfiles[deviceID] = storedProfile
-        }
-        rebuildMenu()
-        onSetDeviceOutputProfile?(deviceID, storedProfile)
+    @objc private func selectDeviceTranslationLanguage(_ sender: NSMenuItem) {
+        guard let selection = sender.representedObject as? [String], selection.count == 2 else { return }
+        let deviceID = selection[0]
+        var profile = outputProfile(for: deviceID)
+        profile.translationTarget = selection[1]
+        onSetDeviceOutputProfile?(deviceID, profile)
     }
 
     @objc private func restoreLastInput() {

@@ -159,6 +159,10 @@ struct OutputProfile: Equatable {
     var usesSubtitleASR: Bool {
         target == .subtitle
     }
+
+    mutating func toggleTranslation() {
+        transform = transform == .translate ? .original : .translate
+    }
 }
 
 struct AppConfig {
@@ -215,7 +219,7 @@ struct AppConfig {
             "magiclick_2p5": base.appendingPathComponent("magiclick_2p5/latest/manifest.json")
         ]
     }()
-    static let minimumCompatibleFirmwareVersion = "0.3.0"
+    static let minimumCompatibleFirmwareVersion = "0.5.0"
 
     static var configExists: Bool {
         FileManager.default.fileExists(atPath: configURL.path)
@@ -524,6 +528,15 @@ struct AppConfig {
             transform: deviceProfile.transform,
             translationTarget: deviceProfile.translationTarget
         )
+    }
+
+    mutating func setDeviceOutputProfile(_ profile: OutputProfile, for deviceID: String) {
+        let storedProfile = OutputProfile(
+            target: defaultOutputProfile.target,
+            transform: profile.transform,
+            translationTarget: profile.translationTarget
+        )
+        deviceOutputProfiles[Self.normalizedDeviceID(deviceID)] = storedProfile == defaultOutputProfile ? nil : storedProfile
     }
 
     private static func deviceOutputProfileMap(

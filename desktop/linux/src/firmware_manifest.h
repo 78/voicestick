@@ -25,6 +25,8 @@ struct FirmwareManifest {
 struct DeviceFirmwareInfo {
     std::string hardware;
     std::string current_version;
+    bool reported_on_connection = false;
+    bool requires_input_firmware = false;
     std::string latest_version;
     bool update_available = false;
     bool is_checking = false;
@@ -43,6 +45,8 @@ public:
     std::optional<ByteVector> DownloadOtaSync(const FirmwareManifest& manifest, std::string& error) const;
 
     static std::string DefaultManifestUrl();
+    static std::string ManifestUrlForHardware(std::string_view hardware);
+    static constexpr std::string_view supported_hardware[] = {"stick_s3", "voicestick_c3", "magiclick_2p5"};
 
 private:
     std::string manifest_url_;

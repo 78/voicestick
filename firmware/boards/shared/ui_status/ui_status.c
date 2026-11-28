@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "driver/ledc.h"
+#include "board.h"
 #include "board_lcd.h"
 #include "esp_check.h"
 #include "esp_err.h"
@@ -419,10 +420,15 @@ void ui_status_set_pairing(const char *device_name)
     set_scene(UI_STATUS_ICON_PAIRING, "Pairing", device_name ? device_name : "VS-0000");
 }
 
+bool board_has_display(void)
+{
+    return true;
+}
+
 void ui_status_set_idle_hint(const char *hint)
 {
     _lock_acquire(&s_lvgl_lock);
-    strlcpy(s_idle_hint_text, hint && hint[0] ? hint : "Hold to Talk", sizeof(s_idle_hint_text));
+    strlcpy(s_idle_hint_text, hint ? hint : "", sizeof(s_idle_hint_text));
     if (s_scene == UI_STATUS_ICON_IDLE) {
         strlcpy(s_hint_text, s_idle_hint_text, sizeof(s_hint_text));
         render_current_locked();

@@ -280,8 +280,8 @@ final class OverlayController {
         )
     }
 
-    func showStatus(_ text: String) {
-        show(mode: .listening, text: text, hint: "", autoHideAfter: nil)
+    func showOutputModeChange(_ text: String, onHidden: @escaping () -> Void) {
+        show(mode: .paused, text: text, autoHideAfter: 1.5, onHidden: onHidden)
     }
 
     func hide(onHidden: (() -> Void)? = nil) {

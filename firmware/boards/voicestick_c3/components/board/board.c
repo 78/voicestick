@@ -383,3 +383,8 @@ esp_err_t board_prepare_deep_sleep(bool usb_wake_only)
     ESP_LOGI(TAG, "deep sleep armed, wake on %s", usb_wake_only ? "USB" : "main key or USB");
     return ESP_OK;
 }
+
+bool board_has_display(void)
+{
+    return true;
+}

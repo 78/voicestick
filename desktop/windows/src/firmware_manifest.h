@@ -32,6 +32,8 @@ struct DeviceFirmwareInfo {
     std::string current_version;
     std::string device_uuid;
     bool reported_on_connection = false;
+    bool requires_input_firmware = false;
+    std::optional<std::vector<std::string>> buttons;
     std::string latest_version;
     bool update_available = false;
     bool is_checking = false;

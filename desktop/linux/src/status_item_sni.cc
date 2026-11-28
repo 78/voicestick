@@ -203,6 +203,9 @@ struct StatusItemSni::Impl {
                              : "Firmware " + device.firmware.current_version,
                 .enabled = false,
             });
+            if (device.firmware.requires_input_firmware) {
+                add_child(device_menu, {.label = "Firmware Update Required for Voice Input", .enabled = false});
+            }
             if (device.firmware.is_checking) {
                 add_child(device_menu, {.label = "Checking for Updates", .enabled = false});
             } else if (!device.firmware.error_message.empty()) {
@@ -219,7 +222,7 @@ struct StatusItemSni::Impl {
                     .action = "update",
                     .payload = device.id,
                 });
-            } else if (!device.firmware.latest_version.empty() &&
+            } else if (!device.firmware.requires_input_firmware && !device.firmware.latest_version.empty() &&
                        !device.firmware.current_version.empty()) {
                 add_child(device_menu, {.label = "Firmware Up to Date", .enabled = false});
             }

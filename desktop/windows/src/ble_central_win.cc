@@ -211,6 +211,13 @@ std::string PreviewBytes(std::span<const std::uint8_t> bytes, std::size_t limit 
     return out;
 }
 
+std::string TruncateUtf8(std::string_view text, std::size_t max_bytes = 80) {
+    if (text.size() <= max_bytes) return std::string(text);
+    std::size_t end = max_bytes;
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
+    return std::string(text.substr(0, end));
+}
+
 } // namespace
 
 BleCentralWin::BleCentralWin(std::vector<std::string> paired_device_ids, HWND dispatch_hwnd)
@@ -379,65 +386,185 @@ void BleCentralWin::StartDirectConnect(const std::string& device_id,
                        name.empty() ? "VS-" + device_id : name, device_id, pairing);
 }
 
-void BleCentralWin::SendUiState(const std::string& state,
-                                const std::string& text,
-                                const std::optional<std::string>& device_id,
-                                std::string_view confirmation_id) {
-    // Firmware shows a fixed confirmation hint. Keep the command small enough
-    // to include a confirmation ID even when the desktop draft is long.
-    const std::string_view display_text = state == "pending_confirmation" ? std::string_view{} : text;
-    auto payload = BleProtocol::UiStatePayload(state, display_text, confirmation_id);
-    std::vector<std::shared_ptr<DeviceSession>> targets;
+void BleCentralWin::SetDisplay(const std::string& scene,
+                               const std::string& text,
+                               const std::optional<std::string>& device_id) {
+    const auto trimmed = TruncateUtf8(text, 80);
+    std::vector<std::pair<std::string, std::shared_ptr<DeviceSession>>> targets;
     {
         std::lock_guard lock(mutex_);
         if (device_id.has_value()) {
             auto it = sessions_by_device_id_.find(*device_id);
-            if (it != sessions_by_device_id_.end() && it->second->ready) {
-                targets.push_back(it->second);
-            } else {
-                LogBleLine("send ui_state skipped state=" + state +
-                           " dev=VS-" + *device_id +
-                           " text_len=" + std::to_string(text.size()));
+            if (it != sessions_by_device_id_.end() && it->second->ready && it->second->initialized &&
+                it->second->info && it->second->info->has_display) {
+                targets.emplace_back(it->first, it->second);
             }
         } else {
-            for (const auto& [_, session] : sessions_by_device_id_) {
-                if (session->ready) targets.push_back(session);
+            for (const auto& [id, session] : sessions_by_device_id_) {
+                if (session->ready && session->initialized &&
+                    session->info && session->info->has_display) {
+                    targets.emplace_back(id, session);
+                }
             }
-            LogBleLine("send ui_state broadcast state=" + state +
-                       " targets=" + std::to_string(targets.size()) +
-                       " text_len=" + std::to_string(text.size()));
         }
     }
-
-    for (auto& session : targets) {
-        LogBleLine("send ui_state state=" + state +
-                   " dev=VS-" + session->device.id +
-                   " text_len=" + std::to_string(text.size()));
-        WriteControlPayloadAsync(std::move(session), payload);
+    for (auto& [id, session] : targets) {
+        {
+            std::lock_guard lock(mutex_);
+            if (session->last_display_scene == scene && session->last_display_text == trimmed) {
+                continue;
+            }
+            session->last_display_scene = scene;
+            session->last_display_text = trimmed;
+        }
+        SendRpc(id, session, [scene, trimmed](std::uint32_t rpc_id) {
+            return BleProtocol::RpcDisplaySet(rpc_id, scene, trimmed);
+        }, [this, session, scene, trimmed](std::optional<ControlRpcResponse> resp) {
+            if (!resp || resp->is_error) {
+                std::lock_guard lock(mutex_);
+                if (session->last_display_scene == scene && session->last_display_text == trimmed) {
+                    session->last_display_scene.reset();
+                    session->last_display_text.reset();
+                }
+            }
+        });
     }
 }
 
-void BleCentralWin::SendInteractionMode(InteractionMode mode,
-                                        const std::optional<std::string>& device_id) {
-    auto payload = BleProtocol::InteractionModePayload(InteractionModeName(mode));
-    std::vector<std::shared_ptr<DeviceSession>> targets;
+void BleCentralWin::StartAudioIn(const std::string& device_id, InteractionMode mode) {
+    std::shared_ptr<DeviceSession> session;
+    std::uint16_t previous_stream_id = 0;
     {
         std::lock_guard lock(mutex_);
-        if (device_id.has_value()) {
-            auto it = sessions_by_device_id_.find(*device_id);
-            if (it != sessions_by_device_id_.end() && it->second->ready) {
-                targets.push_back(it->second);
-            }
-        } else {
-            for (const auto& [_, session] : sessions_by_device_id_) {
-                if (session->ready) targets.push_back(session);
-            }
-        }
+        auto it = sessions_by_device_id_.find(device_id);
+        if (it == sessions_by_device_id_.end() || !it->second->ready || !it->second->initialized) return;
+        session = it->second;
+        previous_stream_id = session->audio_in_stream_id;
+        session->audio_in_stream_id = 0;
     }
+    const std::string trigger = mode == InteractionMode::kHoldToTalk ? "button_hold" : "button_toggle";
+    auto start_new = [this, device_id, session, trigger] {
+        SendRpc(device_id, session, [trigger](std::uint32_t rpc_id) {
+            return BleProtocol::RpcStreamStartAudioIn(rpc_id, trigger);
+        }, [this, device_id, session](std::optional<ControlRpcResponse> resp) {
+            if (!resp || resp->is_error || !resp->stream_id) {
+                LogBleLine("stream.start(audio_in) failed VS-" + device_id +
+                           (resp && resp->is_error ? " code=" + resp->error_code : " timeout"));
+                return;
+            }
+            std::lock_guard lock(mutex_);
+            session->audio_in_stream_id = *resp->stream_id;
+        });
+    };
+    if (previous_stream_id != 0) {
+        SendRpc(device_id, session, [previous_stream_id](std::uint32_t rpc_id) {
+            return BleProtocol::RpcStreamStop(rpc_id, previous_stream_id);
+        }, [start_new = std::move(start_new)](std::optional<ControlRpcResponse>) {
+            start_new();
+        });
+    } else {
+        start_new();
+    }
+}
 
-    for (auto& session : targets) {
-        WriteControlPayloadAsync(std::move(session), payload);
+void BleCentralWin::StopAudioIn(const std::string& device_id) {
+    std::shared_ptr<DeviceSession> session;
+    std::uint16_t stream_id = 0;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = sessions_by_device_id_.find(device_id);
+        if (it == sessions_by_device_id_.end() || !it->second->ready || !it->second->initialized) return;
+        session = it->second;
+        stream_id = session->audio_in_stream_id;
+        session->audio_in_stream_id = 0;
     }
+    if (stream_id != 0) {
+        SendRpc(device_id, session, [stream_id](std::uint32_t rpc_id) {
+            return BleProtocol::RpcStreamStop(rpc_id, stream_id);
+        });
+    }
+}
+
+void BleCentralWin::StartImu(const std::string& device_id,
+                             const std::string& axes,
+                             int rate_hz,
+                             int lease_ms) {
+    std::shared_ptr<DeviceSession> session;
+    std::uint16_t previous_stream_id = 0;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = sessions_by_device_id_.find(device_id);
+        if (it == sessions_by_device_id_.end() || !it->second->ready || !it->second->initialized) return;
+        session = it->second;
+        previous_stream_id = session->imu_stream_id;
+        session->imu_stream_id = 0;
+    }
+    auto start_new = [this, device_id, session, axes, rate_hz, lease_ms] {
+        SendRpc(device_id, session, [axes, rate_hz, lease_ms](std::uint32_t rpc_id) {
+            return BleProtocol::RpcStreamStartImu(rpc_id, axes, rate_hz, lease_ms);
+        }, [this, device_id, session](std::optional<ControlRpcResponse> resp) {
+            if (!resp || resp->is_error || !resp->stream_id) {
+                LogBleLine("stream.start(imu) failed VS-" + device_id +
+                           (resp && resp->is_error ? " code=" + resp->error_code : " timeout"));
+                return;
+            }
+            std::lock_guard lock(mutex_);
+            session->imu_stream_id = *resp->stream_id;
+        });
+    };
+    if (previous_stream_id != 0) {
+        SendRpc(device_id, session, [previous_stream_id](std::uint32_t rpc_id) {
+            return BleProtocol::RpcStreamStop(rpc_id, previous_stream_id);
+        }, [start_new = std::move(start_new)](std::optional<ControlRpcResponse>) {
+            start_new();
+        });
+    } else {
+        start_new();
+    }
+}
+
+void BleCentralWin::RenewImu(const std::string& device_id, int lease_ms) {
+    std::shared_ptr<DeviceSession> session;
+    std::uint16_t stream_id = 0;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = sessions_by_device_id_.find(device_id);
+        if (it == sessions_by_device_id_.end() || !it->second->ready || !it->second->initialized) return;
+        session = it->second;
+        stream_id = session->imu_stream_id;
+    }
+    if (stream_id != 0) {
+        SendRpc(device_id, session, [stream_id, lease_ms](std::uint32_t rpc_id) {
+            return BleProtocol::RpcStreamRenew(rpc_id, stream_id, lease_ms);
+        });
+    }
+}
+
+void BleCentralWin::StopImu(const std::string& device_id) {
+    std::shared_ptr<DeviceSession> session;
+    std::uint16_t stream_id = 0;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = sessions_by_device_id_.find(device_id);
+        if (it == sessions_by_device_id_.end() || !it->second->ready || !it->second->initialized) return;
+        session = it->second;
+        stream_id = session->imu_stream_id;
+        session->imu_stream_id = 0;
+    }
+    if (stream_id != 0) {
+        SendRpc(device_id, session, [stream_id](std::uint32_t rpc_id) {
+            return BleProtocol::RpcStreamStop(rpc_id, stream_id);
+        });
+    }
+}
+
+std::vector<std::string> BleCentralWin::ConnectedReadyDeviceIds() const {
+    std::vector<std::string> ids;
+    std::lock_guard lock(mutex_);
+    for (const auto& [id, session] : sessions_by_device_id_) {
+        if (session->ready && session->initialized) ids.push_back(id);
+    }
+    return ids;
 }
 
 bool BleCentralWin::IsConnected(const std::string& device_id) const {
@@ -1111,9 +1238,9 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
         };
 
         if (cache_mode == BluetoothCacheMode::Cached &&
-            (!find_characteristic(winrt::guid{BleProtocol::audio_uuid}) ||
-             !find_characteristic(winrt::guid{BleProtocol::state_uuid}) ||
-             !find_characteristic(winrt::guid{BleProtocol::control_uuid}) ||
+            (!find_characteristic(winrt::guid{BleProtocol::stream_tx_uuid}) ||
+             !find_characteristic(winrt::guid{BleProtocol::control_tx_uuid}) ||
+             !find_characteristic(winrt::guid{BleProtocol::control_rx_uuid}) ||
              !find_characteristic(winrt::guid{BleProtocol::authorized_uuid}))) {
             cache_mode = BluetoothCacheMode::Uncached;
             characteristics = read_characteristics(cache_mode);
@@ -1127,12 +1254,14 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
             co_return;
         }
 
-        session->audio_characteristic = find_characteristic(winrt::guid{BleProtocol::audio_uuid});
-        session->state_characteristic = find_characteristic(winrt::guid{BleProtocol::state_uuid});
-        session->control_characteristic = find_characteristic(winrt::guid{BleProtocol::control_uuid});
-        if (!session->audio_characteristic || !session->state_characteristic ||
-            !session->control_characteristic || !HasNotify(session->audio_characteristic) ||
-            !HasNotify(session->state_characteristic) || !HasWriteWithoutResponse(session->control_characteristic)) {
+        session->stream_tx_characteristic = find_characteristic(winrt::guid{BleProtocol::stream_tx_uuid});
+        session->control_tx_characteristic = find_characteristic(winrt::guid{BleProtocol::control_tx_uuid});
+        session->control_rx_characteristic = find_characteristic(winrt::guid{BleProtocol::control_rx_uuid});
+        if (!session->stream_tx_characteristic || !session->control_tx_characteristic ||
+            !session->control_rx_characteristic || !HasNotify(session->stream_tx_characteristic) ||
+            !HasNotify(session->control_tx_characteristic) ||
+            (!HasWriteWithoutResponse(session->control_rx_characteristic) &&
+             !HasWrite(session->control_rx_characteristic))) {
             fail("required GATT characteristics or properties are missing");
             co_return;
         }
@@ -1172,45 +1301,87 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
             co_return;
         }
 
-        session->audio_value_changed_token = session->audio_characteristic.ValueChanged(
-            [this, device_id](const GattCharacteristic&, const auto& args) {
+        session->stream_tx_value_changed_token = session->stream_tx_characteristic.ValueChanged(
+            [this, device_id, weak_session = std::weak_ptr<DeviceSession>(session)](
+                const GattCharacteristic&, const auto& args) {
                 auto bytes = BytesFromBuffer(args.CharacteristicValue());
-                auto frame = BleProtocol::ParseAudioFrame(bytes);
-                if (frame.has_value()) {
-                    DispatchToUiThread([this, device_id, f = std::move(*frame)]() {
+                if (bytes.size() < 4 || bytes[0] != BleProtocol::protocol_version) return;
+                const auto type = bytes[1];
+                if (type == BleProtocol::type_nop) {
+                    return;
+                }
+                if (type == BleProtocol::type_audio_in) {
+                    auto frame = BleProtocol::ParseAudioStreamFrame(bytes);
+                    if (!frame) return;
+                    DispatchToUiThread([this, device_id, weak_session, f = std::move(*frame)]() {
+                        const auto current = weak_session.lock();
+                        if (!current) return;
+                        {
+                            std::lock_guard lock(mutex_);
+                            if (current->audio_in_stream_id != 0 && current->audio_in_stream_id != f.stream_id) {
+                                return;
+                            }
+                            if (f.IsStart()) {
+                                current->last_display_scene = "recording";
+                                current->last_display_text = "";
+                            }
+                        }
                         if (on_audio_frame) on_audio_frame(device_id, f);
+                    });
+                } else if (type == BleProtocol::type_imu) {
+                    auto frame = BleProtocol::ParseImuStreamFrame(bytes);
+                    if (!frame) return;
+                    DispatchToUiThread([this, device_id, weak_session, f = std::move(*frame)]() {
+                        const auto current = weak_session.lock();
+                        if (!current) return;
+                        {
+                            std::lock_guard lock(mutex_);
+                            if (current->imu_stream_id != 0 && current->imu_stream_id != f.stream_id) {
+                                return;
+                            }
+                        }
+                        if (on_imu_frame) on_imu_frame(device_id, f);
+                    });
+                } else if (type == BleProtocol::type_input) {
+                    auto frame = BleProtocol::ParseInputStreamFrame(bytes);
+                    if (!frame) return;
+                    DispatchToUiThread([this, device_id, weak_session, f = std::move(*frame)]() {
+                        const auto current = weak_session.lock();
+                        if (!current) return;
+                        HandleInputFrame(device_id, current, f);
                     });
                 }
             });
-        session->state_value_changed_token = session->state_characteristic.ValueChanged(
-            [this, device_id, weak_session = std::weak_ptr<DeviceSession>(session)](const GattCharacteristic&, const auto& args) {
+        session->control_tx_value_changed_token = session->control_tx_characteristic.ValueChanged(
+            [this, device_id, weak_session = std::weak_ptr<DeviceSession>(session)](
+                const GattCharacteristic&, const auto& args) {
                 auto bytes = BytesFromBuffer(args.CharacteristicValue());
-                LogBleLine("state notify VS-" + device_id +
+                LogBleLine("control notify VS-" + device_id +
                            " len=" + std::to_string(bytes.size()) +
                            " preview=" + PreviewBytes(bytes));
-                auto event = BleProtocol::ParseStateEvent(bytes);
-                if (!event.has_value()) {
-                    LogBleLine("state notify VS-" + device_id + " parse failed");
+                if (bytes.size() >= 4 && bytes[0] == 1 && bytes[1] == 0x10) {
+                    if (auto legacy = BleProtocol::ParseLegacyDeviceInfo(bytes)) {
+                        DispatchToUiThread([this, device_id, info = std::move(*legacy)]() {
+                            if (on_legacy_device_info) on_legacy_device_info(device_id, info);
+                        });
+                    }
                     return;
                 }
-                LogBleLine("state event VS-" + device_id + " type=" + event->event +
-                           (event->firmware_version.empty()
-                                ? std::string()
-                                : " firmware=" + event->firmware_version));
-                DispatchToUiThread([this, device_id, weak_session, e = std::move(*event)]() {
+                std::optional<std::string> json;
+                if (const auto current = weak_session.lock()) {
+                    std::lock_guard lock(mutex_);
+                    json = current->control_reassembler.Push(bytes);
+                }
+                if (!json) return;
+                auto message = BleProtocol::ParseControlMessage(*json);
+                if (!message) {
+                    LogBleLine("control notify VS-" + device_id + " parse failed");
+                    return;
+                }
+                DispatchToUiThread([this, device_id, weak_session, msg = std::move(*message)]() mutable {
                     const auto current = weak_session.lock();
                     if (!current) return;
-                    {
-                        std::lock_guard lock(mutex_);
-                        if (!current->ready) {
-                            if (e.event == "device_info") current->pending_device_info = e;
-                            if (e.event == "battery_status") current->pending_battery_status = e;
-                            return;
-                        }
-                        const auto session_it = sessions_by_device_id_.find(device_id);
-                        if (session_it == sessions_by_device_id_.end() || session_it->second != current) return;
-                    }
-                    if (on_state_event) on_state_event(device_id, e);
+                    HandleControlMessage(device_id, current, std::move(msg));
                 });
             });
         if (session->ota_state_characteristic) {
@@ -1228,34 +1399,23 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
                 });
         }
 
-        // Give the Windows BTHLE driver a brief moment to wire the
-        // ValueChanged handlers in before we ask for notifications. Without
-        // this gap the very first notification can race past the handler.
         co_await WaitMs(std::chrono::milliseconds(150));
 
-        // Subscribe to state first so the firmware delivers device_info as
-        // soon as possible; the audio CCCD write is heavier (Windows seems
-        // to delay the next ATT op for a few hundred ms after enabling
-        // notifications on a high-throughput characteristic), and putting
-        // state second has been observed to push device_info out by ~1s.
-        LogBleLine("subscribing state notifications VS-" + device_id);
-        auto state_subscribe = co_await session->state_characteristic
+        LogBleLine("subscribing control_tx notifications VS-" + device_id);
+        auto control_subscribe = co_await session->control_tx_characteristic
             .WriteClientCharacteristicConfigurationDescriptorAsync(
                 GattClientCharacteristicConfigurationDescriptorValue::Notify);
-        LogBleLine("state subscribe VS-" + device_id +
-                   " status=" + GattStatusName(state_subscribe));
+        LogBleLine("control_tx subscribe VS-" + device_id +
+                   " status=" + GattStatusName(control_subscribe));
 
-        // Let device_info ride out on the air before we issue another ATT op
-        // (CCCD writes serialize the ATT channel and can delay the firmware's
-        // outgoing notification by tens to hundreds of ms).
-        co_await WaitMs(std::chrono::milliseconds(250));
+        co_await WaitMs(std::chrono::milliseconds(150));
 
-        LogBleLine("subscribing audio notifications VS-" + device_id);
-        auto audio_subscribe = co_await session->audio_characteristic
+        LogBleLine("subscribing stream_tx notifications VS-" + device_id);
+        auto stream_subscribe = co_await session->stream_tx_characteristic
             .WriteClientCharacteristicConfigurationDescriptorAsync(
                 GattClientCharacteristicConfigurationDescriptorValue::Notify);
-        LogBleLine("audio subscribe VS-" + device_id +
-                   " status=" + GattStatusName(audio_subscribe));
+        LogBleLine("stream_tx subscribe VS-" + device_id +
+                   " status=" + GattStatusName(stream_subscribe));
 
         GattCommunicationStatus ota_subscribe = GattCommunicationStatus::Success;
         if (session->ota_state_characteristic) {
@@ -1266,51 +1426,31 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
                        " status=" + GattStatusName(ota_subscribe));
         }
 
-        if (audio_subscribe != GattCommunicationStatus::Success ||
-            state_subscribe != GattCommunicationStatus::Success ||
+        if (stream_subscribe != GattCommunicationStatus::Success ||
+            control_subscribe != GattCommunicationStatus::Success ||
             ota_subscribe != GattCommunicationStatus::Success) {
-            fail("notification subscription failed: audio=" + GattStatusName(audio_subscribe) +
-                 " state=" + GattStatusName(state_subscribe) +
+            fail("notification subscription failed: stream=" + GattStatusName(stream_subscribe) +
+                 " control=" + GattStatusName(control_subscribe) +
                  " ota=" + GattStatusName(ota_subscribe));
             co_return;
         }
 
-        session->audio_subscribed = true;
-        session->state_subscribed = true;
+        session->stream_tx_subscribed = true;
+        session->control_tx_subscribed = true;
         session->ota_state_subscribed = session->ota_state_characteristic != nullptr;
         session->device.supports_firmware_update =
             session->ota_rx_characteristic && session->ota_state_subscribed;
-        // A restored notification subscription can send device_info before
-        // this process attaches its handler. Request a fresh snapshot.
-        if (session->control_characteristic) {
-            ByteVector request;
-            AppendAscii(request, R"({"event":"get_device_info"})");
-            try {
-                const auto snapshot_status = co_await session->control_characteristic.WriteValueAsync(
-                    BufferFromBytes(request), GattWriteOption::WriteWithoutResponse);
-                LogBleLine("device info request VS-" + device_id + " status=" + GattStatusName(snapshot_status));
-            } catch (const winrt::hresult_error& error) {
-                LogBleLine("device info request VS-" + device_id + " failed: " + FormatHresult(error.code()));
-            }
-        }
-        // The awaits above can resume on a thread pool thread, and the
-        // coordinator callbacks must run on the UI thread like state events do.
+
         DispatchToUiThread([this, session, device_id, bluetooth_address] {
-            std::optional<StateEvent> device_info;
-            std::optional<StateEvent> battery_status;
             {
                 std::lock_guard lock(mutex_);
                 session->ready = true;
                 sessions_by_device_id_[device_id] = session;
                 connecting_addresses_.erase(bluetooth_address);
-                device_info = std::move(session->pending_device_info);
-                battery_status = std::move(session->pending_battery_status);
             }
             PublishConnections();
-            if (device_info && on_state_event) on_state_event(device_id, *device_info);
-            if (battery_status && on_state_event) on_state_event(device_id, *battery_status);
-            LogBleLine("connected VS-" + device_id);
-            SendUiState("ready", "", device_id);
+            LogBleLine("connected VS-" + device_id + "; starting Protocol v2 handshake");
+            StartV2Handshake(device_id, session);
         });
     } catch (const winrt::hresult_error& error) {
         std::string message = "WinRT error " + FormatHresult(error.code()) +
@@ -1327,14 +1467,189 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
     }
 }
 
-winrt::fire_and_forget BleCentralWin::WriteControlPayloadAsync(std::shared_ptr<DeviceSession> session, ByteVector payload) {
+void BleCentralWin::StartV2Handshake(const std::string& device_id, std::shared_ptr<DeviceSession> session) {
+    SendRpc(device_id, session, [](std::uint32_t rpc_id) {
+        return BleProtocol::RpcDeviceGetInfo(rpc_id);
+    }, [this, device_id, session](std::optional<ControlRpcResponse> resp) {
+        if (!resp || resp->is_error || !resp->device_info || !resp->device_info->SupportsProtocolV2()) {
+            LogBleLine("v2 device.get_info fallback to legacy probe VS-" + device_id);
+            ProbeLegacyDeviceInfo(device_id, session);
+            return;
+        }
+        auto info = *resp->device_info;
+        {
+            std::lock_guard lock(mutex_);
+            session->info = info;
+        }
+        if (on_device_info) on_device_info(device_id, info);
+        if (info.battery && on_battery_changed) on_battery_changed(device_id, *info.battery);
+
+        SendRpc(device_id, session, [](std::uint32_t rpc_id) {
+            return BleProtocol::RpcDeviceReset(rpc_id);
+        }, [this, device_id, session, info](std::optional<ControlRpcResponse> reset_resp) {
+            if (!reset_resp || reset_resp->is_error) {
+                LogBleLine("v2 device.reset failed VS-" + device_id);
+                return;
+            }
+            SendRpc(device_id, session, [](std::uint32_t rpc_id) {
+                return BleProtocol::RpcStreamStartInput(rpc_id);
+            }, [this, device_id, session, info](std::optional<ControlRpcResponse> input_resp) {
+                if (!input_resp || input_resp->is_error || !input_resp->stream_id) {
+                    LogBleLine("v2 stream.start(input) failed VS-" + device_id);
+                    return;
+                }
+                {
+                    std::lock_guard lock(mutex_);
+                    session->input_stream_id = *input_resp->stream_id;
+                    session->last_input_seq.reset();
+                    session->buttons_mask = input_resp->buttons_mask.value_or(0);
+                    session->initialized = true;
+                }
+                LogBleLine("v2 handshake ready VS-" + device_id +
+                           " input_stream=" + std::to_string(*input_resp->stream_id));
+                if (on_device_ready) on_device_ready(device_id, info);
+            });
+        });
+    }, std::chrono::milliseconds(1500));
+}
+
+void BleCentralWin::ProbeLegacyDeviceInfo(const std::string& device_id, std::shared_ptr<DeviceSession> session) {
+    if (!session || !session->ready) return;
+    std::vector<ByteVector> frames = {BleProtocol::LegacyGetDeviceInfoPayload()};
+    WriteControlFramesAsync(std::move(session), std::move(frames));
+    LogBleLine("legacy get_device_info sent VS-" + device_id);
+}
+
+void BleCentralWin::SendRpc(const std::string& device_id,
+                            std::shared_ptr<DeviceSession> session,
+                            std::function<std::string(std::uint32_t)> build_json,
+                            RpcCallback completion,
+                            std::chrono::milliseconds timeout) {
+    if (!session || !session->ready || !session->control_rx_characteristic) {
+        if (completion) completion(std::nullopt);
+        return;
+    }
+    std::uint32_t rpc_id = 0;
+    std::vector<ByteVector> frames;
+    {
+        std::lock_guard lock(mutex_);
+        rpc_id = session->next_rpc_id++;
+        if (session->next_rpc_id == 0) session->next_rpc_id = 1;
+        const std::size_t max_pdu = session->gatt_session ? session->gatt_session.MaxPduSize() : 23;
+        const std::size_t max_write = max_pdu > 3 ? max_pdu - 3 : 20;
+        const std::string json = build_json(rpc_id);
+        frames = BleProtocol::EncodeControlFrames(json, max_write, session->next_control_msg_id);
+        if (frames.empty()) {
+            LogBleLine("RPC encode failed VS-" + device_id + " len=" + std::to_string(json.size()));
+            if (completion) completion(std::nullopt);
+            return;
+        }
+        if (completion) {
+            session->pending_rpcs[rpc_id] = std::move(completion);
+        }
+    }
+    WriteControlFramesAsync(session, std::move(frames));
+    if (timeout.count() > 0) {
+        RpcTimeoutAsync(session, rpc_id, timeout);
+    }
+}
+
+winrt::fire_and_forget BleCentralWin::WriteControlFramesAsync(
+    std::shared_ptr<DeviceSession> session,
+    std::vector<ByteVector> frames) {
     try {
-        if (!session || !session->ready || !session->control_characteristic) co_return;
-        DataWriter writer;
-        writer.WriteBytes(payload);
-        co_await session->control_characteristic.WriteValueAsync(
-            writer.DetachBuffer(), GattWriteOption::WriteWithoutResponse);
+        if (!session || !session->ready || !session->control_rx_characteristic) co_return;
+        const auto write_option = HasWrite(session->control_rx_characteristic)
+            ? GattWriteOption::WriteWithResponse
+            : GattWriteOption::WriteWithoutResponse;
+        for (const auto& frame : frames) {
+            if (!session->ready) co_return;
+            co_await session->control_rx_characteristic.WriteValueAsync(
+                BufferFromBytes(frame), write_option);
+        }
     } catch (...) {
+    }
+}
+
+winrt::fire_and_forget BleCentralWin::RpcTimeoutAsync(
+    std::shared_ptr<DeviceSession> session,
+    std::uint32_t rpc_id,
+    std::chrono::milliseconds timeout) {
+    co_await WaitMs(timeout);
+    if (shutting_down_) co_return;
+    RpcCallback cb;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = session->pending_rpcs.find(rpc_id);
+        if (it == session->pending_rpcs.end()) co_return;
+        cb = std::move(it->second);
+        session->pending_rpcs.erase(it);
+    }
+    DispatchToUiThread([cb = std::move(cb)]() {
+        if (cb) cb(std::nullopt);
+    });
+}
+
+void BleCentralWin::HandleControlMessage(const std::string& device_id,
+                                         std::shared_ptr<DeviceSession> session,
+                                         ControlMessage message) {
+    if (message.kind == ControlMessage::Kind::kRpcResponse) {
+        RpcCallback cb;
+        {
+            std::lock_guard lock(mutex_);
+            auto it = session->pending_rpcs.find(message.rpc_response.id);
+            if (it != session->pending_rpcs.end()) {
+                cb = std::move(it->second);
+                session->pending_rpcs.erase(it);
+            }
+        }
+        if (cb) cb(std::move(message.rpc_response));
+        return;
+    }
+
+    const auto& ev = message.control_event;
+    if (ev.event == "battery.changed" && ev.battery) {
+        if (on_battery_changed) on_battery_changed(device_id, *ev.battery);
+    } else if (ev.event == "stream.closed" && ev.stream_id) {
+        {
+            std::lock_guard lock(mutex_);
+            if (session->audio_in_stream_id == *ev.stream_id) session->audio_in_stream_id = 0;
+            if (session->imu_stream_id == *ev.stream_id) session->imu_stream_id = 0;
+            if (session->input_stream_id == *ev.stream_id) session->input_stream_id = 0;
+        }
+        if (on_stream_closed) on_stream_closed(device_id, *ev.stream_id, ev.reason);
+    }
+}
+
+void BleCentralWin::HandleInputFrame(const std::string& device_id,
+                                     std::shared_ptr<DeviceSession> session,
+                                     const InputStreamFrame& frame) {
+    bool has_gap = false;
+    std::uint32_t prev_mask = 0;
+    std::vector<std::string> buttons;
+    {
+        std::lock_guard lock(mutex_);
+        if (session->input_stream_id == 0 || session->input_stream_id != frame.stream_id) return;
+        if (session->last_input_seq.has_value() &&
+            static_cast<std::uint16_t>(*session->last_input_seq + 1) != frame.seq) {
+            has_gap = true;
+        }
+        session->last_input_seq = frame.seq;
+        prev_mask = session->buttons_mask;
+        session->buttons_mask = frame.buttons_mask;
+        if (session->info) buttons = session->info->buttons;
+    }
+    if (has_gap && on_input_gap) {
+        on_input_gap(device_id);
+    }
+    const std::uint32_t diff = prev_mask ^ frame.buttons_mask;
+    if (diff == 0 || !on_button_event) return;
+    for (std::size_t bit = 0; bit < buttons.size() && bit < 32; ++bit) {
+        const std::uint32_t mask = 1u << bit;
+        if ((diff & mask) != 0) {
+            const bool is_down = (frame.buttons_mask & mask) != 0;
+            on_button_event(device_id, buttons[bit], is_down, frame.timestamp_ms);
+        }
     }
 }
 
@@ -1583,11 +1898,11 @@ void BleCentralWin::HandleDeviceDisconnected(const std::string& device_id,
 
 void BleCentralWin::CloseSession(std::shared_ptr<DeviceSession> session) {
     if (!session) return;
-    if (session->audio_characteristic && session->audio_value_changed_token.value != 0) {
-        try { session->audio_characteristic.ValueChanged(session->audio_value_changed_token); } catch (...) {}
+    if (session->stream_tx_characteristic && session->stream_tx_value_changed_token.value != 0) {
+        try { session->stream_tx_characteristic.ValueChanged(session->stream_tx_value_changed_token); } catch (...) {}
     }
-    if (session->state_characteristic && session->state_value_changed_token.value != 0) {
-        try { session->state_characteristic.ValueChanged(session->state_value_changed_token); } catch (...) {}
+    if (session->control_tx_characteristic && session->control_tx_value_changed_token.value != 0) {
+        try { session->control_tx_characteristic.ValueChanged(session->control_tx_value_changed_token); } catch (...) {}
     }
     if (session->ota_state_characteristic && session->ota_state_value_changed_token.value != 0) {
         try { session->ota_state_characteristic.ValueChanged(session->ota_state_value_changed_token); } catch (...) {}
@@ -1613,12 +1928,14 @@ void BleCentralWin::CloseSession(std::shared_ptr<DeviceSession> session) {
         try { session->ble_device.Close(); } catch (...) {}
         session->ble_device = nullptr;
     }
-    session->audio_characteristic = nullptr;
-    session->state_characteristic = nullptr;
-    session->control_characteristic = nullptr;
+    session->stream_tx_characteristic = nullptr;
+    session->control_tx_characteristic = nullptr;
+    session->control_rx_characteristic = nullptr;
     session->ota_rx_characteristic = nullptr;
     session->ota_state_characteristic = nullptr;
     session->ready = false;
+    session->initialized = false;
+    session->pending_rpcs.clear();
 }
 
 void BleCentralWin::CloseSessions() {

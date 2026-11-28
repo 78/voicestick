@@ -54,7 +54,7 @@ macOS 菜单栏里的 `Send Confirmation` 可以选择立即粘贴、1、2、3�
 
 StickS3 和 MagiClick 2P5 在暂停确认时也可以摇晃设备，取消当前草稿。
 
-设备上报 `button_down`、`button_up` 和按键角色，桌面应用管理交互状态并回传 `ui_state`。StickS3 显示配对、就绪、录音、识别、待确认、错误和电池状态，空闲 30 秒后调暗背光。接 USB 或充电时保持在调暗状态。
+语音和游戏共用 `button_down` / `button_up` 事件，设备上报按键 ID 和设备时间戳。VoiceStick 0.5.0 需要搭配固件 0.5.0 才能使用输入功能，旧固件仍可连接并从设备菜单升级。桌面应用管理交互状态并回传 `ui_state`。StickS3 显示配对、就绪、录音、识别、待确认、错误和电池状态，空闲 30 秒后调暗背光。接 USB 或充电时保持在调暗状态。
 
 ## 音频和 BLE 协议
 
@@ -125,6 +125,12 @@ scripts/make-dmg.sh
 推送与 `VERSION` 匹配的 `v<version>` 标签会触发发布流程，生成 macOS 安装包和 StickS3、VoiceStick C3、MagiClick 2P5 固件，并部署网站和 appcast。每款固件都包括 OTA 应用镜像、从偏移 `0x0` 写入的合并镜像和清单。StickS3 沿用原有 OSS 路径。C3 和 MagiClick 2P5 的版本目录和 `latest/` 分别位于 `voicestick/firmwares/voicestick_c3/` 和 `voicestick/firmwares/magiclick_2p5/` 下。macOS 在应用启动、设备连接或重连时检查支持 OTA 的设备，也可从菜单手动刷新。运行期间的定时检查最多每 24 小时一次。开始 OTA 前会校验镜像大小和 SHA-256。
 
 CI 使用 `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`、`ALIYUN_OSS_ENDPOINT`、`ALIYUN_OSS_BUCKET`，公开下载地址由 `ALIYUN_OSS_PUBLIC_BASE_URL` 配置，`ALIYUN_OSS_PREFIX` 默认是 `voicestick/firmwares`。完整步骤见[发布说明](docs/release.md)。
+
+### StickS3 休息球场（macOS 原型）
+
+给 StickS3 刷入本分支的固件，启动同一分支构建的 Mac App，从菜单栏选择 **休息一下 · 3D 网球**。拿稳后轻挥一次即可绑定球拍，进入无球、无倒计时的自由试拍。绿色标记朝向拍面正面。可点「动作测试」逐项检查左右翻腕、拍头倾斜和快挥识别，点「开始比赛」后才发球。多台同时挥动时，放稳其他设备再试。识别窗口为 12 秒，超时可点「重新识别」。球拍菜单也支持重新挥动识别、按副键指定和手动选择。来球弹起后，接近拍面时拍框会亮起。挥动球拍迎上球即可回球，漏球后由对面重新发球。每局两分钟，球拍自动移位。绑定后可随时转动手腕调整拍面，握稳后按 R 可将当前握姿设为正中。关闭球场窗口即可继续按键说话。没有体感设备时可以先按空格体验。
+
+USB 构建与刷写命令见上方 StickS3 说明。开发时先运行 `swift build`，让游戏和菜单栏 App 两个可执行文件位于同一构建目录。[体感数据与本地接口](docs/protocol.md#sticks3-motion-sessions-v1)
 
 ## macOS 本地配置
 

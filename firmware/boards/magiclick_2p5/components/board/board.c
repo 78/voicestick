@@ -43,7 +43,7 @@ static i2c_master_bus_handle_t s_codec_bus;
 static adc_oneshot_unit_handle_t s_adc;
 static bool s_gc9107;
 static board_power_event_cb_t s_power_event_cb;
-static const board_confirmation_motion_t *s_confirmation_motion;
+static const board_imu_t *s_imu;
 
 static esp_err_t read_adc_average(adc_channel_t channel, int *average)
 {
@@ -182,13 +182,13 @@ esp_err_t board_init(void)
         .flags.enable_internal_pullup = true,
     };
     ESP_RETURN_ON_ERROR(i2c_new_master_bus(&config, &s_codec_bus), TAG, "initialize I2C");
-    s_confirmation_motion = magiclick_2p5_init_shake_sensor(s_codec_bus);
+    s_imu = magiclick_2p5_init_imu_sensor(s_codec_bus);
     return ESP_OK;
 }
 
-const board_confirmation_motion_t *board_confirmation_motion(void)
+const board_imu_t *board_imu(void)
 {
-    return s_confirmation_motion;
+    return s_imu;
 }
 
 es8311_input_board_t board_es8311_input_config(void)

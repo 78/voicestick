@@ -288,8 +288,8 @@ void Gtk4App::ShowFirmwareUpdatePrompt(const std::string& device_id,
     RunOnUiThread([this, device_id, current_version, latest_version, is_below_minimum] {
         std::string body = "VS-" + device_id + " can update from " + current_version +
                            " to " + latest_version + ".";
-        if (is_below_minimum) body += " This version is below the minimum supported firmware.";
-        Notify("Firmware update", body);
+        if (is_below_minimum) body += " Update the device to use voice input.";
+        Notify(is_below_minimum ? "Firmware update required" : "Firmware update available", body);
     });
 }
 

@@ -71,7 +71,7 @@ struct OutputProfile {
 };
 
 struct AppConfig {
-    static constexpr std::string_view minimum_compatible_firmware_version = "0.3.0";
+    static constexpr std::string_view minimum_compatible_firmware_version = "0.5.0";
 
     AsrProvider asr_provider = AsrProvider::kVoiceStickCloud;
     std::string voicestick_api_key;

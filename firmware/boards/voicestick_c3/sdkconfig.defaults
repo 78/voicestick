@@ -32,6 +32,14 @@ CONFIG_VOICE_STICK_OPUS_COMPLEXITY=0
 CONFIG_VOICE_STICK_DEEP_SLEEP_TIMEOUT_S=3600
 CONFIG_VOICE_STICK_BLE_BATTERY_STATUS=y
 
+# Voice-only board (no high-rate IMU): use 45-60ms interval with latency=30
+# (~1.86s idle wake period, Apple-compliant <= 2s) and +3 dBm TX power for
+# minimum standby current.
+CONFIG_VOICE_STICK_BLE_ITVL_MIN_UNITS=36
+CONFIG_VOICE_STICK_BLE_ITVL_MAX_UNITS=48
+CONFIG_VOICE_STICK_BLE_SLAVE_LATENCY=30
+CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P3=y
+
 # Average out ADC noise and use CHRG to determine the direction of capacity changes.
 CONFIG_ADC_FILTER_WINDOW_SIZE=15
 # CONFIG_BATTERY_STATE_SOFTWARE_ESTIMATION is not set

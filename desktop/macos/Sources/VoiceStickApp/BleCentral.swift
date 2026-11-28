@@ -1,6 +1,7 @@
 import AppKit
 import CoreBluetooth
 import Foundation
+import MotionInput
 
 struct ConnectedVoiceStickDevice {
     let name: String
@@ -22,6 +23,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     enum FirmwareUpdateError: LocalizedError {
         case noConnectedDevice
         case otaCharacteristicUnavailable
+        case otaWriteTooSmall
         case imageTooLarge
         case transferAlreadyActive
         case firmwareUpdateCancelled
@@ -34,6 +36,8 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 return "No VoiceStick is connected."
             case .otaCharacteristicUnavailable:
                 return "The connected firmware does not expose BLE OTA."
+            case .otaWriteTooSmall:
+                return "The Bluetooth connection cannot fit a firmware update packet."
             case .imageTooLarge:
                 return "Firmware image is larger than the OTA partition."
             case .transferAlreadyActive:
@@ -61,6 +65,50 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let completion: (Result<Void, Error>) -> Void
     }
 
+    private struct PendingRPC {
+        let timer: Timer
+        let completion: (Result<([String: Any], Data), Error>) -> Void
+    }
+
+    private final class PeripheralSession {
+        var streamTXSubscribed = false
+        var controlTXSubscribed = false
+        var handshakeStarted = false
+        var initialized = false
+        var info: DeviceInfoResult?
+        var legacyInfo: LegacyDeviceInfo?
+
+        var nextRpcID = 1
+        var nextTxMessageID: UInt8 = 0
+        var reassembler = ControlReassembler()
+        var pendingRPCs: [Int: PendingRPC] = [:]
+
+        var inputStreamID: UInt16?
+        var lastInputSeq: UInt16?
+        var buttonsMask: UInt32 = 0
+
+        var audioInStreamID: UInt16?
+        var audioInMode: InteractionMode?
+        var audioInLocalDisplayFeedback = false
+        var audioInInFlight = false
+
+        var imuStreamID: UInt16?
+        var imuIncludeGyro = false
+        var imuRateHz = 0
+        var imuInFlight = false
+
+        var lastDisplayScene: String?
+        var lastDisplayText: String?
+
+        func cancelPendingRPCs() {
+            for (_, pending) in pendingRPCs {
+                pending.timer.invalidate()
+                pending.completion(.failure(RpcError(code: "disconnected", message: "device disconnected")))
+            }
+            pendingRPCs.removeAll()
+        }
+    }
+
     private var pairedDeviceIDs: Set<String>
     private var central: CBCentralManager!
     private var peripherals: [UUID: CBPeripheral] = [:]
@@ -68,17 +116,38 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var connectedDevices: [UUID: ConnectedVoiceStickDevice] = [:]
     private var controlCharacteristics: [UUID: CBCharacteristic] = [:]
     private var pendingAuthorization: [UUID: [CBCharacteristic]] = [:]
-    /// Reconnecting would fail the same way until the device is paired again.
     private var peerRemovedPairingIDs: Set<UUID> = []
     private var otaCharacteristics: [UUID: CBCharacteristic] = [:]
+    private var sessions: [UUID: PeripheralSession] = [:]
     private var firmwareUpdateSession: FirmwareUpdateSession?
-    private var interactionMode: InteractionMode = .holdToTalk
     private var isWorkspaceSleeping = false
 
     var onConnectionChange: (([ConnectedVoiceStickDevice]) -> Void)?
-    var onControlReady: ((UUID) -> Void)?
-    var onAudioFrame: ((UUID, AudioFrame) -> Void)?
-    var onStateEvent: ((UUID, StateEvent) -> Void)?
+    var onDeviceInfo: ((UUID, DeviceInfoResult) -> Void)?
+    var onLegacyDeviceInfo: ((UUID, LegacyDeviceInfo) -> Void)?
+    var onDeviceReady: ((UUID, DeviceInfoResult) -> Void)?
+    var onBatteryChanged: ((UUID, DeviceBatteryStatus) -> Void)?
+    var onButtonInput: ((UUID, ButtonInput) -> Void)?
+    var onInputGap: ((UUID) -> Void)?
+    var onAudioFrame: ((UUID, AudioStreamFrame) -> Void)?
+    var onImuFrame: ((UUID, ImuStreamFrame) -> Void)?
+    var onStreamClosed: ((UUID, UInt16, String) -> Void)?
+
+    var motionInputs: [MotionDevice] {
+        sessions.compactMap { id, session in
+            guard session.initialized, session.info?.streams?.imu?.supportsMotionGame == true,
+                  let device = connectedDevices[id] else { return nil }
+            return MotionDevice(id: id, name: device.name)
+        }.sorted { ($0.name, $0.id.uuidString) < ($1.name, $1.id.uuidString) }
+    }
+
+    var probeDevices: Set<UUID> {
+        Set(sessions.compactMap { id, session in
+            guard session.initialized, session.info?.streams?.imu?.supportsSwingProbe == true,
+                  connectedDevices[id] != nil else { return nil }
+            return id
+        })
+    }
 
     init(pairedDeviceIDs: [String]) {
         self.pairedDeviceIDs = Set(pairedDeviceIDs)
@@ -123,57 +192,258 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             onConnectionChange?(currentConnectedDevices)
         }
 
-        // The pairing advertisement changes after bonding, even if this ID is already saved.
         central?.stopScan()
         scanIfReady()
     }
 
-    func sendUIState(
-        _ state: String, text: String = "", confirmationID: UUID? = nil, to peripheralID: UUID? = nil
+    // MARK: - Protocol v2 Control & Stream Operations
+
+    func deviceInfo(for peripheralID: UUID) -> DeviceInfoResult? {
+        sessions[peripheralID]?.info
+    }
+
+    func connectedReadyPeripheralIDs() -> [UUID] {
+        sessions.compactMap { id, session in
+            session.initialized && connectedDevices[id] != nil ? id : nil
+        }
+    }
+
+    func supportsProtocolV2(_ peripheralID: UUID) -> Bool {
+        sessions[peripheralID]?.initialized == true
+    }
+
+    func activeAudioInStreamID(for peripheralID: UUID) -> UInt16? {
+        sessions[peripheralID]?.audioInStreamID
+    }
+
+    func activeImuStreamID(for peripheralID: UUID) -> UInt16? {
+        sessions[peripheralID]?.imuStreamID
+    }
+
+    func sendRPC(
+        method: String,
+        params: [String: Any]? = nil,
+        to peripheralID: UUID,
+        timeout: TimeInterval = 3.0,
+        completion: ((Result<([String: Any], Data), Error>) -> Void)? = nil
     ) {
-        let data = BleProtocol.uiStatePayload(state: state, text: text, confirmationID: confirmationID)
-        if let peripheralID {
-            if let characteristic = controlCharacteristics[peripheralID] {
-                if let peripheral = peripherals[peripheralID] {
-                    let deviceID = connectedDevices[peripheralID]?.deviceID ?? "unknown"
-                    NSLog("BLE send ui_state state=\(state) dev=VS-\(deviceID) text_len=\(text.count)")
-                    peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-                } else {
-                    NSLog("BLE send ui_state skipped missing peripheral state=\(state) id=\(peripheralID) text_len=\(text.count)")
+        guard let session = sessions[peripheralID],
+              let peripheral = peripherals[peripheralID],
+              let control = controlCharacteristics[peripheralID] else {
+            completion?(.failure(RpcError(code: "disconnected", message: "device unavailable")))
+            return
+        }
+
+        let id = session.nextRpcID
+        session.nextRpcID += 1
+        var payload: [String: Any] = ["id": id, "method": method]
+        if let params { payload["params"] = params }
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else {
+            completion?(.failure(RpcError(code: "encode_failed", message: "invalid json")))
+            return
+        }
+
+        let writeType: CBCharacteristicWriteType = control.properties.contains(.write) ? .withResponse : .withoutResponse
+        let maxWrite = peripheral.maximumWriteValueLength(for: writeType)
+        let frames = BleProtocol.encodeControlFrames(
+            jsonData: jsonData,
+            maximumWriteLength: maxWrite,
+            messageID: &session.nextTxMessageID
+        )
+        guard !frames.isEmpty else {
+            completion?(.failure(RpcError(code: "too_large", message: "control message too large")))
+            return
+        }
+
+        if let completion {
+            let timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self, weak session] _ in
+                guard let session, let pending = session.pendingRPCs.removeValue(forKey: id) else { return }
+                let devID = self?.deviceID(for: peripheralID) ?? "unknown"
+                NSLog("BLE RPC timeout method=\(method) id=\(id) dev=VS-\(devID)")
+                pending.completion(.failure(RpcError(code: "timeout", message: "\(method) timed out")))
+            }
+            session.pendingRPCs[id] = PendingRPC(timer: timer, completion: completion)
+        }
+
+        for frame in frames {
+            peripheral.writeValue(frame, for: control, type: writeType)
+        }
+    }
+
+    func sendNotification(method: String, params: [String: Any]? = nil, to peripheralID: UUID) {
+        guard let session = sessions[peripheralID],
+              let peripheral = peripherals[peripheralID],
+              let control = controlCharacteristics[peripheralID],
+              peripheral.canSendWriteWithoutResponse else { return }
+
+        var payload: [String: Any] = ["method": method]
+        if let params { payload["params"] = params }
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else { return }
+
+        let maxWrite = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        let frames = BleProtocol.encodeControlFrames(
+            jsonData: jsonData,
+            maximumWriteLength: maxWrite,
+            messageID: &session.nextTxMessageID
+        )
+        for frame in frames {
+            peripheral.writeValue(frame, for: control, type: .withoutResponse)
+        }
+    }
+
+    func setDisplay(scene: String, text: String = "", to peripheralID: UUID? = nil) {
+        let targets: [UUID] = peripheralID.map { [$0] } ?? Array(sessions.keys)
+        for id in targets {
+            guard let session = sessions[id], session.initialized, session.info?.display != nil else { continue }
+            if session.lastDisplayScene == scene && session.lastDisplayText == text {
+                continue
+            }
+            session.lastDisplayScene = scene
+            session.lastDisplayText = text
+            sendRPC(method: "display.set", params: ["scene": scene, "text": text], to: id) { [weak session] result in
+                if case .failure = result,
+                   session?.lastDisplayScene == scene,
+                   session?.lastDisplayText == text {
+                    session?.lastDisplayScene = nil
+                    session?.lastDisplayText = nil
                 }
-            } else {
-                NSLog("BLE send ui_state skipped missing characteristic state=\(state) id=\(peripheralID) text_len=\(text.count)")
-            }
-            return
-        }
-
-        NSLog("BLE send ui_state broadcast state=\(state) targets=\(controlCharacteristics.count) text_len=\(text.count)")
-        for (id, characteristic) in controlCharacteristics {
-            if let peripheral = peripherals[id] {
-                let deviceID = connectedDevices[id]?.deviceID ?? "unknown"
-                NSLog("BLE send ui_state state=\(state) dev=VS-\(deviceID) text_len=\(text.count)")
-                peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-            } else {
-                NSLog("BLE send ui_state skipped missing peripheral state=\(state) id=\(id) text_len=\(text.count)")
             }
         }
     }
 
-    func sendInteractionMode(_ mode: InteractionMode, to peripheralID: UUID? = nil) {
-        interactionMode = mode
-        let data = BleProtocol.interactionModePayload(mode)
-        if let peripheralID {
-            if let characteristic = controlCharacteristics[peripheralID] {
-                peripherals[peripheralID]?.writeValue(data, for: characteristic, type: .withoutResponse)
+    func startAudioIn(mode: InteractionMode, localDisplayFeedback: Bool = true, to peripheralID: UUID) {
+        guard let session = sessions[peripheralID], session.initialized else { return }
+        if session.audioInStreamID != nil && session.audioInMode == mode {
+            return
+        }
+        if session.audioInInFlight { return }
+        if let existing = session.audioInStreamID {
+            session.audioInInFlight = true
+            session.audioInStreamID = nil
+            session.audioInMode = nil
+            sendRPC(method: "stream.stop", params: ["stream_id": Int(existing)], to: peripheralID) { [weak self] _ in
+                guard let self, let session = self.sessions[peripheralID] else { return }
+                session.audioInInFlight = false
+                self.startAudioIn(mode: mode, localDisplayFeedback: localDisplayFeedback, to: peripheralID)
             }
             return
         }
 
-        for (id, characteristic) in controlCharacteristics {
-            peripherals[id]?.writeValue(data, for: characteristic, type: .withoutResponse)
+        session.audioInInFlight = true
+        let triggerMode = mode == .clickToTalk ? "button_toggle" : "button_hold"
+        let params: [String: Any] = [
+            "kind": "audio_in",
+            "format": ["codec": "opus", "sample_rate": 16000, "channels": 1, "frame_ms": 60],
+            "trigger": ["mode": triggerMode, "button": "primary"],
+            "local_display_feedback": localDisplayFeedback
+        ]
+        sendRPC(method: "stream.start", params: params, to: peripheralID) { [weak self] result in
+            guard let self, let session = self.sessions[peripheralID] else { return }
+            session.audioInInFlight = false
+            switch result {
+            case .success(let (dict, _)):
+                if let sid = dict["stream_id"] as? Int, sid > 0, sid <= Int(UInt16.max) {
+                    session.audioInStreamID = UInt16(sid)
+                    session.audioInMode = mode
+                    session.audioInLocalDisplayFeedback = localDisplayFeedback
+                }
+            case .failure(let error):
+                NSLog("BLE startAudioIn failed dev=VS-\(self.deviceID(for: peripheralID) ?? "unknown"): \(error.localizedDescription)")
+            }
         }
     }
 
+    func stopAudioIn(for peripheralID: UUID, completion: (() -> Void)? = nil) {
+        guard let session = sessions[peripheralID] else {
+            completion?()
+            return
+        }
+        guard let existing = session.audioInStreamID else {
+            completion?()
+            return
+        }
+        session.audioInStreamID = nil
+        session.audioInMode = nil
+        sendRPC(method: "stream.stop", params: ["stream_id": Int(existing)], to: peripheralID) { _ in
+            completion?()
+        }
+    }
+
+    func startImu(
+        includeGyro: Bool,
+        rateHz: Int,
+        leaseMs: Int = 3000,
+        to peripheralID: UUID,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        guard let session = sessions[peripheralID], session.initialized,
+              let imuCaps = session.info?.streams?.imu,
+              imuCaps.hasAccel, !includeGyro || imuCaps.hasGyro else {
+            completion?(false)
+            return
+        }
+        if session.imuStreamID != nil && session.imuIncludeGyro == includeGyro && session.imuRateHz == rateHz {
+            renewImu(for: peripheralID)
+            completion?(true)
+            return
+        }
+        if session.imuInFlight {
+            completion?(false)
+            return
+        }
+        if let existing = session.imuStreamID {
+            session.imuInFlight = true
+            session.imuStreamID = nil
+            sendRPC(method: "stream.stop", params: ["stream_id": Int(existing)], to: peripheralID) { [weak self] _ in
+                guard let self, let session = self.sessions[peripheralID] else { completion?(false); return }
+                session.imuInFlight = false
+                self.startImu(includeGyro: includeGyro, rateHz: rateHz, leaseMs: leaseMs, to: peripheralID, completion: completion)
+            }
+            return
+        }
+
+        let actualRate = imuCaps.ratesHz.contains(rateHz) ? rateHz : (imuCaps.ratesHz.max() ?? 50)
+        session.imuInFlight = true
+        let channels = includeGyro ? ["accel", "gyro"] : ["accel"]
+        let params: [String: Any] = [
+            "kind": "imu",
+            "format": ["channels": channels, "rate_hz": actualRate],
+            "lease_ms": min(leaseMs, imuCaps.maxLeaseMs)
+        ]
+        sendRPC(method: "stream.start", params: params, to: peripheralID) { [weak self] result in
+            guard let self, let session = self.sessions[peripheralID] else { completion?(false); return }
+            session.imuInFlight = false
+            switch result {
+            case .success(let (dict, _)):
+                if let sid = dict["stream_id"] as? Int, sid > 0, sid <= Int(UInt16.max) {
+                    session.imuStreamID = UInt16(sid)
+                    session.imuIncludeGyro = includeGyro
+                    session.imuRateHz = actualRate
+                    completion?(true)
+                    return
+                }
+                completion?(false)
+            case .failure(let error):
+                NSLog("BLE startImu failed dev=VS-\(self.deviceID(for: peripheralID) ?? "unknown"): \(error.localizedDescription)")
+                completion?(false)
+            }
+        }
+    }
+
+    func renewImu(for peripheralID: UUID) {
+        guard let sid = sessions[peripheralID]?.imuStreamID else { return }
+        sendNotification(method: "stream.renew", params: ["stream_id": Int(sid)], to: peripheralID)
+    }
+
+    func stopImu(for peripheralID: UUID) {
+        guard let session = sessions[peripheralID], let sid = session.imuStreamID else { return }
+        session.imuStreamID = nil
+        session.imuIncludeGyro = false
+        session.imuRateHz = 0
+        sendRPC(method: "stream.stop", params: ["stream_id": Int(sid)], to: peripheralID)
+    }
+
+    // MARK: - Firmware OTA
 
     func updateFirmware(image: Data, for deviceID: String,
                         progress: @escaping (FirmwareUpdateProgress) -> Void,
@@ -197,7 +467,10 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
 
         let maxWrite = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        let chunkSize = max(20, min(maxWrite - 12, 244))
+        guard let chunkSize = BleProtocol.otaChunkSize(maximumWriteLength: maxWrite) else {
+            completion(.failure(FirmwareUpdateError.otaWriteTooSmall))
+            return
+        }
         firmwareUpdateSession = FirmwareUpdateSession(
             peripheralID: peripheralID,
             transferID: UInt32.random(in: 1...UInt32.max),
@@ -229,6 +502,14 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func isConnected(deviceID: String) -> Bool {
         connectedDevices.values.contains { $0.deviceID == deviceID }
     }
+
+    func supportsFirmwareUpdate(deviceID: String) -> Bool {
+        connectedDevices.contains { id, device in
+            device.deviceID == deviceID && otaCharacteristics[id] != nil
+        }
+    }
+
+    // MARK: - CBCentralManagerDelegate
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
@@ -297,6 +578,8 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         scanIfReady()
     }
 
+    // MARK: - CBPeripheralDelegate
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard error == nil,
               let service = peripheral.services?.first(where: { $0.uuid.uuidString == BleProtocol.serviceUUID }) else {
@@ -323,19 +606,18 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard peripherals[peripheral.identifier] != nil else { return }
         connectedDevices[peripheral.identifier] = discoveredDevices[peripheral.identifier]
             ?? connectedDevice(localName: nil, peripheralName: peripheral.name)
+        sessions[peripheral.identifier]?.cancelPendingRPCs()
+        sessions[peripheral.identifier] = PeripheralSession()
         onConnectionChange?(currentConnectedDevices)
 
         characteristics.forEach { characteristic in
             switch characteristic.uuid.uuidString.uppercased() {
-            case BleProtocol.audioUUID:
+            case BleProtocol.streamTXUUID:
                 peripheral.setNotifyValue(true, for: characteristic)
-            case BleProtocol.stateUUID:
+            case BleProtocol.controlTXUUID:
                 peripheral.setNotifyValue(true, for: characteristic)
-            case BleProtocol.controlUUID:
+            case BleProtocol.controlRXUUID:
                 controlCharacteristics[peripheral.identifier] = characteristic
-                sendUIState("ready", to: peripheral.identifier)
-                sendInteractionMode(interactionMode, to: peripheral.identifier)
-                onControlReady?(peripheral.identifier)
             case BleProtocol.otaRXUUID:
                 otaCharacteristics[peripheral.identifier] = characteristic
             case BleProtocol.otaStateUUID:
@@ -347,22 +629,79 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
-        guard characteristic.uuid.uuidString.uppercased() == BleProtocol.stateUUID else { return }
+        let id = peripheral.identifier
+        guard let session = sessions[id], connectedDevices[id] != nil else { return }
         if let error {
-            NSLog("BLE state subscription failed: \(error.localizedDescription)")
+            NSLog("BLE subscription failed uuid=\(characteristic.uuid.uuidString): \(error.localizedDescription)")
             return
         }
-        guard characteristic.isNotifying,
-              connectedDevices[peripheral.identifier] != nil,
-              let control = controlCharacteristics[peripheral.identifier] else { return }
+        switch characteristic.uuid.uuidString.uppercased() {
+        case BleProtocol.streamTXUUID:
+            session.streamTXSubscribed = characteristic.isNotifying
+        case BleProtocol.controlTXUUID:
+            session.controlTXSubscribed = characteristic.isNotifying
+        default:
+            return
+        }
+        if session.streamTXSubscribed && session.controlTXSubscribed && !session.handshakeStarted {
+            session.handshakeStarted = true
+            beginHandshake(for: id)
+        }
+    }
 
-        // A bonded peripheral can restore its subscription before this app starts listening.
-        peripheral.writeValue(BleProtocol.deviceInfoRequest, for: control, type: .withoutResponse)
+    private func beginHandshake(for peripheralID: UUID) {
+        sendRPC(method: "device.get_info", to: peripheralID, timeout: 1.5) { [weak self] result in
+            guard let self, let session = self.sessions[peripheralID] else { return }
+            switch result {
+            case .success(let (_, rawData)):
+                guard let info = BleProtocol.decodeDeviceInfoResult(from: rawData), info.supportsProtocolV2 else {
+                    self.probeLegacyDeviceInfo(for: peripheralID)
+                    return
+                }
+                session.info = info
+                self.onDeviceInfo?(peripheralID, info)
+                if let battery = info.battery {
+                    self.onBatteryChanged?(peripheralID, battery)
+                }
+                self.sendRPC(method: "device.reset", to: peripheralID) { [weak self] resetResult in
+                    guard let self, self.sessions[peripheralID] != nil else { return }
+                    guard case .success = resetResult else {
+                        NSLog("BLE device.reset failed dev=VS-\(self.deviceID(for: peripheralID) ?? "unknown")")
+                        return
+                    }
+                    self.sendRPC(method: "stream.start", params: ["kind": "input"], to: peripheralID) { [weak self] inputResult in
+                        guard let self, let session = self.sessions[peripheralID] else { return }
+                        guard case .success(let (dict, _)) = inputResult,
+                              let sid = dict["stream_id"] as? Int, sid > 0, sid <= Int(UInt16.max) else {
+                            NSLog("BLE stream.start(input) failed dev=VS-\(self.deviceID(for: peripheralID) ?? "unknown")")
+                            return
+                        }
+                        session.inputStreamID = UInt16(sid)
+                        session.lastInputSeq = nil
+                        session.buttonsMask = UInt32((dict["buttons_mask"] as? Int) ?? 0)
+                        session.initialized = true
+                        self.onDeviceReady?(peripheralID, info)
+                    }
+                }
+            case .failure:
+                // Fall back to legacy v1 get_device_info so 0.4.x firmware reports its version for OTA.
+                self.probeLegacyDeviceInfo(for: peripheralID)
+            }
+        }
+    }
+
+    private func probeLegacyDeviceInfo(for peripheralID: UUID) {
+        guard sessions[peripheralID]?.info == nil,
+              sessions[peripheralID]?.legacyInfo == nil,
+              let peripheral = peripherals[peripheralID],
+              let control = controlCharacteristics[peripheralID] else { return }
+        peripheral.writeValue(BleProtocol.legacyDeviceInfoRequest, for: control, type: .withoutResponse)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        let id = peripheral.identifier
         if characteristic.uuid.uuidString == BleProtocol.authorizedUUID {
-            guard let characteristics = pendingAuthorization.removeValue(forKey: peripheral.identifier) else { return }
+            guard let characteristics = pendingAuthorization.removeValue(forKey: id) else { return }
             if error == nil, characteristic.value == Data([1]) {
                 activate(peripheral, characteristics: characteristics)
             } else {
@@ -370,19 +709,106 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             }
             return
         }
-        guard let data = characteristic.value else { return }
+        guard let data = characteristic.value, !data.isEmpty else { return }
         switch characteristic.uuid.uuidString.uppercased() {
-        case BleProtocol.audioUUID:
-            if let frame = BleProtocol.parseAudioFrame(data) {
-                onAudioFrame?(peripheral.identifier, frame)
-            }
-        case BleProtocol.stateUUID:
-            if let event = BleProtocol.parseStateEvent(data) {
-                onStateEvent?(peripheral.identifier, event)
-            }
+        case BleProtocol.streamTXUUID:
+            handleStreamData(data, from: id)
+        case BleProtocol.controlTXUUID:
+            handleControlData(data, from: id)
         case BleProtocol.otaStateUUID:
             if let event = BleProtocol.parseFirmwareOTAStateEvent(data) {
                 handleFirmwareUpdateStateEvent(event)
+            }
+        default:
+            break
+        }
+    }
+
+    private func handleControlData(_ data: Data, from peripheralID: UUID) {
+        guard let session = sessions[peripheralID] else { return }
+
+        // Handle legacy v1 device_info (from 0.4.x firmware) to guide OTA upgrade.
+        if data[0] == 1 {
+            if let legacy = BleProtocol.parseLegacyDeviceInfo(data), session.info == nil {
+                session.legacyInfo = legacy
+                onLegacyDeviceInfo?(peripheralID, legacy)
+            }
+            return
+        }
+
+        guard let jsonData = session.reassembler.receive(data),
+              let message = BleProtocol.parseControlMessage(jsonData) else { return }
+
+        switch message {
+        case .rpcResult(let id, let dict, let raw):
+            if let pending = session.pendingRPCs.removeValue(forKey: id) {
+                pending.timer.invalidate()
+                pending.completion(.success((dict, raw)))
+            }
+        case .rpcError(let id, let rpcError):
+            if let pending = session.pendingRPCs.removeValue(forKey: id) {
+                pending.timer.invalidate()
+                pending.completion(.failure(rpcError))
+            }
+        case .batteryChanged(let status):
+            onBatteryChanged?(peripheralID, status)
+        case .streamClosed(let streamID, let reason):
+            if session.inputStreamID == streamID { session.inputStreamID = nil }
+            if session.audioInStreamID == streamID {
+                session.audioInStreamID = nil
+                session.audioInMode = nil
+            }
+            if session.imuStreamID == streamID {
+                session.imuStreamID = nil
+                session.imuIncludeGyro = false
+                session.imuRateHz = 0
+            }
+            onStreamClosed?(peripheralID, streamID, reason)
+        case .unknownEvent:
+            break
+        }
+    }
+
+    private func handleStreamData(_ data: Data, from peripheralID: UUID) {
+        guard let session = sessions[peripheralID], session.initialized, data.count >= 4,
+              data[0] == BleProtocol.protocolVersion else { return }
+
+        switch data[1] {
+        case BleProtocol.typeNop:
+            break
+        case BleProtocol.typeAudioIn:
+            guard let frame = BleProtocol.parseAudioStreamFrame(data),
+                  session.audioInStreamID == frame.streamID || frame.isEnd else { return }
+            if frame.isStart && session.audioInLocalDisplayFeedback {
+                session.lastDisplayScene = "recording"
+                session.lastDisplayText = ""
+            }
+            onAudioFrame?(peripheralID, frame)
+        case BleProtocol.typeImu:
+            guard let frame = BleProtocol.parseImuStreamFrame(data),
+                  session.imuStreamID == frame.streamID else { return }
+            onImuFrame?(peripheralID, frame)
+        case BleProtocol.typeInput:
+            guard let frame = BleProtocol.parseInputStreamFrame(data),
+                  session.inputStreamID == frame.streamID,
+                  let buttons = session.info?.buttons else { return }
+            if let prevSeq = session.lastInputSeq, frame.seq != prevSeq &+ 1 {
+                onInputGap?(peripheralID)
+            }
+            session.lastInputSeq = frame.seq
+            let previousMask = session.buttonsMask
+            session.buttonsMask = frame.buttonsMask
+            let changed = previousMask ^ frame.buttonsMask
+            for bitIndex in 0..<min(buttons.count, 32) {
+                let bit = UInt32(1) << UInt32(bitIndex)
+                guard changed & bit != 0 else { continue }
+                let isDown = (frame.buttonsMask & bit) != 0
+                let input = ButtonInput(
+                    id: buttons[bitIndex],
+                    action: isDown ? .down : .up,
+                    timestampMs: UInt64(frame.timestampMs)
+                )
+                onButtonInput?(peripheralID, input)
             }
         default:
             break
@@ -408,14 +834,14 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         sendNextFirmwareUpdateFrame()
     }
 
+    // MARK: - Helpers
+
     private func shouldConnect(localName: String?, peripheralName: String?) -> Bool {
         let advertisedName = localName ?? peripheralName ?? ""
-        if !pairedDeviceIDs.isEmpty {
-            guard let deviceID = Self.deviceID(from: advertisedName) else { return false }
-            return pairedDeviceIDs.contains(deviceID)
+        guard !pairedDeviceIDs.isEmpty, let deviceID = Self.deviceID(from: advertisedName) else {
+            return false
         }
-
-        return false
+        return pairedDeviceIDs.contains(deviceID)
     }
 
     private func connectedDevice(localName: String?, peripheralName: String?) -> ConnectedVoiceStickDevice? {
@@ -480,16 +906,12 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             session.ended = true
             firmwareUpdateSession = session
             peripheral.writeValue(payload, for: characteristic, type: .withResponse)
-        } else {
-            return
         }
     }
 
     private func handleFirmwareUpdateStateEvent(_ event: FirmwareOTAStateEvent) {
         guard let session = firmwareUpdateSession else { return }
-        if let transferID = event.transferID, transferID != session.transferID {
-            return
-        }
+        if let transferID = event.transferID, transferID != session.transferID { return }
 
         switch event.event {
         case "progress":
@@ -522,6 +944,8 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             let payload = BleProtocol.otaAbortPayload(transferID: session.transferID)
             peripheral.writeValue(payload, for: characteristic, type: .withoutResponse)
         }
+        sessions[session.peripheralID]?.lastDisplayScene = nil
+        sessions[session.peripheralID]?.lastDisplayText = nil
         firmwareUpdateSession = nil
         session.completion(.failure(error))
     }
@@ -549,13 +973,13 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard !restoredPeripherals.isEmpty else { return }
 
         for peripheral in restoredPeripherals {
-            guard let device = knownDevice(for: peripheral) else {
+            guard peripherals[peripheral.identifier] == nil, let device = knownDevice(for: peripheral) else {
                 continue
             }
             discoveredDevices[peripheral.identifier] = device
             peripherals[peripheral.identifier] = peripheral
             peripheral.delegate = self
-            peripheral.discoverServices([serviceUUID])
+            central.connect(peripheral)
         }
     }
 
@@ -578,6 +1002,8 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         if firmwareUpdateSession != nil {
             failFirmwareUpdate(FirmwareUpdateError.noConnectedDevice)
         }
+        for session in sessions.values { session.cancelPendingRPCs() }
+        sessions.removeAll()
         peripherals.removeAll()
         discoveredDevices.removeAll()
         connectedDevices.removeAll()
@@ -588,6 +1014,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     private func removePeripheral(_ peripheral: CBPeripheral) {
+        sessions.removeValue(forKey: peripheral.identifier)?.cancelPendingRPCs()
         peripheral.delegate = nil
         peripherals.removeValue(forKey: peripheral.identifier)
         discoveredDevices.removeValue(forKey: peripheral.identifier)
@@ -603,7 +1030,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     @objc private func workspaceWillSleep() {
         isWorkspaceSleeping = true
         central?.stopScan()
-        sendUIState("ready")
+        setDisplay(scene: "idle", text: "")
         for peripheral in peripherals.values where peripheral.state != .disconnected {
             central?.cancelPeripheralConnection(peripheral)
         }

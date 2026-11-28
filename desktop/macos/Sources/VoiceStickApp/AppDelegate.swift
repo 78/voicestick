@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pairDeviceWindowController: PairDeviceWindowController?
     private var onboardingWindowController: OnboardingWindowController?
     private var firmwareUpdateWindowController: FirmwareUpdateWindowController?
+    private var firmwareRequirementWindowController: FirmwareRequirementWindowController?
     private var updaterController: SPUStandardUpdaterController?
     private var dockIconWindowIDs = Set<ObjectIdentifier>()
     private var config = AppConfig.defaults
@@ -95,13 +96,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController.onUpdateFirmwareDevice = { [weak self] deviceID in
             self?.updateFirmwareFromLatest(for: deviceID)
         }
-        coordinator.onFirmwareUpdatePrompt = { [weak self] deviceID, currentVersion, latestVersion, isBelowMinimum in
+        coordinator.onFirmwareUpdatePrompt = { [weak self] deviceID, currentVersion, latestVersion in
             self?.showFirmwareUpdatePrompt(
                 deviceID: deviceID,
                 currentVersion: currentVersion,
                 latestVersion: latestVersion,
-                isBelowMinimum: isBelowMinimum
+                isBelowMinimum: false
             )
+        }
+        coordinator.onFirmwareRequirement = { [weak self] deviceID in
+            self?.showFirmwareRequirement(for: deviceID)
+        }
+        coordinator.onFirmwareAvailabilityChanged = { [weak self] in
+            self?.refreshFirmwareRequirement()
         }
         statusController.onRestoreLastInput = { [weak self] in
             self?.coordinator?.restoreLastInputConfirmation() ?? false
@@ -117,6 +124,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusController.onSetDeviceOutputProfile = { [weak self] deviceID, profile in
             self?.updateDeviceOutputProfile(deviceID: deviceID, profile: profile)
+        }
+        coordinator.onToggleTranslationMode = { [weak self] deviceID in
+            guard let self else { return }
+            var profile = self.config.outputProfile(for: deviceID)
+            profile.toggleTranslation()
+            self.updateDeviceOutputProfile(deviceID: deviceID, profile: profile, announceMode: true)
         }
         statusController.onSetDeviceThemeColor = { [weak self] deviceID, color in
             self?.updateDeviceThemeColor(deviceID: deviceID, color: color)
@@ -189,24 +202,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func updateDeviceOutputProfile(deviceID: String, profile: OutputProfile) {
+    private func updateDeviceOutputProfile(deviceID: String, profile: OutputProfile, announceMode: Bool = false) {
         var config = self.config
-        let storedProfile = OutputProfile(
-            target: config.defaultOutputProfile.target,
-            transform: profile.transform,
-            translationTarget: profile.translationTarget
-        )
-        if storedProfile.transform == config.defaultOutputProfile.transform &&
-            storedProfile.translationTarget == config.defaultOutputProfile.translationTarget {
-            config.deviceOutputProfiles.removeValue(forKey: deviceID)
-        } else {
-            config.deviceOutputProfiles[deviceID] = storedProfile
-        }
+        config.setDeviceOutputProfile(profile, for: deviceID)
         do {
             try config.save()
             self.config = config
             statusController?.setDeviceOutputProfiles(config.deviceOutputProfiles)
             coordinator?.updateConfig(config)
+            if announceMode { statusController?.showOutputModeChange(deviceID: deviceID) }
         } catch {
             statusController?.setStatus("Output save failed")
         }
@@ -289,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     deviceID: deviceID,
                     currentVersion: versions.current,
                     latestVersion: versions.latest,
-                    isBelowMinimum: false
+                    isBelowMinimum: versions.required
                 )
                 return
             }
@@ -339,13 +343,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         })
     }
 
+    private func showFirmwareRequirement(for deviceID: String) {
+        guard let coordinator, let info = coordinator.firmwareRequirement(for: deviceID) else { return }
+        let controller = FirmwareRequirementWindowController(deviceID: deviceID)
+        controller.onUpdate = { [weak self, weak controller] in
+            guard let self, let currentInfo = self.coordinator?.firmwareRequirement(for: deviceID),
+                  currentInfo.updateAvailable,
+                  self.coordinator?.supportsFirmwareUpdate(for: deviceID) == true else { return }
+            self.updateFirmwareFromLatest(for: deviceID)
+            controller?.close()
+        }
+        firmwareRequirementWindowController = controller
+        coordinator.isFirmwareRequirementWindowOpen = true
+        controller.update(info: info, supportsFirmwareUpdate: coordinator.supportsFirmwareUpdate(for: deviceID))
+        showDockIconWhileWindowVisible(controller)
+        controller.show()
+        NSLog("Firmware update required for VS-%@", deviceID)
+    }
+
+    private func refreshFirmwareRequirement() {
+        guard let controller = firmwareRequirementWindowController else { return }
+        let deviceID = controller.deviceID
+        guard let coordinator, let info = coordinator.firmwareRequirement(for: deviceID) else {
+            controller.close()
+            return
+        }
+        controller.update(info: info, supportsFirmwareUpdate: coordinator.supportsFirmwareUpdate(for: deviceID))
+    }
+
     private func showFirmwareUpdatePrompt(deviceID: String,
                                           currentVersion: String,
                                           latestVersion: String,
                                           isBelowMinimum: Bool) {
         let alert = NSAlert()
-        alert.messageText = isBelowMinimum ? "Firmware update recommended" : "Firmware update available"
+        alert.messageText = isBelowMinimum ? "Firmware update required" : "Firmware update available"
         alert.informativeText = "VS-\(deviceID) is running firmware \(currentVersion). The latest firmware is \(latestVersion)."
+        if isBelowMinimum {
+            alert.informativeText += " Update the device to use voice input and games with this version of VoiceStick."
+        }
         let canUpdate = coordinator?.isDeviceConnected(deviceID) == true
         if canUpdate {
             alert.addButton(withTitle: "Update Firmware")
@@ -381,6 +416,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if window === firmwareUpdateWindowController?.window {
                 firmwareUpdateWindowController = nil
                 coordinator?.isFirmwareUpdateWindowOpen = false
+            }
+            if window === firmwareRequirementWindowController?.window {
+                firmwareRequirementWindowController = nil
+                coordinator?.isFirmwareRequirementWindowOpen = false
             }
         }
         NotificationCenter.default.removeObserver(

@@ -2,10 +2,10 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 #include "hal/gpio_types.h"
-#include "shake_detector.h"
 
 /*
  * Board support interface. Every board under boards/<name>/ provides a
@@ -21,16 +21,24 @@ typedef struct {
 /* Called from ISR or task context when the charger or USB state may have changed. */
 typedef void (*board_power_event_cb_t)(void);
 
+/* Optional IMU stream (3-axis accelerometer or 6-axis accel + gyro).
+ * read_samples writes little-endian int16 values:
+ *   - 6 bytes (ax, ay, az) when include_gyro is false
+ *   - 12 bytes (ax, ay, az, gx, gy, gz) when include_gyro is true */
 typedef struct {
-    bool (*set_enabled)(bool enabled);
-    /* Three-axis acceleration in milligravity, using a ±4 g range. */
-    bool (*read_acceleration)(acceleration_mg_t *sample);
-} board_confirmation_motion_t;
+    bool has_gyro;
+    uint16_t accel_lsb_per_g;
+    float gyro_lsb_per_dps;
+    uint16_t max_rate_hz;
+    bool (*set_enabled)(bool enabled, bool include_gyro, uint16_t rate_hz);
+    bool (*read_samples)(bool include_gyro, uint8_t *out_bytes);
+} board_imu_t;
+const board_imu_t *board_imu(void);
 
-/* Optional sensor for the paused-confirmation gesture. */
-const board_confirmation_motion_t *board_confirmation_motion(void);
+/* True if the board has a screen controlled by Protocol v2 display.set. */
+bool board_has_display(void);
 
-/* Hardware id sent in device_info; the desktop app only offers OTA images
+/* Hardware id sent in device.get_info; the desktop app only offers OTA images
  * whose manifest carries the same id. */
 const char *board_hardware_name(void);
 

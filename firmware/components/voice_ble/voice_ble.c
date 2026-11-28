@@ -7,14 +7,16 @@
 #include <string.h>
 #include <sys/param.h>
 
-#include "esp_check.h"
 #include "esp_app_desc.h"
+#include "esp_check.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_ota_ops.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -29,6 +31,7 @@
 #include "nimble/hci_common.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -39,15 +42,18 @@ static const char *TAG = "voice_ble";
 #define OTA_PROGRESS_NOTIFY_BYTES (32 * 1024)
 #define PAIRING_WINDOW_MS (60 * 1000)
 #define LINK_SECURITY_GRACE_MS 1500
+#define ADV_RETRY_DELAY_MS 1000
+#define CONTROL_REASM_TIMEOUT_US (2 * 1000000LL)
+#define IMU_MIN_FREE_MBUFS 16
 
 static atomic_bool s_connected;
-static bool s_audio_subscribed;
-static atomic_bool s_state_subscribed;
+static atomic_bool s_stream_tx_subscribed;
+static atomic_bool s_control_tx_subscribed;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static atomic_uint_least16_t s_link_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t s_own_addr_type;
-static uint16_t s_audio_attr_handle;
-static uint16_t s_state_attr_handle;
+static uint16_t s_stream_tx_attr_handle;
+static uint16_t s_control_tx_attr_handle;
 static uint16_t s_ota_state_attr_handle;
 static char s_device_id[5] = "0000";
 static char s_device_name[8] = VOICE_BLE_DEVICE_NAME_PREFIX "-0000";
@@ -55,8 +61,31 @@ static char s_device_uuid[37];
 static voice_ble_connection_cb_t s_connection_cb;
 static voice_ble_pairing_cb_t s_pairing_cb;
 static voice_ble_control_cb_t s_control_cb;
+static voice_ble_stream_rx_cb_t s_stream_rx_cb;
 static voice_ble_ota_cb_t s_ota_cb;
 static atomic_bool s_ble_initialized;
+static atomic_uint_least32_t s_last_tx_ms;
+
+static void record_tx_activity(void)
+{
+    atomic_store(&s_last_tx_ms, (uint32_t)((uint64_t)esp_timer_get_time() / 1000ULL));
+}
+
+/* Control TX serialization and sequence tracking. */
+static SemaphoreHandle_t s_control_tx_lock;
+static uint8_t s_tx_msg_id;
+static uint32_t s_event_seq;
+
+/* Control RX chunk reassembly (owned by NimBLE host task). */
+static struct {
+    bool active;
+    uint8_t msg_id;
+    uint8_t next_index;
+    uint8_t count;
+    size_t len;
+    int64_t started_us;
+    char buf[VOICE_BLE_MAX_CONTROL_MESSAGE_BYTES + 1];
+} s_rx_reasm;
 
 /* The NimBLE host task owns pairing changes and bond storage. */
 static atomic_bool s_pairing_open;
@@ -67,6 +96,7 @@ static const char *OWNER_KEY = "owner";
 static struct ble_npl_event s_open_pairing_event;
 static struct ble_npl_callout s_pairing_timeout;
 static struct ble_npl_callout s_link_security;
+static struct ble_npl_callout s_adv_retry_callout;
 
 typedef enum {
     CONN_ITVL_NONE,
@@ -77,8 +107,6 @@ typedef enum {
 static conn_itvl_target_t s_itvl_target;
 static bool s_itvl_update_pending;
 static bool s_itvl_update_in_flight;
-static bool s_device_info_pending;
-static bool s_host_commanded;
 
 typedef struct {
     bool active;
@@ -95,13 +123,13 @@ static voice_ble_ota_state_t s_ota;
 static const ble_uuid128_t s_service_uuid =
     BLE_UUID128_INIT(0x00, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
                      0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
-static const ble_uuid128_t s_audio_uuid =
+static const ble_uuid128_t s_stream_tx_uuid =
     BLE_UUID128_INIT(0x01, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
                      0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
-static const ble_uuid128_t s_state_uuid =
+static const ble_uuid128_t s_control_tx_uuid =
     BLE_UUID128_INIT(0x02, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
                      0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
-static const ble_uuid128_t s_control_uuid =
+static const ble_uuid128_t s_control_rx_uuid =
     BLE_UUID128_INIT(0x03, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
                      0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
 static const ble_uuid128_t s_ota_rx_uuid =
@@ -119,85 +147,22 @@ static const ble_uuid128_t s_reconnect_adv_uuid =
 static const ble_uuid128_t s_authorized_uuid =
     BLE_UUID128_INIT(0x08, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
                      0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
+static const ble_uuid128_t s_stream_rx_uuid =
+    BLE_UUID128_INIT(0x09, 0x51, 0xfc, 0xea, 0x3c, 0x3a, 0xf7, 0x88,
+                     0x23, 0x4b, 0x6f, 0x6e, 0x84, 0x0b, 0x2f, 0x8f);
 
 void ble_store_config_init(void);
 
 static void start_advertising(void);
 static void stop_advertising(void);
-static esp_err_t send_state_json(const char *json);
-static esp_err_t send_device_info(void);
-static void announce_state_subscription(void);
-static struct ble_npl_callout s_adv_retry_callout;
-#define ADV_RETRY_DELAY_MS 1000
 
-#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-typedef struct {
-    int percent;
-    bool charging;
-    bool usb_powered;
-} battery_status_t;
-
-/* The app task supplies the latest sample. NimBLE tracks what it sent. */
-static portMUX_TYPE s_battery_status_lock = portMUX_INITIALIZER_UNLOCKED;
-static battery_status_t s_battery_status = {.percent = -1};
-static battery_status_t s_last_battery_report = {.percent = -1};
-static struct ble_npl_event s_battery_status_event;
-
-static void report_battery_status(void)
+static void reset_rx_reasm(void)
 {
-    if (!s_state_subscribed) {
-        return;
-    }
-
-    portENTER_CRITICAL(&s_battery_status_lock);
-    const battery_status_t status = s_battery_status;
-    portEXIT_CRITICAL(&s_battery_status_lock);
-    if (status.percent < 0) {
-        return;
-    }
-
-    if (status.percent == s_last_battery_report.percent &&
-        status.charging == s_last_battery_report.charging &&
-        status.usb_powered == s_last_battery_report.usb_powered) {
-        return;
-    }
-
-    char json[96];
-    const int len = snprintf(json, sizeof(json),
-                             "{\"event\":\"battery_status\",\"percent\":%d,"
-                             "\"charging\":%s,\"usb_powered\":%s}",
-                             status.percent, status.charging ? "true" : "false",
-                             status.usb_powered ? "true" : "false");
-    /* ATT notification overhead plus the VoiceStick state frame header. */
-    if (len + 3 + 4 > ble_att_mtu(s_conn_handle) || send_state_json(json) != ESP_OK) {
-        s_last_battery_report.percent = -1;
-        return;
-    }
-
-    s_last_battery_report = status;
+    s_rx_reasm.active = false;
+    s_rx_reasm.len = 0;
+    s_rx_reasm.next_index = 0;
+    s_rx_reasm.count = 0;
 }
-
-static void battery_status_event_cb(struct ble_npl_event *event)
-{
-    (void)event;
-    report_battery_status();
-}
-
-void voice_ble_update_battery_status(int percent, bool charging, bool usb_powered)
-{
-    if (percent < 0 || percent > 100) {
-        return;
-    }
-
-    portENTER_CRITICAL(&s_battery_status_lock);
-    s_battery_status = (battery_status_t){percent, charging, usb_powered};
-    portEXIT_CRITICAL(&s_battery_status_lock);
-
-    if (s_state_subscribed) {
-        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_battery_status_event);
-    }
-}
-#endif
 
 static void adv_retry_callout_cb(struct ble_npl_event *ev)
 {
@@ -320,10 +285,6 @@ static void open_pairing_event_cb(struct ble_npl_event *event)
         return;
     }
 
-    /* On C3 with ESP-IDF c43d665a96c, terminating the old link here hung in
-     * API_vhci_host_send_packet while waiting for a controller semaphore.
-     * Require the computer to disconnect before opening the pairing window.
-     */
     if (s_link_handle != BLE_HS_CONN_HANDLE_NONE) {
         ESP_LOGI(TAG, "disconnect the current computer before entering pairing mode");
         return;
@@ -402,7 +363,6 @@ static void ota_send_error(const char *code, esp_err_t err)
     if (s_ota_cb) {
         s_ota_cb(VOICE_BLE_OTA_EVENT_ERROR, s_ota.written, s_ota.image_size);
     }
-    voice_ble_request_slow_interval();
 }
 
 static int ota_begin(uint32_t transfer_id, uint32_t image_size)
@@ -437,7 +397,7 @@ static int ota_begin(uint32_t transfer_id, uint32_t image_size)
     s_ota.handle = handle;
     s_ota.partition = partition;
 
-    voice_ble_request_fast_interval();
+    (void)voice_ble_request_fast_interval();
 
     char json[160];
     snprintf(json, sizeof(json),
@@ -548,7 +508,6 @@ static int ota_abort(uint32_t transfer_id)
     if (s_ota_cb) {
         s_ota_cb(VOICE_BLE_OTA_EVENT_ABORT, 0, 0);
     }
-    voice_ble_request_slow_interval();
     return 0;
 }
 
@@ -630,6 +589,89 @@ static int ota_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     return rc;
 }
 
+static void send_legacy_device_info_reply(void)
+{
+    if (!s_connected || !s_control_tx_subscribed || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    const char *version = app_desc ? app_desc->version : "unknown";
+    char json[192];
+    const int len = snprintf(json, sizeof(json),
+                             "{\"event\":\"device_info\",\"hardware\":\"%s\","
+                             "\"firmware_version\":\"%s\",\"protocol_version\":%d}",
+                             board_hardware_name(), version, VOICE_BLE_PROTOCOL_VERSION);
+    if (len <= 0 || (size_t)len >= sizeof(json) || (size_t)len + 7 > ble_att_mtu(s_conn_handle)) {
+        return;
+    }
+    uint8_t header[4] = {1, 0x10, (uint8_t)(len & 0xff), (uint8_t)(len >> 8)};
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(header, sizeof(header));
+    if (!om) {
+        return;
+    }
+    if (os_mbuf_append(om, json, (size_t)len) != 0) {
+        os_mbuf_free_chain(om);
+        return;
+    }
+    (void)ble_gatts_notify_custom(s_conn_handle, s_control_tx_attr_handle, om);
+}
+
+static int handle_control_chunk(const uint8_t *buf, uint16_t payload_len)
+{
+    if (payload_len < 3) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    const uint8_t msg_id = buf[0];
+    const uint8_t chunk_index = buf[1];
+    const uint8_t chunk_count = buf[2];
+    const uint8_t *slice = buf + 3;
+    const size_t slice_len = payload_len - 3;
+
+    if (chunk_count < 2 || chunk_index >= chunk_count) {
+        reset_rx_reasm();
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    const int64_t now = esp_timer_get_time();
+    if (chunk_index == 0) {
+        if (slice_len > VOICE_BLE_MAX_CONTROL_MESSAGE_BYTES) {
+            reset_rx_reasm();
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        s_rx_reasm.active = true;
+        s_rx_reasm.msg_id = msg_id;
+        s_rx_reasm.next_index = 1;
+        s_rx_reasm.count = chunk_count;
+        s_rx_reasm.len = slice_len;
+        s_rx_reasm.started_us = now;
+        memcpy(s_rx_reasm.buf, slice, slice_len);
+        return 0;
+    }
+
+    if (!s_rx_reasm.active || s_rx_reasm.msg_id != msg_id ||
+        s_rx_reasm.next_index != chunk_index || s_rx_reasm.count != chunk_count ||
+        (now - s_rx_reasm.started_us) > CONTROL_REASM_TIMEOUT_US ||
+        s_rx_reasm.len + slice_len > VOICE_BLE_MAX_CONTROL_MESSAGE_BYTES) {
+        reset_rx_reasm();
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    memcpy(s_rx_reasm.buf + s_rx_reasm.len, slice, slice_len);
+    s_rx_reasm.len += slice_len;
+    s_rx_reasm.next_index++;
+
+    if (s_rx_reasm.next_index == s_rx_reasm.count) {
+        s_rx_reasm.buf[s_rx_reasm.len] = '\0';
+        s_rx_reasm.active = false;
+        ESP_LOGD(TAG, "control rx(chunked) %s", s_rx_reasm.buf);
+        if (s_control_cb) {
+            s_control_cb(s_rx_reasm.buf);
+        }
+        reset_rx_reasm();
+    }
+    return 0;
+}
+
 static int control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -639,30 +681,94 @@ static int control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     if (!s_connected || conn_handle != s_conn_handle) {
         return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
     }
-
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
         return BLE_ATT_ERR_UNLIKELY;
     }
 
-    char buffer[512] = {0};
     const uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
-    const uint16_t copy_len = MIN(len, sizeof(buffer) - 1);
-    int rc = ble_hs_mbuf_to_flat(ctxt->om, buffer, copy_len, NULL);
+    if (len == 0 || len > VOICE_BLE_MAX_CONTROL_MESSAGE_BYTES + 8) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    uint8_t *buffer = malloc(len + 1);
+    if (!buffer) {
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    int rc = ble_hs_mbuf_to_flat(ctxt->om, buffer, len, NULL);
     if (rc != 0) {
+        free(buffer);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    buffer[len] = '\0';
+
+    if (len >= 4 && buffer[0] == VOICE_BLE_PROTOCOL_VERSION) {
+        const uint8_t type = buffer[1];
+        const uint16_t payload_len = read_le16(&buffer[2]);
+        if (4u + payload_len > len) {
+            free(buffer);
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        if (type == VOICE_BLE_TYPE_CONTROL_JSON) {
+            if (payload_len > VOICE_BLE_MAX_CONTROL_MESSAGE_BYTES) {
+                free(buffer);
+                return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+            }
+            buffer[4 + payload_len] = '\0';
+            const char *json = (const char *)&buffer[4];
+            ESP_LOGD(TAG, "control rx %s", json);
+            if (s_control_cb) {
+                s_control_cb(json);
+            }
+            free(buffer);
+            return 0;
+        }
+        if (type == VOICE_BLE_TYPE_CONTROL_CHUNK) {
+            rc = handle_control_chunk(&buffer[4], payload_len);
+            free(buffer);
+            return rc;
+        }
+        free(buffer);
         return BLE_ATT_ERR_UNLIKELY;
     }
 
-    ESP_LOGD(TAG, "control %s", buffer);
-    if (s_control_cb) {
-        s_control_cb(buffer);
+    /* Legacy unframed v1 client probe: respond with v1 device_info so old apps see our version. */
+    if (buffer[0] == '{' && strstr((const char *)buffer, "\"get_device_info\"") != NULL) {
+        ESP_LOGI(TAG, "legacy v1 get_device_info probe received");
+        send_legacy_device_info_reply();
     }
-    /* A bonded central gets its subscription restored at encryption, before
-     * its app listens, and Windows drops notifications nobody listens to.
-     * The first command shows the app is listening.
-     */
-    if (!s_host_commanded) {
-        voice_ble_send_device_snapshot();
+
+    free(buffer);
+    return 0;
+}
+
+static int stream_rx_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                               struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)attr_handle;
+    (void)arg;
+
+    if (!s_connected || conn_handle != s_conn_handle) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
     }
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (!s_stream_rx_cb) {
+        return 0;
+    }
+
+    const uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    if (len == 0) {
+        return 0;
+    }
+    uint8_t *buffer = malloc(len);
+    if (!buffer) {
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    if (ble_hs_mbuf_to_flat(ctxt->om, buffer, len, NULL) == 0) {
+        s_stream_rx_cb(buffer, len);
+    }
+    free(buffer);
     return 0;
 }
 
@@ -696,21 +802,21 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
         .uuid = &s_service_uuid.u,
         .characteristics = (struct ble_gatt_chr_def[]) {
             {
-                .uuid = &s_audio_uuid.u,
+                .uuid = &s_stream_tx_uuid.u,
                 .access_cb = notify_access_cb,
-                .val_handle = &s_audio_attr_handle,
+                .val_handle = &s_stream_tx_attr_handle,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
             },
             {
-                .uuid = &s_state_uuid.u,
+                .uuid = &s_control_tx_uuid.u,
                 .access_cb = notify_access_cb,
-                .val_handle = &s_state_attr_handle,
+                .val_handle = &s_control_tx_attr_handle,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
             },
             {
-                .uuid = &s_control_uuid.u,
+                .uuid = &s_control_rx_uuid.u,
                 .access_cb = control_access_cb,
-                .flags = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC,
             },
             {
                 .uuid = &s_ota_rx_uuid.u,
@@ -728,41 +834,16 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
                 .access_cb = authorized_access_cb,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC,
             },
+            {
+                .uuid = &s_stream_rx_uuid.u,
+                .access_cb = stream_rx_access_cb,
+                .flags = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC,
+            },
             {0},
         },
     },
     {0},
 };
-
-static void announce_state_subscription(void)
-{
-    if (!s_connected || !s_state_subscribed) {
-        return;
-    }
-    esp_err_t rc = send_device_info();
-    /* A bonded central restores its subscription before the MTU exchange
-     * finishes, and device_info does not fit in the default MTU.
-     */
-    s_device_info_pending = rc == ESP_ERR_INVALID_SIZE;
-    if (s_device_info_pending) {
-        ESP_LOGD(TAG, "device_info deferred until the MTU exchange");
-    } else if (rc != ESP_OK) {
-        ESP_LOGW(TAG, "device_info send failed err=0x%x", rc);
-    }
-#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-    report_battery_status();
-#endif
-}
-
-void voice_ble_send_device_snapshot(void)
-{
-    s_host_commanded = true;
-#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-    /* A restored subscription can accept a notification before the app listens. */
-    s_last_battery_report.percent = -1;
-#endif
-    announce_state_subscription();
-}
 
 static void on_link_encrypted(uint16_t conn_handle, int status)
 {
@@ -773,7 +854,6 @@ static void on_link_encrypted(uint16_t conn_handle, int status)
     const bool secure = ble_gap_conn_find(conn_handle, &desc) == 0 &&
                         desc.sec_state.encrypted && desc.sec_state.bonded;
     if (status == BLE_HS_ETIMEOUT && s_connected && secure && is_owner(&desc.peer_id_addr)) {
-        /* The central may have restored encryption before receiving our Security Request. */
         ESP_LOGD(TAG, "security request expired on an already authorized link");
         return;
     }
@@ -802,7 +882,6 @@ static void on_link_encrypted(uint16_t conn_handle, int status)
     if (dle_rc != 0) {
         ESP_LOGD(TAG, "data length update request failed rc=%d", dle_rc);
     }
-    /* Keep the peripheral's MTU request out of the security handshake. */
     if (ble_att_mtu(conn_handle) == BLE_ATT_MTU_DFLT) {
         int rc = ble_gattc_exchange_mtu(conn_handle, NULL, NULL);
         if (rc != 0 && rc != BLE_HS_EALREADY) {
@@ -812,7 +891,6 @@ static void on_link_encrypted(uint16_t conn_handle, int status)
     if (s_connection_cb) {
         s_connection_cb(true);
     }
-    announce_state_subscription();
 }
 
 int __real_ble_hs_hci_util_set_data_len(uint16_t conn_handle, uint16_t tx_octets, uint16_t tx_time);
@@ -876,9 +954,6 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         if (desc.sec_state.encrypted && desc.sec_state.bonded) {
             on_link_encrypted(s_link_handle, 0);
         } else {
-            /* Let the central start encryption or pairing on its own first.
-             * A security request that arrives before the Windows app pairs
-             * makes Windows fall back to its system pairing prompt. */
             ble_npl_callout_reset(&s_link_security, pdMS_TO_TICKS(LINK_SECURITY_GRACE_MS));
         }
         return 0;
@@ -914,18 +989,20 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "OTA aborted after disconnect");
         }
         s_connected = false;
-        s_audio_subscribed = false;
-        s_state_subscribed = false;
-#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-        s_last_battery_report.percent = -1;
-#endif
+        s_stream_tx_subscribed = false;
+        s_control_tx_subscribed = false;
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_link_handle = BLE_HS_CONN_HANDLE_NONE;
         s_itvl_target = CONN_ITVL_NONE;
         s_itvl_update_pending = false;
         s_itvl_update_in_flight = false;
-        s_device_info_pending = false;
-        s_host_commanded = false;
+        reset_rx_reasm();
+        if (s_control_tx_lock) {
+            xSemaphoreTake(s_control_tx_lock, portMAX_DELAY);
+            s_tx_msg_id = 0;
+            s_event_seq = 0;
+            xSemaphoreGive(s_control_tx_lock);
+        }
         start_advertising();
         if (was_connected && s_connection_cb) {
             s_connection_cb(false);
@@ -937,14 +1014,10 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         if (s_link_handle != event->subscribe.conn_handle) {
             return 0;
         }
-        if (event->subscribe.attr_handle == s_audio_attr_handle) {
-            s_audio_subscribed = event->subscribe.cur_notify;
-        } else if (event->subscribe.attr_handle == s_state_attr_handle) {
-            s_state_subscribed = event->subscribe.cur_notify;
-#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-            s_last_battery_report.percent = -1;
-#endif
-            announce_state_subscription();
+        if (event->subscribe.attr_handle == s_stream_tx_attr_handle) {
+            s_stream_tx_subscribed = event->subscribe.cur_notify;
+        } else if (event->subscribe.attr_handle == s_control_tx_attr_handle) {
+            s_control_tx_subscribed = event->subscribe.cur_notify;
         }
         return 0;
 
@@ -964,13 +1037,6 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_MTU:
         ESP_LOGD(TAG, "mtu=%u", event->mtu.value);
-        if (s_device_info_pending) {
-            announce_state_subscription();
-            return 0;
-        }
-#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-        report_battery_status();
-#endif
         return 0;
 
     default:
@@ -988,8 +1054,6 @@ static void start_advertising(void)
     const bool pairing_with_owner = s_pairing_open && s_has_owner;
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof(fields));
-    /* Only the pairing window is discoverable, so system "add device" lists
-     * do not offer a device that is waiting for its owner. */
     fields.flags = BLE_HS_ADV_F_BREDR_UNSUP | (s_pairing_open ? BLE_HS_ADV_F_DISC_GEN : 0);
     fields.uuids128 = s_pairing_open ? &s_pairing_adv_uuid : &s_reconnect_adv_uuid;
     fields.num_uuids128 = 1;
@@ -1006,8 +1070,6 @@ static void start_advertising(void)
     rsp_fields.name = (const uint8_t *)s_device_name;
     rsp_fields.name_len = strlen(s_device_name);
     rsp_fields.name_is_complete = 1;
-    // The paired host can still find the device while pairing is available.
-    // A second 128-bit UUID does not fit in the primary advertising packet.
     if (pairing_with_owner) {
         rsp_fields.uuids128 = &s_reconnect_adv_uuid;
         rsp_fields.num_uuids128 = 1;
@@ -1061,7 +1123,6 @@ static void on_sync(void)
         return;
     }
 
-    /* A device without an owner cannot be taken from anyone, so skip the button hold. */
     if (!s_has_owner && !s_pairing_open) {
         set_pairing_open(true);
     }
@@ -1129,6 +1190,9 @@ esp_err_t voice_ble_init(void)
 {
     ESP_RETURN_ON_ERROR(init_device_identity(), TAG, "device identity init failed");
 
+    s_control_tx_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_control_tx_lock != NULL, ESP_ERR_NO_MEM, TAG, "create control tx lock");
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -1147,7 +1211,6 @@ esp_err_t voice_ble_init(void)
 
     ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "nimble init failed");
 
-    /* The Bluetooth controller is enabled before the first UUID needs entropy. */
     err = init_device_uuid();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "device UUID unavailable: %s", esp_err_to_name(err));
@@ -1179,13 +1242,10 @@ esp_err_t voice_ble_init(void)
     ble_npl_event_init(&s_open_pairing_event, open_pairing_event_cb, NULL);
     ble_npl_callout_init(&s_pairing_timeout, nimble_port_get_dflt_eventq(), pairing_timeout_cb, NULL);
     ble_npl_callout_init(&s_link_security, nimble_port_get_dflt_eventq(), link_security_cb, NULL);
-#ifdef CONFIG_VOICE_STICK_BLE_BATTERY_STATUS
-    ble_npl_event_init(&s_battery_status_event, battery_status_event_cb, NULL);
-#endif
 
     nimble_port_freertos_init(nimble_host_task);
     s_ble_initialized = true;
-    ESP_LOGI(TAG, "BLE initialized as %s", s_device_name);
+    ESP_LOGI(TAG, "BLE v2 initialized as %s", s_device_name);
     return ESP_OK;
 }
 
@@ -1197,6 +1257,11 @@ const char *voice_ble_device_id(void)
 const char *voice_ble_device_name(void)
 {
     return s_device_name;
+}
+
+const char *voice_ble_device_uuid(void)
+{
+    return s_device_uuid;
 }
 
 void voice_ble_set_connection_callback(voice_ble_connection_cb_t callback)
@@ -1221,6 +1286,11 @@ void voice_ble_set_control_callback(voice_ble_control_cb_t callback)
     s_control_cb = callback;
 }
 
+void voice_ble_set_stream_rx_callback(voice_ble_stream_rx_cb_t callback)
+{
+    s_stream_rx_cb = callback;
+}
+
 void voice_ble_set_ota_callback(voice_ble_ota_cb_t callback)
 {
     s_ota_cb = callback;
@@ -1236,9 +1306,14 @@ bool voice_ble_has_active_link(void)
     return s_link_handle != BLE_HS_CONN_HANDLE_NONE;
 }
 
+bool voice_ble_control_ready(void)
+{
+    return !s_pairing_open && s_connected && s_control_tx_subscribed;
+}
+
 bool voice_ble_is_ready(void)
 {
-    return !s_pairing_open && s_connected && s_audio_subscribed && s_state_subscribed;
+    return !s_pairing_open && s_connected && s_stream_tx_subscribed && s_control_tx_subscribed;
 }
 
 bool voice_ble_ota_is_active(void)
@@ -1246,59 +1321,288 @@ bool voice_ble_ota_is_active(void)
     return s_ota.active;
 }
 
-esp_err_t voice_ble_send_audio(uint32_t session_id, uint32_t seq, uint8_t flags,
-                               const uint8_t *opus_payload, size_t len)
+static esp_err_t notify_with_retry(uint16_t attr_handle, const uint8_t *header, size_t header_len,
+                                   const uint8_t *payload, size_t payload_len)
 {
-    if (!voice_ble_is_ready() || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (!s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE || s_pairing_open) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(header, header_len);
+        if (!om) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (payload_len > 0 && os_mbuf_append(om, payload, payload_len) != 0) {
+            os_mbuf_free_chain(om);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        const int rc = ble_gatts_notify_custom(s_conn_handle, attr_handle, om);
+        if (rc == 0) {
+            record_tx_activity();
+            return ESP_OK;
+        }
+        if (rc != BLE_HS_ENOMEM) {
+            return ESP_FAIL;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return ESP_ERR_NO_MEM;
+}
+
+esp_err_t voice_ble_send_control_json(const char *json)
+{
+    if (!json) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!voice_ble_control_ready() || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const size_t json_len = strlen(json);
+    if (json_len == 0 || json_len > VOICE_BLE_MAX_CONTROL_MESSAGE_BYTES) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    xSemaphoreTake(s_control_tx_lock, portMAX_DELAY);
+    const uint16_t mtu = ble_att_mtu(s_conn_handle);
+    const size_t max_att = mtu > 3 ? (size_t)(mtu - 3) : 20;
+    esp_err_t err = ESP_OK;
+
+    if (4 + json_len <= max_att) {
+        const uint8_t header[4] = {
+            VOICE_BLE_PROTOCOL_VERSION,
+            VOICE_BLE_TYPE_CONTROL_JSON,
+            (uint8_t)(json_len & 0xff),
+            (uint8_t)(json_len >> 8),
+        };
+        err = notify_with_retry(s_control_tx_attr_handle, header, sizeof(header),
+                                (const uint8_t *)json, json_len);
+    } else {
+        const size_t max_slice = max_att > 7 ? max_att - 7 : 13;
+        const size_t chunk_count = (json_len + max_slice - 1) / max_slice;
+        if (chunk_count < 2 || chunk_count > 255) {
+            xSemaphoreGive(s_control_tx_lock);
+            return ESP_ERR_INVALID_SIZE;
+        }
+        const uint8_t msg_id = s_tx_msg_id++;
+        size_t offset = 0;
+        for (size_t i = 0; i < chunk_count; ++i) {
+            const size_t slice_len = MIN(max_slice, json_len - offset);
+            const uint16_t payload_len = (uint16_t)(3 + slice_len);
+            const uint8_t header[7] = {
+                VOICE_BLE_PROTOCOL_VERSION,
+                VOICE_BLE_TYPE_CONTROL_CHUNK,
+                (uint8_t)(payload_len & 0xff),
+                (uint8_t)(payload_len >> 8),
+                msg_id,
+                (uint8_t)i,
+                (uint8_t)chunk_count,
+            };
+            err = notify_with_retry(s_control_tx_attr_handle, header, sizeof(header),
+                                    (const uint8_t *)json + offset, slice_len);
+            if (err != ESP_OK) {
+                break;
+            }
+            offset += slice_len;
+        }
+    }
+
+    xSemaphoreGive(s_control_tx_lock);
+    if (err == ESP_OK) {
+        ESP_LOGD(TAG, "control tx (%uB) %s", (unsigned)json_len, json);
+    } else {
+        ESP_LOGW(TAG, "control tx failed (%s) len=%u", esp_err_to_name(err), (unsigned)json_len);
+    }
+    return err;
+}
+
+esp_err_t voice_ble_send_event(const char *event_name, uint64_t timestamp_ms, const char *data_json)
+{
+    if (!event_name || !data_json) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!voice_ble_control_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_control_tx_lock, portMAX_DELAY);
+    const uint32_t seq = ++s_event_seq;
+    xSemaphoreGive(s_control_tx_lock);
+
+    char buf[384];
+    const int len = snprintf(buf, sizeof(buf),
+                             "{\"event\":\"%s\",\"seq\":%" PRIu32
+                             ",\"timestamp_ms\":%" PRIu64 ",\"data\":%s}",
+                             event_name, seq, timestamp_ms, data_json);
+    if (len <= 0 || (size_t)len >= sizeof(buf)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return voice_ble_send_control_json(buf);
+}
+
+esp_err_t voice_ble_send_audio(uint16_t stream_id, uint32_t seq, uint32_t timestamp_ms,
+                               uint8_t flags, const uint8_t *payload, size_t len)
+{
+    if (!s_connected || !s_stream_tx_subscribed || s_pairing_open ||
+        s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         return ESP_ERR_INVALID_STATE;
     }
     if (len > UINT16_MAX) {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    uint8_t header[16] = {
-        1,
-        0x01,
-        16,
+    const uint8_t header[18] = {
+        VOICE_BLE_PROTOCOL_VERSION,
+        VOICE_BLE_TYPE_AUDIO_IN,
+        18,
         0,
-        session_id & 0xff,
-        (session_id >> 8) & 0xff,
-        (session_id >> 16) & 0xff,
-        (session_id >> 24) & 0xff,
-        seq & 0xff,
-        (seq >> 8) & 0xff,
-        (seq >> 16) & 0xff,
-        (seq >> 24) & 0xff,
+        (uint8_t)(stream_id & 0xff),
+        (uint8_t)(stream_id >> 8),
         flags,
         0,
-        len & 0xff,
-        (len >> 8) & 0xff,
+        (uint8_t)(seq & 0xff),
+        (uint8_t)((seq >> 8) & 0xff),
+        (uint8_t)((seq >> 16) & 0xff),
+        (uint8_t)((seq >> 24) & 0xff),
+        (uint8_t)(timestamp_ms & 0xff),
+        (uint8_t)((timestamp_ms >> 8) & 0xff),
+        (uint8_t)((timestamp_ms >> 16) & 0xff),
+        (uint8_t)((timestamp_ms >> 24) & 0xff),
+        (uint8_t)(len & 0xff),
+        (uint8_t)((len >> 8) & 0xff),
     };
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(header, sizeof(header));
     if (!om) {
-        ESP_LOGW(TAG, "tx seq=%" PRIu32 " mbuf alloc failed", seq);
+        ESP_LOGW(TAG, "audio tx seq=%" PRIu32 " mbuf alloc failed", seq);
         return ESP_ERR_NO_MEM;
     }
-
     if (len > 0) {
-        int rc = os_mbuf_append(om, opus_payload, len);
+        int rc = os_mbuf_append(om, payload, len);
         if (rc != 0) {
             os_mbuf_free_chain(om);
-            ESP_LOGW(TAG, "tx seq=%" PRIu32 " mbuf append failed rc=%d", seq, rc);
             return ESP_FAIL;
         }
     }
 
-    int rc = ble_gatts_notify_custom(s_conn_handle, s_audio_attr_handle, om);
+    int rc = ble_gatts_notify_custom(s_conn_handle, s_stream_tx_attr_handle, om);
     if (rc != 0) {
-        ESP_LOGW(TAG, "tx seq=%" PRIu32 " notify failed rc=%d", seq, rc);
-        return ESP_FAIL;
+        ESP_LOGW(TAG, "audio tx seq=%" PRIu32 " notify failed rc=%d", seq, rc);
+        return rc == BLE_HS_ENOMEM ? ESP_ERR_NO_MEM : ESP_FAIL;
+    }
+    record_tx_activity();
+
+    ESP_LOGD(TAG, "audio tx stream=%u seq=%" PRIu32 " flags=0x%02x len=%u",
+             stream_id, seq, flags, (unsigned)len);
+    return ESP_OK;
+}
+
+esp_err_t voice_ble_send_imu(uint16_t stream_id, uint16_t seq, uint32_t timestamp_ms,
+                             const uint8_t *samples, size_t sample_bytes)
+{
+    if (!s_connected || !s_stream_tx_subscribed || s_pairing_open ||
+        s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (sample_bytes != 6 && sample_bytes != 12) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Reserve mbuf headroom for control_tx, input, and audio_in under radio congestion. */
+    if (os_msys_num_free() < IMU_MIN_FREE_MBUFS) {
+        return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "tx seq=%" PRIu32 " %u bytes, sram: %" PRIu32 " bytes",
-             seq, (unsigned)(sizeof(header) + len), esp_get_free_internal_heap_size());
+    const uint16_t payload_len = (uint16_t)(8 + sample_bytes);
+    uint8_t frame[24] = {
+        VOICE_BLE_PROTOCOL_VERSION,
+        VOICE_BLE_TYPE_IMU,
+        (uint8_t)(payload_len & 0xff),
+        (uint8_t)(payload_len >> 8),
+        (uint8_t)(stream_id & 0xff),
+        (uint8_t)(stream_id >> 8),
+        (uint8_t)(seq & 0xff),
+        (uint8_t)(seq >> 8),
+        (uint8_t)(timestamp_ms & 0xff),
+        (uint8_t)((timestamp_ms >> 8) & 0xff),
+        (uint8_t)((timestamp_ms >> 16) & 0xff),
+        (uint8_t)((timestamp_ms >> 24) & 0xff),
+    };
+    memcpy(frame + 12, samples, sample_bytes);
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, 12 + sample_bytes);
+    if (!om) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (ble_gatts_notify_custom(s_conn_handle, s_stream_tx_attr_handle, om) != 0) {
+        return ESP_FAIL;
+    }
+    record_tx_activity();
     return ESP_OK;
+}
+
+esp_err_t voice_ble_send_input(uint16_t stream_id, uint16_t seq, uint32_t timestamp_ms,
+                               uint32_t buttons_mask)
+{
+    if (!s_connected || !s_stream_tx_subscribed || s_pairing_open ||
+        s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const uint8_t frame[16] = {
+        VOICE_BLE_PROTOCOL_VERSION,
+        VOICE_BLE_TYPE_INPUT,
+        12,
+        0,
+        (uint8_t)(stream_id & 0xff),
+        (uint8_t)(stream_id >> 8),
+        (uint8_t)(seq & 0xff),
+        (uint8_t)(seq >> 8),
+        (uint8_t)(timestamp_ms & 0xff),
+        (uint8_t)((timestamp_ms >> 8) & 0xff),
+        (uint8_t)((timestamp_ms >> 16) & 0xff),
+        (uint8_t)((timestamp_ms >> 24) & 0xff),
+        (uint8_t)(buttons_mask & 0xff),
+        (uint8_t)((buttons_mask >> 8) & 0xff),
+        (uint8_t)((buttons_mask >> 16) & 0xff),
+        (uint8_t)((buttons_mask >> 24) & 0xff),
+    };
+    return notify_with_retry(s_stream_tx_attr_handle, frame, sizeof(frame), NULL, 0);
+}
+
+esp_err_t voice_ble_send_nop(void)
+{
+    if (!s_connected || !s_stream_tx_subscribed || s_pairing_open ||
+        s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Fire-and-forget: if TX buffers are busy, the radio is already awake. */
+    if (os_msys_num_free() < IMU_MIN_FREE_MBUFS) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    const uint8_t frame[4] = {
+        VOICE_BLE_PROTOCOL_VERSION,
+        VOICE_BLE_TYPE_NOP,
+        0,
+        0,
+    };
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, sizeof(frame));
+    if (!om) {
+        return ESP_ERR_NO_MEM;
+    }
+    const int rc = ble_gatts_notify_custom(s_conn_handle, s_stream_tx_attr_handle, om);
+    if (rc != 0) {
+        return rc == BLE_HS_ENOMEM ? ESP_ERR_NO_MEM : ESP_FAIL;
+    }
+    record_tx_activity();
+    return ESP_OK;
+}
+
+uint32_t voice_ble_last_tx_ms(void)
+{
+    return atomic_load(&s_last_tx_ms);
 }
 
 static void conn_params_response_cb(uint16_t conn_handle, int status, void *arg)
@@ -1315,25 +1619,25 @@ static void conn_params_response_cb(uint16_t conn_handle, int status, void *arg)
     }
     if (s_itvl_update_pending) {
         s_itvl_update_pending = false;
-        if (s_itvl_target == CONN_ITVL_FAST) {
-            voice_ble_request_fast_interval();
-        } else if (s_itvl_target == CONN_ITVL_SLOW) {
-            voice_ble_request_slow_interval();
+        const conn_itvl_target_t pending = s_itvl_target;
+        s_itvl_target = CONN_ITVL_NONE;
+        if (pending == CONN_ITVL_FAST) {
+            (void)voice_ble_request_fast_interval();
+        } else if (pending == CONN_ITVL_SLOW) {
+            (void)voice_ble_request_slow_interval();
         }
     }
 }
 
-/* Windows controllers advertise the LL connection parameters request procedure
- * but some never answer it, and the link then drops after the 40 s LL response
- * timeout. The L2CAP request is answered by the host, and an unanswered one
- * only times out the request.
- */
 static esp_err_t request_conn_params(conn_itvl_target_t target,
                                      struct ble_l2cap_sig_update_params *params,
                                      const char *label)
 {
     if (s_pairing_open || !s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (s_itvl_target == target) {
+        return ESP_OK;
     }
     s_itvl_target = target;
     if (s_itvl_update_in_flight) {
@@ -1343,6 +1647,7 @@ static esp_err_t request_conn_params(conn_itvl_target_t target,
     }
     int rc = ble_l2cap_sig_update(s_conn_handle, params, conn_params_response_cb, NULL);
     if (rc != 0) {
+        s_itvl_target = CONN_ITVL_NONE;
         ESP_LOGW(TAG, "%s interval request failed rc=%d", label, rc);
         return ESP_FAIL;
     }
@@ -1356,166 +1661,41 @@ static esp_err_t request_conn_params(conn_itvl_target_t target,
 esp_err_t voice_ble_request_fast_interval(void)
 {
     struct ble_l2cap_sig_update_params params = {
-        .itvl_min = 12,   // 15ms
-        .itvl_max = 24,   // 30ms
+        .itvl_min = 12,   /* 15 ms */
+        .itvl_max = 24,   /* 30 ms */
         .slave_latency = 0,
-        .timeout_multiplier = 200,  // 2s
+        .timeout_multiplier = 400,  /* 4 s */
     };
     return request_conn_params(CONN_ITVL_FAST, &params, "fast");
 }
 
+void voice_ble_check_fast_interval(void)
+{
+    struct ble_gap_conn_desc desc;
+    if (!s_connected || ble_gap_conn_find(s_conn_handle, &desc) != 0 ||
+        (desc.conn_itvl <= 24 && desc.conn_latency == 0)) {
+        return;
+    }
+    const struct ble_gap_upd_params params = {
+        .itvl_min = 12, .itvl_max = 24, .latency = 0, .supervision_timeout = 400,
+    };
+    int rc = ble_gap_update_params(s_conn_handle, &params);
+    ESP_LOGI(TAG, "fast link retry interval=%u latency=%u update=%d",
+             desc.conn_itvl, desc.conn_latency, rc);
+}
+
 esp_err_t voice_ble_request_slow_interval(void)
 {
-    /* Apple caps interval * (latency + 1) at 2s and the supervision timeout at 6s. */
+    /* Mouse-style BLE parameters, Apple-compliant:
+     * interval_min >= 15ms, latency <= 30,
+     * interval_max * (latency + 1) <= 2s, timeout <= 6s.
+     * Peripheral uplink (buttons, Opus audio, IMU) skips slave_latency
+     * immediately at the negotiated interval while idle radio sleeps. */
     struct ble_l2cap_sig_update_params params = {
-        .itvl_min = 40,   // 50ms
-        .itvl_max = 160,  // 200ms
-        .slave_latency = 8,
-        .timeout_multiplier = 600,  // 6s
+        .itvl_min = CONFIG_VOICE_STICK_BLE_ITVL_MIN_UNITS,
+        .itvl_max = CONFIG_VOICE_STICK_BLE_ITVL_MAX_UNITS,
+        .slave_latency = CONFIG_VOICE_STICK_BLE_SLAVE_LATENCY,
+        .timeout_multiplier = 600,  /* 6 s */
     };
-    return request_conn_params(CONN_ITVL_SLOW, &params, "slow");
-}
-
-static esp_err_t send_state_json(const char *json)
-{
-    if (s_pairing_open) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (!s_connected || !s_state_subscribed || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        ESP_LOGW(TAG, "send_state_json gated: connected=%d state_sub=%d conn=%u",
-                 s_connected, s_state_subscribed, s_conn_handle);
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    const uint16_t json_len = strlen(json);
-    uint8_t header[4] = {
-        1,
-        0x10,
-        json_len & 0xff,
-        json_len >> 8,
-    };
-
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(header, sizeof(header));
-    if (!om) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    int rc = os_mbuf_append(om, json, json_len);
-    if (rc != 0) {
-        os_mbuf_free_chain(om);
-        return ESP_FAIL;
-    }
-
-    rc = ble_gatts_notify_custom(s_conn_handle, s_state_attr_handle, om);
-    if (rc != 0) {
-        return ESP_FAIL;
-    }
-
-    ESP_LOGD(TAG, "state %s", json);
-    return ESP_OK;
-}
-
-static esp_err_t send_device_info(void)
-{
-    const esp_app_desc_t *app_desc = esp_app_get_description();
-    const char *version = app_desc ? app_desc->version : "unknown";
-
-    const board_button_t *buttons = NULL;
-    size_t button_count = board_buttons(&buttons);
-    char uuid_field[sizeof(",\"device_uuid\":\"\"") + sizeof(s_device_uuid) - 1] = "";
-    if (s_device_uuid[0] != '\0') {
-        snprintf(uuid_field, sizeof(uuid_field), ",\"device_uuid\":\"%s\"", s_device_uuid);
-    }
-    const char *interaction_modes = ",\"interaction_modes\":[\"hold_to_talk\",\"click_to_talk\"]";
-    const char *ui_states = ",\"ui_states\":[\"ready\",\"recording\",\"thinking\","
-                            "\"pending_confirmation\",\"error\"]";
-    /* Keep device identity and button roles ahead of optional capabilities. */
-    const size_t max_json = ble_att_mtu(s_conn_handle) - 3 - 4;
-    char json[320];
-    while (true) {
-        char button_list[96] = "";
-        size_t used = 0;
-        for (size_t i = 0; i < button_count && used < sizeof(button_list); ++i) {
-            used += snprintf(button_list + used, sizeof(button_list) - used, "%s\"%s\"",
-                             i ? "," : "", buttons[i].name);
-        }
-        const int len = snprintf(json, sizeof(json),
-                                 "{\"event\":\"device_info\",\"hardware\":\"%s\","
-                                 "\"firmware_version\":\"%s\",\"buttons\":[%s]%s%s%s}",
-                                 board_hardware_name(), version, button_list, uuid_field,
-                                 interaction_modes, ui_states);
-        if (len >= 0 && (size_t)len < sizeof(json) && (size_t)len <= max_json) {
-            return send_state_json(json);
-        }
-        if (*ui_states) {
-            ui_states = "";
-        } else if (*interaction_modes) {
-            interaction_modes = "";
-        } else if (button_count > 0) {
-            button_count--;
-        } else {
-            return ESP_ERR_INVALID_SIZE;
-        }
-    }
-}
-
-esp_err_t voice_ble_send_button_down(const char *button, uint32_t session_id)
-{
-    char json[96];
-    if (session_id > 0) {
-        snprintf(json, sizeof(json),
-                 "{\"event\":\"button_down\",\"button\":\"%s\",\"session_id\":%" PRIu32 "}",
-                 button, session_id);
-    } else {
-        snprintf(json, sizeof(json),
-                 "{\"event\":\"button_down\",\"button\":\"%s\"}", button);
-    }
-    return send_state_json(json);
-}
-
-esp_err_t voice_ble_send_button_up(const char *button, uint32_t duration_ms,
-                                   uint32_t session_id)
-{
-    char json[128];
-    if (session_id > 0) {
-        snprintf(json, sizeof(json),
-                 "{\"event\":\"button_up\",\"button\":\"%s\","
-                 "\"duration_ms\":%" PRIu32 ",\"session_id\":%" PRIu32 "}",
-                 button, duration_ms, session_id);
-    } else {
-        snprintf(json, sizeof(json),
-                 "{\"event\":\"button_up\",\"button\":\"%s\",\"duration_ms\":%" PRIu32 "}",
-                 button, duration_ms);
-    }
-    return send_state_json(json);
-}
-
-esp_err_t voice_ble_send_button_click(const char *button, uint32_t duration_ms,
-                                      uint32_t session_id)
-{
-    char json[128];
-    if (session_id > 0) {
-        snprintf(json, sizeof(json),
-                 "{\"event\":\"button_click\",\"button\":\"%s\","
-                 "\"duration_ms\":%" PRIu32 ",\"session_id\":%" PRIu32 "}",
-                 button, duration_ms, session_id);
-    } else if (duration_ms > 0) {
-        snprintf(json, sizeof(json),
-                 "{\"event\":\"button_click\",\"button\":\"%s\",\"duration_ms\":%" PRIu32 "}",
-                 button, duration_ms);
-    } else {
-        snprintf(json, sizeof(json),
-                 "{\"event\":\"button_click\",\"button\":\"%s\"}", button);
-    }
-    ESP_LOGI(TAG, "button click button=%s session=%" PRIu32 " duration_ms=%" PRIu32,
-             button, session_id, duration_ms);
-    return send_state_json(json);
-}
-
-esp_err_t voice_ble_send_confirmation_shake(const char *confirmation_id)
-{
-    char json[96];
-    snprintf(json, sizeof(json), "{\"event\":\"confirmation_shake\",\"confirmation_id\":\"%s\"}",
-             confirmation_id);
-    return send_state_json(json);
+    return request_conn_params(CONN_ITVL_SLOW, &params, "normal");
 }

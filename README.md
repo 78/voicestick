@@ -68,9 +68,10 @@ Pin definitions live in `firmware/boards/voicestick_c3/components/board/voicesti
 | Pending confirmation countdown | Pause auto-paste and keep pending confirmation | Cancel pending text |
 | Manual pending confirmation | Confirm paste | Cancel pending text |
 
-The firmware reports raw button facts (`button_down` / `button_up` with
-`primary` or `secondary`). The macOS app owns the interaction state machine and
-sends `ui_state` updates back to the firmware for the screen.
+The firmware reports `button_down` and `button_up` with a button ID and device
+timestamp in both voice and game modes. VoiceStick 0.5.0 requires firmware
+0.5.0 for input. Older devices stay available for firmware updates through the
+device menu.
 
 By default the paste flow presses Return after paste. Disable `Press Return after paste` in settings, or set `auto_enter = false` in the config file, to paste without sending Return.
 

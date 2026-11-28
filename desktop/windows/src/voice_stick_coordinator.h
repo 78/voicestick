@@ -7,6 +7,7 @@
 #include "firmware_manifest.h"
 #include "llm_translation_client.h"
 #include "ogg_opus_muxer.h"
+#include "../../shared/shake_detector.h"
 
 #include <atomic>
 #include <chrono>
@@ -58,12 +59,18 @@ public:
                             const std::string& name) {
         ConnectPairedDevice(device_id, bluetooth_address, address_kind, name);
     }
-    virtual void SendUiState(const std::string& state,
-                               const std::string& text,
-                             const std::optional<std::string>& device_id,
-                             std::string_view confirmation_id = {}) = 0;
-    virtual void SendInteractionMode(InteractionMode mode,
-                                     const std::optional<std::string>& device_id) = 0;
+    virtual void SetDisplay(const std::string& scene,
+                            const std::string& text,
+                            const std::optional<std::string>& device_id) = 0;
+    virtual void StartAudioIn(const std::string& device_id, InteractionMode mode) = 0;
+    virtual void StopAudioIn(const std::string& device_id) = 0;
+    virtual void StartImu(const std::string& device_id,
+                          const std::string& axes,
+                          int rate_hz,
+                          int lease_ms) = 0;
+    virtual void RenewImu(const std::string& device_id, int lease_ms) = 0;
+    virtual void StopImu(const std::string& device_id) = 0;
+    virtual std::vector<std::string> ConnectedReadyDeviceIds() const = 0;
     virtual void UpdateFirmware(ByteVector image,
                                 const std::string& device_id,
                                 std::function<void(FirmwareUpdateProgress)> progress,
@@ -76,8 +83,15 @@ public:
     std::function<void(std::vector<ConnectedDevice>)> on_connection_change;
     std::function<void(std::string, std::string)> on_connection_error;
     std::function<void(std::string)> on_scan_error;
-    std::function<void(std::string, StateEvent)> on_state_event;
-    std::function<void(std::string, AudioFrame)> on_audio_frame;
+    std::function<void(std::string, DeviceInfoResult)> on_device_info;
+    std::function<void(std::string, DeviceInfoResult)> on_device_ready;
+    std::function<void(std::string, LegacyDeviceInfo)> on_legacy_device_info;
+    std::function<void(std::string, DeviceBatteryStatus)> on_battery_changed;
+    std::function<void(std::string, std::string, bool, std::uint32_t)> on_button_event;
+    std::function<void(std::string)> on_input_gap;
+    std::function<void(std::string, AudioStreamFrame)> on_audio_frame;
+    std::function<void(std::string, ImuStreamFrame)> on_imu_frame;
+    std::function<void(std::string, std::uint16_t, std::string)> on_stream_closed;
 };
 
 class AsrClient {
@@ -222,17 +236,24 @@ private:
 
     void ConfigureAsrCallbacks();
     void ConfigureSubtitleAsrCallbacks(SubtitleCycle* cycle);
-    void HandleStateEvent(const StateEvent& event, const std::string& device_id);
-    void HandleButtonDown(const StateEvent& event, const std::string& device_id);
-    void HandleButtonUp(const StateEvent& event, const std::string& device_id);
-    void HandleButtonClick(const StateEvent& event, const std::string& device_id);
+    void HandleDeviceInfo(const DeviceInfoResult& info, const std::string& device_id);
+    void HandleLegacyDeviceInfo(const LegacyDeviceInfo& info, const std::string& device_id);
+    void HandleDeviceReady(const DeviceInfoResult& info, const std::string& device_id);
+    void RestoreVoiceMode(const std::string& device_id);
+    bool CanUseDeviceInput(const std::string& device_id);
+    void HandleButtonEvent(const std::string& device_id, const std::string& button,
+                           bool is_down, std::uint32_t timestamp_ms);
     void HandleSecondaryButtonClick(const std::string& device_id);
     void HandlePrimaryButtonDown(std::optional<std::uint32_t> session_id, const std::string& device_id);
-    void HandlePrimaryButtonUp(const std::string& device_id);
-    void HandleAudioFrame(const AudioFrame& frame, const std::string& device_id);
+    void HandlePrimaryButtonUp(std::uint32_t session_id, const std::string& device_id);
+    void HandleAudioFrame(const AudioStreamFrame& frame, const std::string& device_id);
+    void HandleImuFrame(const ImuStreamFrame& frame, const std::string& device_id);
+    void HandleStreamClosed(const std::string& device_id, std::uint16_t stream_id, const std::string& reason);
+    void StartShakeConfirmation(const std::string& device_id);
+    void StopShakeConfirmation();
     void HandleSubtitlePrimaryButtonDown(std::optional<std::uint32_t> session_id, const std::string& device_id);
     void HandleSubtitlePrimaryButtonUp(const std::string& device_id);
-    void HandleSubtitleAudioFrame(const AudioFrame& frame, const std::string& device_id);
+    void HandleSubtitleAudioFrame(const AudioStreamFrame& frame, std::uint32_t utterance_id, const std::string& device_id);
     void BeginWaitingForSubtitleAudioEnd(SubtitleCycle* cycle, std::string_view reason);
     void ScheduleSubtitleAudioEndTimeout(const std::string& device_id, std::uint32_t session_id);
     void CancelSubtitleAudioEndTimeout(SubtitleCycle* cycle);
@@ -285,7 +306,6 @@ private:
     void CancelRecognitionInProgress();
     void CancelActiveCycleIfDeviceDisconnected();
     void FinishRecognitionCycle();
-    void UpdateDeviceFirmwareInfo(const StateEvent& event, const std::string& device_id);
     using FirmwareFeedCompletion = std::function<void(const FirmwareManifest*, std::string_view)>;
     void CheckFirmwareFeed(std::string_view hardware, bool force, FirmwareFeedCompletion completion = {});
     void RefreshFirmwareAvailability();
@@ -297,6 +317,8 @@ private:
     void EnterPausedConfirmation(const std::string& text, std::string_view reason);
     void EnterError(const std::string& message, std::string_view reason);
     void RefreshDeviceUiState(const std::string& device_id);
+    void SendDisplayState(const std::string& state, const std::string& text,
+                          const std::optional<std::string>& device_id);
     void SendUiStateForActiveDevice(const std::string& state, const std::string& text = "");
     OutputProfile OutputProfileForDevice(const std::optional<std::string>& device_id) const;
     OverlayThemeColor ThemeColorForDevice(const std::string& device_id) const;
@@ -334,6 +356,13 @@ private:
     std::optional<std::string> last_recoverable_text_;
     std::optional<std::string> last_recoverable_device_id_;
     std::vector<std::string> paired_device_ids_;
+    std::map<std::string, std::uint64_t> secondary_down_ms_;
+    std::map<std::string, std::uint32_t> active_capture_utterance_;
+    std::uint32_t next_utterance_id_ = 1;
+    std::map<std::string, DeviceImuCapabilities> device_imu_caps_;
+    std::optional<std::string> shake_device_id_;
+    ShakeDetector shake_detector_;
+    std::atomic_uint64_t shake_renew_generation_{0};
     std::map<std::string, DeviceFirmwareInfo> firmware_info_by_device_id_;
     struct FirmwareFeed {
         std::optional<FirmwareManifest> manifest;

@@ -1,5 +1,6 @@
 #include "firmware_manifest.h"
 
+#include "app_config.h"
 #include "cJSON.h"
 
 #include <Windows.h>
@@ -337,7 +338,9 @@ DeviceFirmwareInfo EvaluateFirmwareAvailability(DeviceFirmwareInfo info,
     if (manifest->CheckWindowsAppVersion(app_version) == FirmwareAppCompatibility::kAppUpdateRequired) {
         info.required_app_version = manifest->minimum_windows_app_version;
     } else {
-        info.update_available = FirmwareVersion::IsOlderThan(info.current_version, info.latest_version);
+        info.update_available = FirmwareVersion::IsOlderThan(info.current_version, info.latest_version) &&
+                                (!info.requires_input_firmware || !FirmwareVersion::IsOlderThan(
+                                    info.latest_version, AppConfig::minimum_compatible_firmware_version));
     }
     return info;
 }

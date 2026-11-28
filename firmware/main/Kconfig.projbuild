@@ -21,4 +21,30 @@ menu "Voice Stick"
         bool "Report battery status over BLE"
         default n
 
+    config VOICE_STICK_BLE_ITVL_MIN_UNITS
+        int "Normal BLE min connection interval (1.25 ms units)"
+        range 12 3200
+        default 12
+        help
+            Minimum BLE connection interval requested for normal operation in
+            1.25 ms units (12 = 15 ms, 36 = 45 ms). Must be >= 12 for Apple
+            Accessory Design Guidelines compliance.
+
+    config VOICE_STICK_BLE_ITVL_MAX_UNITS
+        int "Normal BLE max connection interval (1.25 ms units)"
+        range 24 3200
+        default 24
+        help
+            Maximum BLE connection interval requested for normal operation in
+            1.25 ms units (24 = 30 ms, 48 = 60 ms). Should be at least 12 units
+            (15 ms) above the minimum interval for Apple compliance.
+
+    config VOICE_STICK_BLE_SLAVE_LATENCY
+        int "Normal BLE peripheral latency (skipped connection events)"
+        range 0 30
+        default 30
+        help
+            Number of connection events the peripheral may skip when idle.
+            Keep interval_max_ms * (latency + 1) <= 2000 ms for Apple compliance.
+
 endmenu

@@ -8,17 +8,21 @@ let package = Package(
         .macOS(.v12)
     ],
     products: [
-        .executable(name: "VoiceStickApp", targets: ["VoiceStickApp"])
+        .executable(name: "VoiceStickApp", targets: ["VoiceStickApp"]),
+        .executable(name: "VoiceStickTennis", targets: ["VoiceStickTennis"])
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
         .package(url: "https://github.com/LebJe/TOMLKit.git", from: "0.6.0"),
     ],
     targets: [
+        .target(name: "MotionInput"),
+        .executableTarget(name: "VoiceStickTennis", dependencies: ["MotionInput"]),
+        .testTarget(name: "VoiceStickTennisTests", dependencies: ["VoiceStickTennis", "MotionInput"]),
         .executableTarget(
             name: "VoiceStickApp",
             dependencies: [
-                "CZlib",
+                "CZlib", "MotionInput",
                 .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "TOMLKit", package: "TOMLKit"),
             ],
@@ -33,6 +37,7 @@ let package = Package(
                 ])
             ]
         ),
+        .testTarget(name: "VoiceStickAppTests", dependencies: ["VoiceStickApp"]),
         .target(
             name: "CZlib",
             path: "Sources/CZlib",

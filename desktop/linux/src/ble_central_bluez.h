@@ -32,11 +32,12 @@ public:
                              std::uint64_t bluetooth_address,
                              BluetoothAddressKind address_kind,
                              const std::string& name) override;
-    void SendUiState(const std::string& state,
-                     const std::string& text,
-                     const std::optional<std::string>& device_id) override;
-    void SendInteractionMode(InteractionMode mode,
-                             const std::optional<std::string>& device_id) override;
+    void SetDisplay(const std::string& scene,
+                    const std::string& text,
+                    const std::optional<std::string>& device_id) override;
+    void StartAudioIn(const std::string& device_id, InteractionMode mode) override;
+    void StopAudioIn(const std::string& device_id) override;
+    std::vector<std::string> ConnectedReadyDeviceIds() const override;
     void UpdateFirmware(ByteVector image,
                         const std::string& device_id,
                         std::function<void(FirmwareUpdateProgress)> progress,

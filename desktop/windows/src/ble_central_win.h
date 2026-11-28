@@ -38,12 +38,18 @@ public:
                     std::uint64_t bluetooth_address,
                     BluetoothAddressKind address_kind,
                     const std::string& name) override;
-    void SendUiState(const std::string& state,
-                     const std::string& text,
-                     const std::optional<std::string>& device_id,
-                     std::string_view confirmation_id = {}) override;
-    void SendInteractionMode(InteractionMode mode,
-                             const std::optional<std::string>& device_id) override;
+    void SetDisplay(const std::string& scene,
+                    const std::string& text,
+                    const std::optional<std::string>& device_id) override;
+    void StartAudioIn(const std::string& device_id, InteractionMode mode) override;
+    void StopAudioIn(const std::string& device_id) override;
+    void StartImu(const std::string& device_id,
+                  const std::string& axes,
+                  int rate_hz,
+                  int lease_ms) override;
+    void RenewImu(const std::string& device_id, int lease_ms) override;
+    void StopImu(const std::string& device_id) override;
+    std::vector<std::string> ConnectedReadyDeviceIds() const override;
     void UpdateFirmware(ByteVector image,
                         const std::string& device_id,
                         std::function<void(FirmwareUpdateProgress)> progress,
@@ -54,28 +60,41 @@ public:
     void Shutdown() override;
 
 private:
+    using RpcCallback = std::function<void(std::optional<ControlRpcResponse>)>;
+
     struct DeviceSession {
         std::uint64_t bluetooth_address = 0;
         ConnectedDevice device;
         winrt::Windows::Devices::Bluetooth::BluetoothLEDevice ble_device{nullptr};
         winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattSession gatt_session{nullptr};
         winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattDeviceService service{nullptr};
-        winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic audio_characteristic{nullptr};
-        winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic state_characteristic{nullptr};
-        winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic control_characteristic{nullptr};
+        winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic stream_tx_characteristic{nullptr};
+        winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic control_tx_characteristic{nullptr};
+        winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic control_rx_characteristic{nullptr};
         winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic ota_rx_characteristic{nullptr};
         winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic ota_state_characteristic{nullptr};
-        winrt::event_token audio_value_changed_token{};
-        winrt::event_token state_value_changed_token{};
+        winrt::event_token stream_tx_value_changed_token{};
+        winrt::event_token control_tx_value_changed_token{};
         winrt::event_token ota_state_value_changed_token{};
         winrt::event_token connection_status_token{};
         winrt::event_token gatt_services_changed_token{};
-        bool audio_subscribed = false;
-        bool state_subscribed = false;
+        bool stream_tx_subscribed = false;
+        bool control_tx_subscribed = false;
         bool ota_state_subscribed = false;
         std::atomic_bool ready{false};
-        std::optional<StateEvent> pending_device_info;
-        std::optional<StateEvent> pending_battery_status;
+        bool initialized = false;
+        ControlReassembler control_reassembler;
+        std::uint8_t next_control_msg_id = 1;
+        std::uint32_t next_rpc_id = 1;
+        std::map<std::uint32_t, RpcCallback> pending_rpcs;
+        std::optional<DeviceInfoResult> info;
+        std::uint16_t input_stream_id = 0;
+        std::uint16_t audio_in_stream_id = 0;
+        std::uint16_t imu_stream_id = 0;
+        std::optional<std::uint16_t> last_input_seq;
+        std::uint32_t buttons_mask = 0;
+        std::optional<std::string> last_display_scene;
+        std::optional<std::string> last_display_text;
     };
 
     struct FirmwareUpdateSession {
@@ -90,8 +109,6 @@ private:
 
     void StartScan();
     void StopScan();
-    // A scan cannot start while the radio is off, so restart it once
-    // Bluetooth is turned back on.
     winrt::fire_and_forget WatchBluetoothRadioAsync();
     static winrt::fire_and_forget RestartScanAfterRadioOn(std::weak_ptr<BleCentralWin> weak_self);
     void HandleAdvertisement(const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher& watcher,
@@ -101,14 +118,29 @@ private:
                             BluetoothAddressKind address_kind,
                             const std::string& name,
                             bool pairing);
-    // Only a pairing connection may remove this computer's Bluetooth bond:
-    // outside its pairing window the device rejects a fresh pairing.
     winrt::fire_and_forget ConnectDeviceAsync(std::uint64_t bluetooth_address,
                                               BluetoothAddressKind address_kind,
                                               std::string local_name,
                                               std::string device_id,
                                               bool pairing);
-    winrt::fire_and_forget WriteControlPayloadAsync(std::shared_ptr<DeviceSession> session, ByteVector payload);
+    void StartV2Handshake(const std::string& device_id, std::shared_ptr<DeviceSession> session);
+    void ProbeLegacyDeviceInfo(const std::string& device_id, std::shared_ptr<DeviceSession> session);
+    void SendRpc(const std::string& device_id,
+                 std::shared_ptr<DeviceSession> session,
+                 std::function<std::string(std::uint32_t)> build_json,
+                 RpcCallback completion = {},
+                 std::chrono::milliseconds timeout = std::chrono::milliseconds(3000));
+    winrt::fire_and_forget WriteControlFramesAsync(std::shared_ptr<DeviceSession> session,
+                                                   std::vector<ByteVector> frames);
+    winrt::fire_and_forget RpcTimeoutAsync(std::shared_ptr<DeviceSession> session,
+                                           std::uint32_t rpc_id,
+                                           std::chrono::milliseconds timeout);
+    void HandleControlMessage(const std::string& device_id,
+                              std::shared_ptr<DeviceSession> session,
+                              ControlMessage message);
+    void HandleInputFrame(const std::string& device_id,
+                          std::shared_ptr<DeviceSession> session,
+                          const InputStreamFrame& frame);
     winrt::fire_and_forget UpdateFirmwareAsync(std::shared_ptr<DeviceSession> session,
                                                std::shared_ptr<FirmwareUpdateSession> update_session);
     void HandleFirmwareOtaStateEvent(const std::string& device_id, const FirmwareOtaStateEvent& event);
@@ -133,8 +165,6 @@ private:
     std::shared_ptr<FirmwareUpdateSession> firmware_update_session_;
     std::set<std::uint64_t> connecting_addresses_;
     bool pairing_dialog_open_ = false;
-    // The service UUID and the device name arrive in separate advertising
-    // reports, so remember which addresses are in their pairing window.
     std::set<std::uint64_t> pairing_window_addresses_;
     std::set<std::string> cancelled_device_ids_;
     BleAdvertisementScan scan_;

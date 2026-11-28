@@ -426,10 +426,9 @@ void Win32App::ShowFirmwareUpdatePrompt(std::string device_id, DeviceFirmwareInf
         firmware_update_dialog_->Show();
         return;
     }
-    const bool is_below_minimum = FirmwareVersion::IsOlderThan(
-        info.current_version, AppConfig::minimum_compatible_firmware_version);
     auto message = L"VS-" + Utf16(device_id) + L" is running firmware " +
                    Utf16(info.current_version) + L".\n\n";
+    if (info.requires_input_firmware) message += L"Update the device to use voice input.\n\n";
     const auto* unavailable = FirmwareUpdateUnavailableReason(device_id, info);
     if (unavailable) {
         message += L"Firmware " + Utf16(info.latest_version) + L" is available. " + unavailable;
@@ -439,7 +438,7 @@ void Win32App::ShowFirmwareUpdatePrompt(std::string device_id, DeviceFirmwareInf
     is_showing_firmware_prompt_ = true;
     const int result = MessageBoxW(
         hwnd_, message.c_str(),
-        is_below_minimum ? L"Firmware update recommended" : L"Firmware update available",
+        info.requires_input_firmware ? L"Firmware update required" : L"Firmware update available",
         MB_ICONINFORMATION | MB_SETFOREGROUND | (unavailable ? MB_OK : (MB_YESNO | MB_DEFBUTTON2)));
     is_showing_firmware_prompt_ = false;
     if (result == IDYES && !is_shutting_down_) StartFirmwareUpdate(device_id, info.latest_version);
@@ -967,6 +966,9 @@ void Win32App::ShowTrayMenu() {
         const auto identity_text = FirmwareIdentityText(hardware, firmware_version);
         AppendMenuW(submenu, MF_STRING | MF_DISABLED, 0, identity_text.c_str());
         const auto* firmware = firmware_it == firmware_info_map_.end() ? nullptr : &firmware_it->second;
+        if (firmware && firmware->requires_input_firmware) {
+            AppendMenuW(submenu, MF_STRING | MF_DISABLED, 0, L"Firmware Update Required for Voice Input");
+        }
         if (manual_firmware_check_device_ == id || (firmware && firmware->is_checking)) {
             AppendMenuW(submenu, MF_STRING | MF_DISABLED, 0, L"Checking for Firmware Updates...");
         } else if (firmware && firmware->update_available) {

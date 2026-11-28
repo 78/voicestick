@@ -90,6 +90,18 @@ std::string FirmwareManifestClient::DefaultManifestUrl() {
     return "https://78.github.io/voicestick/firmwares/m5stack_stick_s3/latest/manifest.json";
 }
 
+std::string FirmwareManifestClient::ManifestUrlForHardware(std::string_view hardware) {
+    const auto normalized = NormalizedHardwareName(hardware);
+    if (normalized == "sticks3") return DefaultManifestUrl();
+    if (normalized == "voicestickc3") {
+        return "https://78.github.io/voicestick/firmwares/voicestick_c3/latest/manifest.json";
+    }
+    if (normalized == "magiclick2p5") {
+        return "https://78.github.io/voicestick/firmwares/magiclick_2p5/latest/manifest.json";
+    }
+    return {};
+}
+
 void FirmwareManifestClient::FetchManifest(ManifestCallback callback) const {
     const auto url = manifest_url_;
     std::thread([url, callback = std::move(callback)]() mutable {

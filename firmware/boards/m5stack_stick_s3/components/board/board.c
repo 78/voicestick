@@ -24,39 +24,78 @@ static const board_button_t s_buttons[] = {
 };
 
 static board_power_event_cb_t s_power_event_cb;
-static bmi270_handle_t *s_shake_sensor;
+static bmi270_handle_t *s_imu_sensor;
 
 #define BMI270_REG_PWR_CONF 0x7c
 #define BMI270_REG_PWR_CTRL 0x7d
 #define BMI270_ADV_POWER_SAVE_AND_FIFO_SELF_WAKEUP 0x03
+#define BMI270_GYRO_ENABLE BIT(1)
 #define BMI270_ACCEL_ENABLE BIT(2)
 #define BMI270_IO_TIMEOUT_MS 20
 
-static bool set_shake_sensor_enabled(bool enabled)
+static bool set_imu_enabled(bool enabled, bool include_gyro, uint16_t rate_hz)
 {
-    const uint8_t power[] = {BMI270_REG_PWR_CTRL, enabled ? BMI270_ACCEL_ENABLE : 0};
-    const esp_err_t err = i2c_master_transmit(s_shake_sensor->i2c_handle, power, sizeof(power),
-                                              BMI270_IO_TIMEOUT_MS);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "set BMI270 accelerometer %s: %s", enabled ? "active" : "standby", esp_err_to_name(err));
+    if (!s_imu_sensor) {
         return false;
     }
-    /* Advanced power save requires at least 450 us between register writes. */
+    if (!enabled) {
+        const uint8_t power_off[] = {BMI270_REG_PWR_CTRL, 0};
+        const uint8_t power_save[] = {BMI270_REG_PWR_CONF, BMI270_ADV_POWER_SAVE_AND_FIFO_SELF_WAKEUP};
+        (void)i2c_master_transmit(s_imu_sensor->i2c_handle, power_off, sizeof(power_off), BMI270_IO_TIMEOUT_MS);
+        esp_rom_delay_us(450);
+        if (i2c_master_transmit(s_imu_sensor->i2c_handle, power_save, sizeof(power_save), BMI270_IO_TIMEOUT_MS) != ESP_OK) {
+            return false;
+        }
+        esp_rom_delay_us(450);
+        return true;
+    }
+
+    const uint8_t power_active[] = {BMI270_REG_PWR_CONF, 0};
+    if (i2c_master_transmit(s_imu_sensor->i2c_handle, power_active, sizeof(power_active), BMI270_IO_TIMEOUT_MS) != ESP_OK) {
+        return false;
+    }
     esp_rom_delay_us(450);
-    return true;
-}
 
-static bool read_acceleration(acceleration_mg_t *sample)
-{
-    float x, y, z;
-    if (bmi270_get_acce_data(s_shake_sensor, &x, &y, &z) != ESP_OK) {
+    const uint8_t acc_odr = rate_hz <= 50 ? BMI270_ACC_ODR_50_HZ : BMI270_ACC_ODR_100_HZ;
+    if (bmi270_set_acce_odr(s_imu_sensor, acc_odr) != ESP_OK ||
+        bmi270_set_acce_range(s_imu_sensor, BMI270_ACC_RANGE_4_G) != ESP_OK) {
         return false;
     }
-    *sample = (acceleration_mg_t){(int32_t)(x * 1000), (int32_t)(y * 1000), (int32_t)(z * 1000)};
-    return true;
+    if (include_gyro) {
+        const uint8_t gyr_odr = rate_hz <= 50 ? BMI270_GYR_ODR_50_HZ : BMI270_GYR_ODR_100_HZ;
+        if (bmi270_set_gyro_odr(s_imu_sensor, gyr_odr) != ESP_OK ||
+            bmi270_set_gyro_range(s_imu_sensor, BMI270_GYR_RANGE_2000_DPS) != ESP_OK) {
+            return false;
+        }
+    }
+
+    const uint8_t power[] = {BMI270_REG_PWR_CTRL,
+                             (uint8_t)(BMI270_ACCEL_ENABLE | (include_gyro ? BMI270_GYRO_ENABLE : 0))};
+    return i2c_master_transmit(s_imu_sensor->i2c_handle, power, sizeof(power), BMI270_IO_TIMEOUT_MS) == ESP_OK;
 }
 
-static esp_err_t init_shake_sensor(i2c_master_bus_handle_t bus)
+static bool read_imu_samples(bool include_gyro, uint8_t *out_bytes)
+{
+    const uint8_t acc_x_lsb = 0x0c;
+    const size_t read_len = include_gyro ? 12 : 6;
+    return i2c_master_transmit_receive(s_imu_sensor->i2c_handle, &acc_x_lsb, 1, out_bytes, read_len,
+                                       BMI270_IO_TIMEOUT_MS) == ESP_OK;
+}
+
+const board_imu_t *board_imu(void)
+{
+    static const board_imu_t imu = {
+        .has_gyro = true,
+        .accel_lsb_per_g = 8192,
+        .gyro_lsb_per_dps = 16.384f,
+        .max_rate_hz = 100,
+        .set_enabled = set_imu_enabled,
+        .read_samples = read_imu_samples,
+    };
+    return s_imu_sensor ? &imu : NULL;
+}
+
+static esp_err_t init_imu_sensor(i2c_master_bus_handle_t bus)
 {
     const bmi270_driver_config_t config = {
         .addr = BMI270_I2C_ADDRESS_L,
@@ -74,8 +113,8 @@ static esp_err_t init_shake_sensor(i2c_master_bus_handle_t bus)
     const uint8_t power_save[] = {BMI270_REG_PWR_CONF, BMI270_ADV_POWER_SAVE_AND_FIFO_SELF_WAKEUP};
     ESP_GOTO_ON_ERROR(i2c_master_transmit(sensor->i2c_handle, power_save, sizeof(power_save), BMI270_IO_TIMEOUT_MS),
                       cleanup, TAG, "enable BMI270 power save");
-    s_shake_sensor = sensor;
-    ESP_LOGI(TAG, "BMI270 ready for shake cancellation");
+    s_imu_sensor = sensor;
+    ESP_LOGI(TAG, "BMI270 6-axis IMU ready");
     return ESP_OK;
 
 cleanup:
@@ -99,18 +138,9 @@ esp_err_t board_init(void)
     ESP_RETURN_ON_ERROR(stick_s3_board_init(), TAG, "initialize StickS3 board");
     i2c_master_bus_handle_t bus = stick_s3_board_i2c_bus();
     if (bus) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(init_shake_sensor(bus));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(init_imu_sensor(bus));
     }
     return ESP_OK;
-}
-
-const board_confirmation_motion_t *board_confirmation_motion(void)
-{
-    static const board_confirmation_motion_t motion = {
-        .set_enabled = set_shake_sensor_enabled,
-        .read_acceleration = read_acceleration,
-    };
-    return s_shake_sensor ? &motion : NULL;
 }
 
 es8311_input_board_t board_es8311_input_config(void)

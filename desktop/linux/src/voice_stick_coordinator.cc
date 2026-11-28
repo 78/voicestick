@@ -61,11 +61,23 @@ VoiceStickCoordinator::~VoiceStickCoordinator() {
 void VoiceStickCoordinator::Start() {
     ble_->on_connection_change = [this](std::vector<ConnectedDevice> devices) {
         if (is_shutdown_) return;
+        const auto is_disconnected = [&devices](const auto& entry) {
+            return std::none_of(devices.begin(), devices.end(), [&entry](const ConnectedDevice& device) {
+                return device.id == entry.first;
+            });
+        };
+        std::erase_if(secondary_down_ms_, is_disconnected);
+        std::erase_if(active_capture_utterance_, is_disconnected);
+        {
+            std::lock_guard lock(firmware_mutex_);
+            for (auto& entry : firmware_info_by_device_id_) {
+                if (is_disconnected(entry)) entry.second.reported_on_connection = false;
+            }
+        }
         ui_->SetConnectedDevices(devices);
         CancelActiveCycleIfDeviceDisconnected();
         RefreshFirmwareAvailability();
         ui_->SetStatus(paired_device_ids_.empty() ? "Pair a VoiceStick" : "Ready");
-        ble_->SendInteractionMode(config_.interaction_mode, std::nullopt);
     };
     ble_->on_connection_error = [this](std::string device_id, std::string message) {
         if (is_shutdown_) return;
@@ -76,13 +88,33 @@ void VoiceStickCoordinator::Start() {
         LogCoordinatorLine("BLE scan error: " + message);
         ui_->SetStatus("Turn on Bluetooth");
     };
-    ble_->on_state_event = [this](std::string device_id, StateEvent event) {
+    ble_->on_device_info = [this](std::string device_id, DeviceInfoResult info) {
         if (is_shutdown_) return;
-        HandleStateEvent(event, device_id);
+        HandleDeviceInfo(info, device_id);
     };
-    ble_->on_audio_frame = [this](std::string device_id, AudioFrame frame) {
+    ble_->on_device_ready = [this](std::string device_id, DeviceInfoResult info) {
+        if (is_shutdown_) return;
+        HandleDeviceReady(info, device_id);
+    };
+    ble_->on_legacy_device_info = [this](std::string device_id, LegacyDeviceInfo info) {
+        if (is_shutdown_) return;
+        HandleLegacyDeviceInfo(info, device_id);
+    };
+    ble_->on_button_event = [this](std::string device_id, std::string button, bool is_down, std::uint32_t timestamp_ms) {
+        if (is_shutdown_) return;
+        HandleButtonEvent(device_id, button, is_down, timestamp_ms);
+    };
+    ble_->on_input_gap = [this](std::string device_id) {
+        if (is_shutdown_) return;
+        secondary_down_ms_.erase(device_id);
+    };
+    ble_->on_audio_frame = [this](std::string device_id, AudioStreamFrame frame) {
         if (is_shutdown_) return;
         HandleAudioFrame(frame, device_id);
+    };
+    ble_->on_stream_closed = [this](std::string device_id, std::uint16_t stream_id, std::string reason) {
+        if (is_shutdown_) return;
+        HandleStreamClosed(device_id, stream_id, reason);
     };
     ConfigureAsrCallbacks();
     ble_->Start();
@@ -102,8 +134,13 @@ void VoiceStickCoordinator::Shutdown() {
     ble_->on_connection_change = nullptr;
     ble_->on_connection_error = nullptr;
     ble_->on_scan_error = nullptr;
-    ble_->on_state_event = nullptr;
+    ble_->on_device_info = nullptr;
+    ble_->on_device_ready = nullptr;
+    ble_->on_legacy_device_info = nullptr;
+    ble_->on_button_event = nullptr;
+    ble_->on_input_gap = nullptr;
     ble_->on_audio_frame = nullptr;
+    ble_->on_stream_closed = nullptr;
     asr_->Cancel();
     for (auto& [_, cycle] : subtitle_cycles_) {
         if (cycle->asr) cycle->asr->Cancel();
@@ -111,6 +148,7 @@ void VoiceStickCoordinator::Shutdown() {
     }
     subtitle_cycles_.clear();
     active_subtitle_sessions_.clear();
+    active_capture_utterance_.clear();
     ui_->HideSubtitles();
     CancelAudioEndTimeout();
     active_session_id_.reset();
@@ -132,6 +170,7 @@ void VoiceStickCoordinator::UpdateConfig(AppConfig config) {
         }
         subtitle_cycles_.clear();
         active_subtitle_sessions_.clear();
+        active_capture_utterance_.clear();
         ui_->HideSubtitles();
         active_session_id_.reset();
         pending_paste_state_ = {};
@@ -140,9 +179,14 @@ void VoiceStickCoordinator::UpdateConfig(AppConfig config) {
         EnterReady("config_update_cancel");
     }
 
+    const bool interaction_changed = config_.interaction_mode != config.interaction_mode;
     config_ = std::move(config);
     translator_ = LLMTranslationClient(config_);
-    ble_->SendInteractionMode(config_.interaction_mode, std::nullopt);
+    if (interaction_changed || was_recognizing) {
+        for (const auto& device_id : ble_->ConnectedReadyDeviceIds()) {
+            RestoreVoiceMode(device_id);
+        }
+    }
     debug_audio_recorder_ = DebugAudioRecorder(config_.debug_audio_cache, config_.debug_audio_directory);
     if (asr_factory_) {
         asr_ = asr_factory_(config_);
@@ -231,12 +275,24 @@ void VoiceStickCoordinator::UpdateFirmwareFromLatest(
     std::function<void(FirmwareUpdateProgress)> progress,
     std::function<void(bool, std::string)> completion) {
     std::optional<FirmwareManifest> manifest;
+    std::string manifest_url;
     {
         std::lock_guard lock(firmware_mutex_);
-        manifest = latest_firmware_manifest_;
+        const auto info = firmware_info_by_device_id_.find(device_id);
+        if (info != firmware_info_by_device_id_.end() && info->second.reported_on_connection) {
+            const auto& device = info->second;
+            manifest_url = FirmwareManifestClient::ManifestUrlForHardware(device.hardware);
+            const auto feed = firmware_manifests_by_url_.find(manifest_url);
+            if (feed != firmware_manifests_by_url_.end() && IsFirmwareManifestCompatible(device, feed->second) &&
+                FirmwareVersion::IsOlderThan(device.current_version, feed->second.version) &&
+                (!device.requires_input_firmware || !FirmwareVersion::IsOlderThan(
+                    feed->second.version, AppConfig::minimum_compatible_firmware_version))) {
+                manifest = feed->second;
+            }
+        }
     }
-    if (!manifest.has_value()) {
-        completion(false, "Firmware update manifest is not loaded yet.");
+    if (!manifest) {
+        completion(false, "No compatible firmware update is available for the connected device.");
         return;
     }
     if (!manifest->SupportsLinuxAppVersion(VOICESTICK_VERSION_STR)) {
@@ -245,7 +301,7 @@ void VoiceStickCoordinator::UpdateFirmwareFromLatest(
         return;
     }
 
-    auto client = firmware_manifest_client_;
+    FirmwareManifestClient client(std::move(manifest_url));
     std::thread([this, alive = alive_, client = std::move(client), device_id, manifest = std::move(*manifest),
                  progress = std::move(progress), completion = std::move(completion)]() mutable {
         std::string error;
@@ -303,66 +359,65 @@ void VoiceStickCoordinator::ConfigureSubtitleAsrCallbacks(SubtitleCycle* cycle) 
         FinishSubtitleCycleWithError(device_id, session_id, message);
     };
     cycle->asr->on_upgrade_url = [this, device_id](std::string url, std::string message) {
-        ble_->SendUiState("ready", "", device_id);
+        SendDisplayState("ready", "", device_id);
         ui_->ShowCloudUpgrade(message, url, device_id);
     };
 }
 
-void VoiceStickCoordinator::HandleStateEvent(const StateEvent& event, const std::string& device_id) {
-    if (event.event == "device_info") {
-        ui_->SetDeviceInfo(DeviceInfo{device_id, event.hardware, event.firmware_version});
-        UpdateDeviceFirmwareInfo(event, device_id);
-    } else if (event.event == "button_down") {
-        HandleButtonDown(event, device_id);
-    } else if (event.event == "button_up") {
-        HandleButtonUp(event, device_id);
-    } else if (event.event == "button_click") {
-        HandleButtonClick(event, device_id);
-    }
+void VoiceStickCoordinator::HandleDeviceInfo(const DeviceInfoResult& info, const std::string& device_id) {
+    ui_->SetDeviceInfo(DeviceInfo{device_id, info.hardware, info.firmware_version});
+    UpdateDeviceFirmwareInfo(info.hardware, info.firmware_version, !info.SupportsProtocolV2(), device_id);
 }
 
-void VoiceStickCoordinator::HandleButtonDown(const StateEvent& event, const std::string& device_id) {
-    if (event.button == "primary") {
-        HandlePrimaryButtonDown(event.session_id, device_id);
-    }
+void VoiceStickCoordinator::HandleLegacyDeviceInfo(const LegacyDeviceInfo& info, const std::string& device_id) {
+    ui_->SetDeviceInfo(DeviceInfo{device_id, info.hardware, info.firmware_version});
+    UpdateDeviceFirmwareInfo(info.hardware, info.firmware_version, true, device_id);
 }
 
-void VoiceStickCoordinator::HandleButtonUp(const StateEvent& event, const std::string& device_id) {
-    if (event.button == "primary") {
-        HandlePrimaryButtonUp(device_id);
-    } else if (event.button == "secondary") {
-        HandleSecondaryButtonClick(device_id);
-    }
+void VoiceStickCoordinator::HandleDeviceReady(const DeviceInfoResult&, const std::string& device_id) {
+    RestoreVoiceMode(device_id);
 }
 
-void VoiceStickCoordinator::HandleButtonClick(const StateEvent& event, const std::string& device_id) {
-    if (event.button == "primary") {
-        if (config_.default_output_profile.target == OutputTarget::kSubtitle) {
-            if (config_.interaction_mode != InteractionMode::kClickToTalk) {
-                ble_->SendUiState("ready", "", device_id);
-                return;
+void VoiceStickCoordinator::RestoreVoiceMode(const std::string& device_id) {
+    if ((session_state_ == SessionState::kPendingConfirmation ||
+         session_state_ == SessionState::kPausedConfirmation) &&
+        active_device_id_ == device_id) {
+        ble_->StopAudioIn(device_id);
+        RefreshDeviceUiState(device_id);
+        return;
+    }
+    ble_->StartAudioIn(device_id, config_.interaction_mode);
+    SendDisplayState("ready", "", device_id);
+}
+
+bool VoiceStickCoordinator::CanUseDeviceInput(const std::string& device_id) {
+    std::lock_guard lock(firmware_mutex_);
+    const auto info = firmware_info_by_device_id_.find(device_id);
+    return info != firmware_info_by_device_id_.end() && info->second.reported_on_connection &&
+           !info->second.requires_input_firmware;
+}
+
+void VoiceStickCoordinator::HandleButtonEvent(const std::string& device_id,
+                                              const std::string& button,
+                                              bool is_down,
+                                              std::uint32_t timestamp_ms) {
+    if (!CanUseDeviceInput(device_id)) return;
+    if (button == "primary") {
+        if (is_down) {
+            if (!HandleFrontButtonDuringPendingPaste(device_id) &&
+                session_state_ != SessionState::kReady &&
+                !active_capture_utterance_.contains(device_id)) {
+                RefreshDeviceUiState(device_id);
             }
-            if (HasActiveSubtitleSession(device_id)) {
-                HandleSubtitlePrimaryButtonUp(device_id);
-            } else {
-                HandleSubtitlePrimaryButtonDown(event.session_id, device_id);
-            }
-            return;
         }
-        if (HandleFrontButtonDuringPendingPaste(device_id)) return;
-        if (config_.interaction_mode != InteractionMode::kClickToTalk) {
-            ble_->SendUiState("ready", "", device_id);
-            return;
+    } else if (button == "secondary") {
+        if (is_down) {
+            secondary_down_ms_[device_id] = timestamp_ms;
+        } else if (const auto press = secondary_down_ms_.extract(device_id);
+                   !press.empty() && timestamp_ms >= press.mapped() &&
+                   timestamp_ms - press.mapped() < 3000) {
+            HandleSecondaryButtonClick(device_id);
         }
-        if (session_state_ == SessionState::kRecording && active_device_id_ == device_id) {
-            HandlePrimaryButtonUp(device_id);
-        } else if (session_state_ == SessionState::kFinalizing && active_device_id_ == device_id) {
-            ble_->SendUiState("thinking", "", device_id);
-        } else {
-            HandlePrimaryButtonDown(event.session_id, device_id);
-        }
-    } else if (event.button == "secondary") {
-        HandleSecondaryButtonClick(device_id);
     }
 }
 
@@ -391,7 +446,7 @@ void VoiceStickCoordinator::HandlePrimaryButtonDown(std::optional<std::uint32_t>
         return;
     }
     if (!session_id.has_value() || *session_id == 0) {
-        ble_->SendUiState("ready", "", device_id);
+        SendDisplayState("ready", "", device_id);
         return;
     }
 
@@ -416,13 +471,13 @@ void VoiceStickCoordinator::HandlePrimaryButtonDown(std::optional<std::uint32_t>
     SendUiStateForActiveDevice("recording");
 }
 
-void VoiceStickCoordinator::HandlePrimaryButtonUp(const std::string& device_id) {
-    if (HasActiveSubtitleSession(device_id)) {
-        HandleSubtitlePrimaryButtonUp(device_id);
+void VoiceStickCoordinator::HandlePrimaryButtonUp(std::uint32_t session_id, const std::string& device_id) {
+    if (const auto subtitle = active_subtitle_sessions_.find(device_id); subtitle != active_subtitle_sessions_.end()) {
+        if (subtitle->second == session_id) HandleSubtitlePrimaryButtonUp(device_id);
         return;
     }
     std::lock_guard lock(audio_mutex_);
-    if (!active_session_id_.has_value() || active_device_id_ != device_id) return;
+    if (active_session_id_ != session_id || active_device_id_ != device_id) return;
     const double duration = CurrentRecordingDurationSeconds();
     if (duration < kMinimumRecordingDurationSeconds) {
         CancelShortRecording();
@@ -431,14 +486,31 @@ void VoiceStickCoordinator::HandlePrimaryButtonUp(const std::string& device_id) 
     }
 }
 
-void VoiceStickCoordinator::HandleAudioFrame(const AudioFrame& frame, const std::string& device_id) {
+void VoiceStickCoordinator::HandleAudioFrame(const AudioStreamFrame& frame, const std::string& device_id) {
+    if (!CanUseDeviceInput(device_id)) return;
     const auto t0 = std::chrono::steady_clock::now();
-    if (FindSubtitleCycle(device_id, frame.session_id)) {
-        HandleSubtitleAudioFrame(frame, device_id);
+
+    if (frame.IsStart()) {
+        std::uint32_t utterance_id = next_utterance_id_++;
+        if (next_utterance_id_ == 0) next_utterance_id_ = 1;
+        active_capture_utterance_[device_id] = utterance_id;
+        HandlePrimaryButtonDown(utterance_id, device_id);
+        if (frame.payload.empty() && !frame.IsEnd()) return;
+    }
+
+    const auto it = active_capture_utterance_.find(device_id);
+    if (it == active_capture_utterance_.end()) return;
+    const std::uint32_t utterance_id = it->second;
+    if (frame.IsEnd()) {
+        active_capture_utterance_.erase(it);
+    }
+
+    if (FindSubtitleCycle(device_id, utterance_id)) {
+        HandleSubtitleAudioFrame(frame, utterance_id, device_id);
         return;
     }
     std::lock_guard lock(audio_mutex_);
-    if (!active_session_id_.has_value() || frame.session_id != *active_session_id_ || active_device_id_ != device_id) {
+    if (!active_session_id_.has_value() || utterance_id != *active_session_id_ || active_device_id_ != device_id) {
         return;
     }
     if (frame.IsEnd() && frame.payload.empty()) {
@@ -457,14 +529,19 @@ void VoiceStickCoordinator::HandleAudioFrame(const AudioFrame& frame, const std:
     ++received_audio_frames_;
     auto ogg_chunk = ogg_muxer_.Append(frame.payload, frame.IsEnd());
     debug_audio_recorder_.Append(ogg_chunk);
+    const double duration = CurrentRecordingDurationSeconds();
     SendOrBufferOggChunk(
         ogg_chunk,
         frame.IsEnd(),
-        CurrentRecordingDurationSeconds() >= kMinimumRecordingDurationSeconds &&
+        duration >= kMinimumRecordingDurationSeconds &&
             (!waiting_for_audio_end_.load() || frame.IsEnd()));
     if (frame.IsEnd()) {
         CancelAudioEndTimeout();
         sent_final_audio_chunk_ = true;
+        if (!asr_started_ && duration < kMinimumRecordingDurationSeconds) {
+            CancelShortRecording();
+            return;
+        }
         active_session_id_.reset();
         debug_audio_recorder_.Finish();
         EnterFinalizing("audio_end");
@@ -478,10 +555,23 @@ void VoiceStickCoordinator::HandleAudioFrame(const AudioFrame& frame, const std:
     }
 }
 
+void VoiceStickCoordinator::HandleStreamClosed(const std::string& device_id,
+                                               std::uint16_t stream_id,
+                                               const std::string& reason) {
+    LogCoordinatorLine("stream closed dev=VS-" + device_id +
+                       " stream_id=" + std::to_string(stream_id) +
+                       " reason=" + reason);
+    if (const auto it = active_capture_utterance_.find(device_id); it != active_capture_utterance_.end()) {
+        const auto utterance_id = it->second;
+        active_capture_utterance_.erase(it);
+        HandlePrimaryButtonUp(utterance_id, device_id);
+    }
+}
+
 void VoiceStickCoordinator::HandleSubtitlePrimaryButtonDown(std::optional<std::uint32_t> session_id,
                                                             const std::string& device_id) {
     if (!session_id.has_value() || *session_id == 0) {
-        ble_->SendUiState("ready", "", device_id);
+        SendDisplayState("ready", "", device_id);
         return;
     }
     if (auto active = active_subtitle_sessions_.find(device_id);
@@ -495,7 +585,7 @@ void VoiceStickCoordinator::HandleSubtitlePrimaryButtonDown(std::optional<std::u
     }
     if (!asr_factory_) {
         ui_->ShowError("Subtitle ASR is not available", device_id, [this, device_id] {
-            ble_->SendUiState("ready", "", device_id);
+            SendDisplayState("ready", "", device_id);
         });
         return;
     }
@@ -510,13 +600,12 @@ void VoiceStickCoordinator::HandleSubtitlePrimaryButtonDown(std::optional<std::u
     subtitle_cycles_[{device_id, *session_id}] = std::move(cycle);
     active_subtitle_sessions_[device_id] = *session_id;
     ui_->ShowListening(device_id);
-    ble_->SendUiState("recording", "", device_id);
+    SendDisplayState("recording", "", device_id);
 }
 
 void VoiceStickCoordinator::HandleSubtitlePrimaryButtonUp(const std::string& device_id) {
     auto* cycle = FindActiveSubtitleCycle(device_id);
     if (!cycle) return;
-    const auto session_id = cycle->session_id;
     const double duration = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - cycle->started_at).count();
     if (duration < kMinimumRecordingDurationSeconds) {
@@ -527,12 +616,14 @@ void VoiceStickCoordinator::HandleSubtitlePrimaryButtonUp(const std::string& dev
     }
 }
 
-void VoiceStickCoordinator::HandleSubtitleAudioFrame(const AudioFrame& frame, const std::string& device_id) {
-    auto* cycle = FindSubtitleCycle(device_id, frame.session_id);
+void VoiceStickCoordinator::HandleSubtitleAudioFrame(const AudioStreamFrame& frame,
+                                                     std::uint32_t utterance_id,
+                                                     const std::string& device_id) {
+    auto* cycle = FindSubtitleCycle(device_id, utterance_id);
     if (!cycle) return;
     if (frame.IsEnd() && frame.payload.empty()) {
         CancelSubtitleAudioEndTimeout(cycle);
-        SendSubtitleFinalOggChunkIfNeeded(device_id, frame.session_id);
+        SendSubtitleFinalOggChunkIfNeeded(device_id, utterance_id);
         return;
     }
     if (frame.payload.empty()) return;
@@ -552,8 +643,14 @@ void VoiceStickCoordinator::HandleSubtitleAudioFrame(const AudioFrame& frame, co
                                  duration >= kMinimumRecordingDurationSeconds &&
                                      (!cycle->waiting_for_audio_end || frame.IsEnd()));
     if (frame.IsEnd()) {
+        cycle = FindSubtitleCycle(device_id, utterance_id);
+        if (!cycle) return;
         CancelSubtitleAudioEndTimeout(cycle);
         cycle->sent_final_audio_chunk = true;
+        if (!cycle->asr_started && duration < kMinimumRecordingDurationSeconds) {
+            CancelSubtitleCycle(device_id, "short_recording");
+            return;
+        }
         cycle->debug_audio_recorder.Finish();
         FinishSubtitleAudioInput(cycle);
     }
@@ -566,7 +663,7 @@ void VoiceStickCoordinator::BeginWaitingForSubtitleAudioEnd(SubtitleCycle* cycle
                        (reason.empty() ? std::string() : " reason=" + std::string(reason)));
     if (config_.interaction_mode != InteractionMode::kHoldToTalk) {
         ui_->SetStatus("Processing");
-        ble_->SendUiState("thinking", "", cycle->device_id);
+        SendDisplayState("thinking", "", cycle->device_id);
     }
     ScheduleSubtitleAudioEndTimeout(cycle->device_id, cycle->session_id);
 }
@@ -600,10 +697,10 @@ void VoiceStickCoordinator::FinishSubtitleAudioInput(SubtitleCycle* cycle) {
     if (!cycle) return;
     if (config_.interaction_mode == InteractionMode::kHoldToTalk) {
         ClearActiveSubtitleSession(cycle->device_id, cycle->session_id);
-        ble_->SendUiState("ready", "", cycle->device_id);
+        SendDisplayState("ready", "", cycle->device_id);
     } else {
         ui_->SetStatus("Processing");
-        ble_->SendUiState("thinking", "", cycle->device_id);
+        SendDisplayState("thinking", "", cycle->device_id);
     }
 }
 
@@ -628,7 +725,7 @@ void VoiceStickCoordinator::SendSubtitleFinalOggChunkIfNeeded(const std::string&
         if (was_active) {
             ui_->HideOverlay();
             ui_->SetStatus("Ready");
-            ble_->SendUiState("ready", "", device_id);
+            SendDisplayState("ready", "", device_id);
         }
         return;
     }
@@ -640,6 +737,9 @@ void VoiceStickCoordinator::SendSubtitleFinalOggChunkIfNeeded(const std::string&
     cycle->debug_audio_recorder.Append(final_chunk);
     cycle->debug_audio_recorder.Finish();
     SendOrBufferSubtitleOggChunk(cycle, final_chunk, true, true);
+    if (auto* updated = FindSubtitleCycle(device_id, session_id)) {
+        FinishSubtitleAudioInput(updated);
+    }
 }
 
 void VoiceStickCoordinator::SendOrBufferSubtitleOggChunk(SubtitleCycle* cycle,
@@ -854,7 +954,7 @@ void VoiceStickCoordinator::FinishSubtitleCycleWithError(const std::string& devi
     CancelSubtitleAudioEndTimeout(it->second.get());
     ClearActiveSubtitleSession(device_id, session_id);
     ui_->ShowError(message, device_id, [this, device_id] {
-        ble_->SendUiState("ready", "", device_id);
+        SendDisplayState("ready", "", device_id);
     });
     subtitle_cycles_.erase(it);
 }
@@ -870,7 +970,7 @@ void VoiceStickCoordinator::CancelSubtitleCycle(const std::string& device_id, st
     it->second->debug_audio_recorder.Discard();
     CancelSubtitleAudioEndTimeout(it->second.get());
     ui_->HideOverlay();
-    ble_->SendUiState("ready", "", device_id);
+    SendDisplayState("ready", "", device_id);
     ClearActiveSubtitleSession(device_id, session_id);
     subtitle_cycles_.erase(it);
 }
@@ -887,7 +987,7 @@ void VoiceStickCoordinator::FinishSubtitleCycle(const std::string& device_id,
     ClearActiveSubtitleSession(device_id, session_id);
     if (!HasActiveSubtitleSession(device_id)) {
         ui_->SetStatus("Ready");
-        ble_->SendUiState("ready", "", device_id);
+        SendDisplayState("ready", "", device_id);
     }
     subtitle_cycles_.erase(it);
 }
@@ -961,7 +1061,7 @@ void VoiceStickCoordinator::CancelSubtitleCyclesForDevice(const std::string& dev
         it = subtitle_cycles_.erase(it);
     }
     ui_->HideOverlay();
-    ble_->SendUiState("ready", "", device_id);
+    SendDisplayState("ready", "", device_id);
 }
 
 void VoiceStickCoordinator::ShowSubtitleText(const std::string& text,
@@ -1145,20 +1245,28 @@ void VoiceStickCoordinator::FinishRecognitionCycle() {
     buffered_ogg_chunks_.clear();
 }
 
-void VoiceStickCoordinator::UpdateDeviceFirmwareInfo(const StateEvent& event, const std::string& device_id) {
+void VoiceStickCoordinator::UpdateDeviceFirmwareInfo(const std::string& hardware,
+                                                     const std::string& firmware_version,
+                                                     bool requires_update,
+                                                     const std::string& device_id) {
     std::string hardware_to_save;
     std::string version_to_save;
     {
         std::lock_guard lock(firmware_mutex_);
         auto& info = firmware_info_by_device_id_[device_id];
-        if (!event.hardware.empty()) {
-            info.hardware = event.hardware;
-            hardware_to_save = event.hardware;
+        if (!hardware.empty()) {
+            info.hardware = hardware;
+            hardware_to_save = hardware;
         }
-        if (!event.firmware_version.empty()) {
-            info.current_version = event.firmware_version;
-            version_to_save = event.firmware_version;
+        if (!firmware_version.empty()) {
+            info.current_version = firmware_version;
+            version_to_save = firmware_version;
         }
+        if (requires_update && (!info.reported_on_connection || !info.requires_input_firmware)) {
+            pending_firmware_update_prompt_device_ids_.insert(device_id);
+        }
+        info.reported_on_connection = true;
+        info.requires_input_firmware = requires_update;
         info.error_message.clear();
     }
     if (!hardware_to_save.empty() || !version_to_save.empty()) {
@@ -1169,53 +1277,56 @@ void VoiceStickCoordinator::UpdateDeviceFirmwareInfo(const StateEvent& event, co
 
 void VoiceStickCoordinator::CheckFirmwareUpdatesIfNeeded(bool force, bool show_errors) {
     if (paired_device_ids_.empty() && !force) return;
-    {
-        std::lock_guard lock(firmware_mutex_);
-        if (firmware_manifest_check_in_flight_) return;
-        if (!force && has_last_firmware_manifest_check_at_ &&
-            std::chrono::steady_clock::now() - last_firmware_manifest_check_at_ < kFirmwareManifestCacheDuration) {
-            // Use the cached manifest to refresh any newly connected device info.
-        } else {
-            firmware_manifest_check_in_flight_ = true;
-            SetFirmwareChecking(true);
-            if (firmware_manifest_thread_.joinable()) {
-                firmware_manifest_thread_.join();
-            }
-            auto alive = alive_;
-            firmware_manifest_thread_ = std::thread([this, alive, show_errors] {
-                std::string error;
-                auto manifest = firmware_manifest_client_.FetchManifestSync(error);
-                if (!alive->load()) return;
-                {
-                    std::lock_guard callback_lock(firmware_mutex_);
-                    firmware_manifest_check_in_flight_ = false;
-                    for (auto& [_, info] : firmware_info_by_device_id_) {
-                        info.is_checking = false;
-                    }
-                    if (manifest.has_value()) {
-                        LogCoordinatorLine("firmware manifest version=" + manifest->version +
-                                           " hardware=" + manifest->hardware);
-                        latest_firmware_manifest_ = std::move(manifest);
-                        last_firmware_manifest_check_at_ = std::chrono::steady_clock::now();
-                        has_last_firmware_manifest_check_at_ = true;
-                        for (auto& [_, info] : firmware_info_by_device_id_) {
-                            info.error_message.clear();
-                        }
-                    } else {
-                        LogCoordinatorLine("firmware manifest check failed: " + error);
-                        for (const auto& device_id : paired_device_ids_) {
-                            if (show_errors || firmware_info_by_device_id_.contains(device_id)) {
-                                firmware_info_by_device_id_[device_id].error_message = error;
-                            }
-                        }
-                    }
-                }
-                RefreshFirmwareAvailability();
-            });
-            return;
-        }
+    std::unique_lock lock(firmware_mutex_);
+    if (firmware_manifest_check_in_flight_) return;
+    if (!force && has_last_firmware_manifest_check_at_ &&
+        std::chrono::steady_clock::now() - last_firmware_manifest_check_at_ < kFirmwareManifestCacheDuration) {
+        lock.unlock();
+        RefreshFirmwareAvailability();
+        return;
     }
-    RefreshFirmwareAvailability();
+
+    firmware_manifest_check_in_flight_ = true;
+    SetFirmwareChecking(true);
+    auto previous = std::move(firmware_manifest_thread_);
+    lock.unlock();
+    if (previous.joinable()) previous.join();
+    lock.lock();
+    firmware_manifest_thread_ = std::thread([this, alive = alive_, show_errors] {
+        std::map<std::string, FirmwareManifest> manifests;
+        std::map<std::string, std::string> errors;
+        for (auto hardware : FirmwareManifestClient::supported_hardware) {
+            const auto url = FirmwareManifestClient::ManifestUrlForHardware(hardware);
+            std::string error;
+            auto manifest = FirmwareManifestClient(url).FetchManifestSync(error);
+            if (!alive->load()) return;
+            if (manifest && IsFirmwareHardwareCompatible(hardware, {}, manifest->hardware)) {
+                manifests.emplace(url, std::move(*manifest));
+            } else {
+                errors.emplace(url, error.empty() ? "Firmware manifest does not match the device model." : error);
+            }
+        }
+        {
+            std::lock_guard callback_lock(firmware_mutex_);
+            firmware_manifest_check_in_flight_ = false;
+            for (auto& [url, manifest] : manifests) {
+                firmware_manifests_by_url_.insert_or_assign(url, std::move(manifest));
+            }
+            if (!manifests.empty()) {
+                last_firmware_manifest_check_at_ = std::chrono::steady_clock::now();
+                has_last_firmware_manifest_check_at_ = true;
+            }
+            for (auto& [_, info] : firmware_info_by_device_id_) {
+                info.is_checking = false;
+                const auto url = FirmwareManifestClient::ManifestUrlForHardware(info.hardware);
+                auto error = errors.find(url);
+                if (error != errors.end() && (show_errors || !firmware_manifests_by_url_.contains(url))) {
+                    info.error_message = error->second;
+                }
+            }
+        }
+        RefreshFirmwareAvailability();
+    });
 }
 
 void VoiceStickCoordinator::RefreshFirmwareAvailability() {
@@ -1227,39 +1338,22 @@ void VoiceStickCoordinator::RefreshFirmwareAvailability() {
             info.latest_version.clear();
             info.required_app_version.clear();
             info.update_available = false;
-            if (!latest_firmware_manifest_.has_value() ||
-                info.hardware.empty() ||
-                info.current_version.empty()) {
-                snapshot[device_id] = info;
-                continue;
-            }
-            if (!IsFirmwareManifestCompatible(info, *latest_firmware_manifest_)) {
-                LogCoordinatorLine("firmware availability VS-" + device_id +
-                                   " hardware=" + info.hardware +
-                                   " current=" + info.current_version +
-                                   " latest=" + latest_firmware_manifest_->version +
-                                   " update=false reason=hardware_mismatch manifest_hardware=" +
-                                   latest_firmware_manifest_->hardware);
-            } else if (!latest_firmware_manifest_->SupportsLinuxAppVersion(VOICESTICK_VERSION_STR)) {
-                info.required_app_version = latest_firmware_manifest_->minimum_linux_app_version;
-            } else {
-                info.latest_version = latest_firmware_manifest_->version;
-                info.update_available = FirmwareVersion::IsOlderThan(
-                    info.current_version, latest_firmware_manifest_->version);
-                if (ShouldShowFirmwareUpdatePromptAfterPairing(device_id, info)) {
-                    update_prompts.emplace_back(
-                        device_id,
-                        info.current_version,
-                        info.latest_version,
-                        FirmwareVersion::IsOlderThan(
-                            info.current_version,
-                            AppConfig::minimum_compatible_firmware_version));
+            const auto url = FirmwareManifestClient::ManifestUrlForHardware(info.hardware);
+            const auto feed = firmware_manifests_by_url_.find(url);
+            if (feed != firmware_manifests_by_url_.end() && !info.current_version.empty()) {
+                const auto& manifest = feed->second;
+                info.latest_version = manifest.version;
+                if (!manifest.SupportsLinuxAppVersion(VOICESTICK_VERSION_STR)) {
+                    info.required_app_version = manifest.minimum_linux_app_version;
+                } else {
+                    info.update_available = FirmwareVersion::IsOlderThan(info.current_version, manifest.version) &&
+                        (!info.requires_input_firmware || !FirmwareVersion::IsOlderThan(
+                            manifest.version, AppConfig::minimum_compatible_firmware_version));
+                    if (ShouldShowFirmwareUpdatePromptAfterPairing(device_id, info)) {
+                        update_prompts.emplace_back(device_id, info.current_version, info.latest_version,
+                                                    info.requires_input_firmware);
+                    }
                 }
-                LogCoordinatorLine("firmware availability VS-" + device_id +
-                                   " hardware=" + info.hardware +
-                                   " current=" + info.current_version +
-                                   " latest=" + info.latest_version +
-                                   " update=" + (info.update_available ? "true" : "false"));
             }
             snapshot[device_id] = info;
         }
@@ -1276,10 +1370,7 @@ bool VoiceStickCoordinator::ShouldShowFirmwareUpdatePromptAfterPairing(const std
         info.current_version.empty() || info.latest_version.empty()) {
         return false;
     }
-    if (!info.update_available) {
-        pending_firmware_update_prompt_device_ids_.erase(device_id);
-        return false;
-    }
+    if (!info.update_available) return false;
     pending_firmware_update_prompt_device_ids_.erase(device_id);
     return true;
 }
@@ -1322,9 +1413,13 @@ void VoiceStickCoordinator::SetSessionState(SessionState state, std::string_view
 
 void VoiceStickCoordinator::EnterReady(std::string_view reason, bool hide_overlay) {
     pause_confirmation_on_final_ = false;
+    const auto previous_device = active_device_id_;
     SetSessionState(SessionState::kReady, reason);
     ui_->SetStatus("Ready");
-    SendUiStateForActiveDevice("ready");
+    SendDisplayState("ready", "", previous_device);
+    if (previous_device) {
+        ble_->StartAudioIn(*previous_device, config_.interaction_mode);
+    }
     if (hide_overlay) ui_->HideOverlay();
     active_device_id_.reset();
 }
@@ -1338,6 +1433,9 @@ void VoiceStickCoordinator::EnterFinalizing(std::string_view reason) {
 void VoiceStickCoordinator::EnterPendingConfirmation(const std::string& text, std::string_view reason) {
     pending_paste_state_ = {PendingPasteKind::kWaitingToPaste, text};
     SetSessionState(SessionState::kPendingConfirmation, reason);
+    if (active_device_id_) {
+        ble_->StopAudioIn(*active_device_id_);
+    }
     SendUiStateForActiveDevice("pending_confirmation");
     if (config_.confirmation_countdown_ms <= 0) {
         ui_->HideOverlay([this, text] { CommitPendingPaste(text); });
@@ -1349,6 +1447,9 @@ void VoiceStickCoordinator::EnterPendingConfirmation(const std::string& text, st
 void VoiceStickCoordinator::EnterPausedConfirmation(const std::string& text, std::string_view reason) {
     pending_paste_state_ = {PendingPasteKind::kPaused, text};
     SetSessionState(SessionState::kPausedConfirmation, reason);
+    if (active_device_id_) {
+        ble_->StopAudioIn(*active_device_id_);
+    }
     ui_->ShowPausedFinal(text, active_device_id_);
     SendUiStateForActiveDevice("pending_confirmation");
 }
@@ -1364,30 +1465,48 @@ void VoiceStickCoordinator::EnterError(const std::string& message, std::string_v
 void VoiceStickCoordinator::RefreshDeviceUiState(const std::string& device_id) {
     switch (session_state_) {
     case SessionState::kRecording:
-        ble_->SendUiState(active_device_id_ == device_id ? "recording" : "ready", "", device_id);
+        SendDisplayState(active_device_id_ == device_id ? "recording" : "ready", "", device_id);
         break;
     case SessionState::kFinalizing:
-        ble_->SendUiState(active_device_id_ == device_id ? "thinking" : "ready", "", device_id);
+        SendDisplayState(active_device_id_ == device_id ? "thinking" : "ready", "", device_id);
         break;
     case SessionState::kPendingConfirmation:
     case SessionState::kPausedConfirmation:
         if (active_device_id_ == device_id) {
-            ble_->SendUiState("pending_confirmation", "", device_id);
+            SendDisplayState("pending_confirmation", "", device_id);
         } else {
-            ble_->SendUiState("ready", "", device_id);
+            SendDisplayState("ready", "", device_id);
         }
         break;
     case SessionState::kError:
-        ble_->SendUiState(active_device_id_ == device_id ? "error" : "ready", "", device_id);
+        SendDisplayState(active_device_id_ == device_id ? "error" : "ready", "", device_id);
         break;
     case SessionState::kReady:
-        ble_->SendUiState("ready", "", device_id);
+        SendDisplayState("ready", "", device_id);
         break;
     }
 }
 
+void VoiceStickCoordinator::SendDisplayState(const std::string& state,
+                                             const std::string& text,
+                                             const std::optional<std::string>& device_id) {
+    if (state == "ready") {
+        ble_->SetDisplay("idle", "", device_id);
+    } else if (state == "recording") {
+        ble_->SetDisplay("recording", "", device_id);
+    } else if (state == "thinking") {
+        ble_->SetDisplay("busy", text, device_id);
+    } else if (state == "pending_confirmation") {
+        ble_->SetDisplay("busy", "Press to send", device_id);
+    } else if (state == "error") {
+        ble_->SetDisplay("error", text, device_id);
+    } else {
+        ble_->SetDisplay("idle", text, device_id);
+    }
+}
+
 void VoiceStickCoordinator::SendUiStateForActiveDevice(const std::string& state, const std::string& text) {
-    ble_->SendUiState(state, text, active_device_id_);
+    SendDisplayState(state, text, active_device_id_);
 }
 
 OutputProfile VoiceStickCoordinator::OutputProfileForDevice(const std::optional<std::string>& device_id) const {
