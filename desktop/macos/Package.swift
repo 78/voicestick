@@ -8,8 +8,7 @@ let package = Package(
         .macOS(.v12)
     ],
     products: [
-        .executable(name: "VoiceStickApp", targets: ["VoiceStickApp"]),
-        .executable(name: "VoiceStickTennis", targets: ["VoiceStickTennis"])
+        .executable(name: "VoiceStickApp", targets: ["VoiceStickApp"])
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
@@ -17,8 +16,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "MotionInput"),
-        .executableTarget(name: "VoiceStickTennis", dependencies: ["MotionInput"]),
-        .testTarget(name: "VoiceStickTennisTests", dependencies: ["VoiceStickTennis", "MotionInput"]),
+        .testTarget(name: "MotionInputTests", dependencies: ["MotionInput"]),
         .executableTarget(
             name: "VoiceStickApp",
             dependencies: [

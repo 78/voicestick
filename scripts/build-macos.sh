@@ -89,9 +89,6 @@ lipo -create \
     "$X86_BUILD/VoiceStickApp" \
     -output "$APP_DIR/Contents/MacOS/VoiceStickApp"
 
-lipo -create "$ARM_BUILD/VoiceStickTennis" "$X86_BUILD/VoiceStickTennis" \
-    -output "$APP_DIR/Contents/MacOS/VoiceStickTennis"
-
 cp "$PLIST" "$APP_DIR/Contents/Info.plist"
 
 ICON_PATH="$DESKTOP_DIR/Resources/AppIcon.icns"

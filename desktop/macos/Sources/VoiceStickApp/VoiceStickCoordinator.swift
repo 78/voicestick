@@ -228,7 +228,6 @@ final class VoiceStickCoordinator {
         )
     }
 
-    private lazy var motionGame = MotionGameSession(ble: ble)
     private lazy var motionWebBridge = MotionWebBridge(ble: ble)
 
     private func isVoiceBusy() -> Bool {
@@ -236,15 +235,11 @@ final class VoiceStickCoordinator {
     }
 
     func start() {
-        motionGame.onDeviceReleased = { [weak self] id in
-            self?.restoreVoiceMode(for: id)
-        }
         motionWebBridge.onDeviceReleased = { [weak self] id in
             self?.restoreVoiceMode(for: id)
         }
         motionWebBridge.onClientActivated = { [weak self] in
             self?.secondaryButtonClicks.cancelAll()
-            self?.motionGame.stop()
         }
         do {
             try motionWebBridge.start { [weak self] in
@@ -260,17 +255,6 @@ final class VoiceStickCoordinator {
                     self?.isVoiceBusy() ?? true
                 }
                 self.motionWebBridge.openInBrowser()
-            } catch {
-                NSAlert(error: error).runModal()
-            }
-        }
-        statusController.onPlayTennis = { [weak self] in
-            guard let self else { return }
-            self.motionWebBridge.releaseMotionClient()
-            do {
-                try self.motionGame.open(executable: "VoiceStickTennis") { [weak self] in
-                    self?.isVoiceBusy() ?? true
-                }
             } catch {
                 NSAlert(error: error).runModal()
             }
@@ -632,7 +616,6 @@ final class VoiceStickCoordinator {
 
     private func restoreVoiceMode(for peripheralID: UUID) {
         guard ble.supportsProtocolV2(peripheralID),
-              !motionGame.ownsDevice(peripheralID),
               !motionWebBridge.ownsDevice(peripheralID) else { return }
         if activePeripheralID == peripheralID, !pendingPasteState.isIdle {
             return
@@ -681,7 +664,6 @@ final class VoiceStickCoordinator {
                 return
             }
         }
-        motionGame.receive(frame, from: peripheralID)
         motionWebBridge.receive(frame, from: peripheralID)
     }
 
@@ -698,12 +680,10 @@ final class VoiceStickCoordinator {
         }
 
         let webOwnsButton = motionWebBridge.handleButton(button, from: peripheralID)
-        let gameOwnsButton = motionGame.ownsButtons(from: peripheralID)
         if button.id == "secondary", let heldFor, heldFor < 3_000 {
-            motionGame.identify(peripheralID)
             motionWebBridge.identify(peripheralID)
         }
-        if webOwnsButton || gameOwnsButton { return }
+        if webOwnsButton { return }
 
         switch (button.id, button.action) {
         case ("primary", .down):
@@ -721,7 +701,7 @@ final class VoiceStickCoordinator {
 
     private func canDoubleClick(_ peripheralID: UUID) -> Bool {
         pendingPasteState.isIdle && !isVoiceBusy() && !motionWebBridge.hasActiveClient &&
-            !motionGame.ownsButtons(from: peripheralID) && ble.supportsProtocolV2(peripheralID)
+            ble.supportsProtocolV2(peripheralID)
     }
 
     private func handleSecondaryButton(_ button: ButtonInput, heldFor: UInt64?, peripheralID: UUID) {

@@ -72,7 +72,6 @@ final class StatusController {
     private var visibleOverlayKeys: Set<String> = []
 
     var onQuit: (() -> Void)?
-    var onPlayTennis: (() -> Void)?
     var onOpenTennisStudio: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onPairDevice: (() -> Void)?
@@ -220,12 +219,6 @@ final class StatusController {
             symbolName: "figure.tennis",
             action: #selector(openTennisStudio)
         ))
-        menu.addItem(makeMenuItem(
-            title: "休息一下 · 3D 网球 (旧版)",
-            symbolName: "sportscourt",
-            action: #selector(playTennis)
-        ))
-
 
         menu.addItem(makeMenuItem(
             title: "Pair Device...",
@@ -793,7 +786,6 @@ final class StatusController {
         rebuildMenu()
     }
 
-    @objc private func playTennis() { onPlayTennis?() }
     @objc private func openTennisStudio() { onOpenTennisStudio?() }
 
     @objc private func openSettings() {
