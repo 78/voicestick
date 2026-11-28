@@ -57,6 +57,8 @@ constexpr UINT kMenuTranslationsPerDevice = 24;
 #define VOICESTICK_APPCAST_URL "https://78.github.io/voicestick/appcast.xml"
 #endif
 
+constexpr wchar_t kWebFlasherUrl[] = L"https://78.github.io/voicestick/#flash";
+
 std::atomic<HWND> updater_window{nullptr};
 
 void RequestShutdownForAppUpdate() {
@@ -271,6 +273,9 @@ void Win32App::SetConnectedDevices(const std::vector<ConnectedDevice>& devices) 
     DispatchToUi([this, devices] {
         connected_devices_ = devices;
         for (const auto& device : devices) reconnecting_devices_.erase(device.id);
+        std::erase_if(shown_firmware_requirements_, [&devices](const std::string& device_id) {
+            return std::ranges::find(devices, device_id, &ConnectedDevice::id) == devices.end();
+        });
         std::erase_if(battery_status_by_device_id_, [&devices](const auto& entry) {
             return std::none_of(devices.begin(), devices.end(), [&entry](const ConnectedDevice& device) {
                 return device.id == entry.first;
@@ -395,14 +400,23 @@ void Win32App::CheckFirmwareReminders() {
         (firmware_update_dialog_ && IsWindowVisible(firmware_update_dialog_->hwnd()))) return;
 
     for (const auto& device : connected_devices_) {
-        if (!device.supports_firmware_update ||
-            std::find(paired_device_ids_.begin(), paired_device_ids_.end(), device.id) == paired_device_ids_.end()) {
-            continue;
-        }
+        if (shown_firmware_requirements_.contains(device.id) ||
+            std::ranges::find(paired_device_ids_, device.id) == paired_device_ids_.end()) continue;
         const auto entry = firmware_info_map_.find(device.id);
         if (entry == firmware_info_map_.end()) continue;
         const auto& info = entry->second;
-        if (!info.reported_on_connection || info.is_checking || !info.error_message.empty() ||
+        if (!info.reported_on_connection || !info.requires_input_firmware) continue;
+        ShowFirmwareUpdatePrompt(device.id, info);
+        return;
+    }
+
+    for (const auto& device : connected_devices_) {
+        if (std::ranges::find(paired_device_ids_, device.id) == paired_device_ids_.end()) continue;
+        const auto entry = firmware_info_map_.find(device.id);
+        if (entry == firmware_info_map_.end()) continue;
+        const auto& info = entry->second;
+        if ((!device.supports_firmware_update && !info.requires_input_firmware) ||
+            !info.reported_on_connection || info.is_checking || !info.error_message.empty() ||
             info.latest_version.empty() || !info.update_available) continue;
         const auto& device_key = info.device_uuid.empty() ? device.id : info.device_uuid;
         if (!RecordFirmwareReminder(device_key, info.latest_version)) continue;
@@ -426,22 +440,63 @@ void Win32App::ShowFirmwareUpdatePrompt(std::string device_id, DeviceFirmwareInf
         firmware_update_dialog_->Show();
         return;
     }
-    auto message = L"VS-" + Utf16(device_id) + L" is running firmware " +
-                   Utf16(info.current_version) + L".\n\n";
-    if (info.requires_input_firmware) message += L"Update the device to use voice input.\n\n";
     const auto* unavailable = FirmwareUpdateUnavailableReason(device_id, info);
-    if (unavailable) {
-        message += L"Firmware " + Utf16(info.latest_version) + L" is available. " + unavailable;
-    } else {
-        message += L"Update to " + Utf16(info.latest_version) + L"?";
+    const bool can_install = info.update_available && !unavailable;
+    const bool offer_web_flasher = info.requires_input_firmware && info.update_available && unavailable;
+    const bool offer_app_update = info.requires_input_firmware && !info.required_app_version.empty();
+    auto message = L"VS-" + Utf16(device_id);
+    message += info.current_version.empty() ? L" needs a firmware update.\n\n"
+                                            : L" is running firmware " + Utf16(info.current_version) + L".\n\n";
+    if (info.requires_input_firmware) {
+        if (info.reported_on_connection &&
+            std::ranges::find(connected_devices_, device_id, &ConnectedDevice::id) != connected_devices_.end()) {
+            shown_firmware_requirements_.insert(device_id);
+        }
+        if (info.update_available && (info.reported_on_connection || !info.device_uuid.empty())) {
+            RecordFirmwareReminder(info.device_uuid.empty() ? device_id : info.device_uuid, info.latest_version);
+        }
+        message += L"Update the device firmware to use voice input with this version of VoiceStick.\n\n";
+        LogLine("Firmware update required for VS-" + device_id);
     }
+
+    if (can_install) {
+        message += L"Update to " + Utf16(info.latest_version) + L"?";
+    } else if (offer_web_flasher) {
+        message += L"Firmware " + Utf16(info.latest_version) + L" is available. " + unavailable +
+                   L"\n\nOpen the VoiceStick web flasher to update over USB?";
+    } else if (offer_app_update) {
+        message += L"Update VoiceStick to " + Utf16(info.required_app_version) +
+                   L" or later before updating the device firmware.\n\nCheck for app updates now?";
+    } else if (info.is_checking) {
+        message += L"Checking for compatible firmware. Use Check for Firmware Updates in the device menu to see the result.";
+    } else if (!info.error_message.empty()) {
+        message += L"Could not check for compatible firmware. " + Utf16(info.error_message) +
+                   L"\n\nTo retry, select Check for Firmware Updates in the device menu.";
+    } else if (info.requires_input_firmware) {
+        message += L"No compatible firmware is available from the update server yet. "
+                   L"Use Check for Firmware Updates in the device menu to check again later.";
+    } else if (unavailable) {
+        message += L"Firmware " + Utf16(info.latest_version) + L" is available. " + unavailable;
+    }
+
+    const bool can_take_action = can_install || offer_web_flasher || offer_app_update;
     is_showing_firmware_prompt_ = true;
     const int result = MessageBoxW(
         hwnd_, message.c_str(),
         info.requires_input_firmware ? L"Firmware update required" : L"Firmware update available",
-        MB_ICONINFORMATION | MB_SETFOREGROUND | (unavailable ? MB_OK : (MB_YESNO | MB_DEFBUTTON2)));
+        MB_ICONINFORMATION | MB_SETFOREGROUND | (can_take_action ? (MB_YESNO | MB_DEFBUTTON2) : MB_OK));
     is_showing_firmware_prompt_ = false;
-    if (result == IDYES && !is_shutting_down_) StartFirmwareUpdate(device_id, info.latest_version);
+    if (result != IDYES || is_shutting_down_) return;
+    if (can_install) {
+        StartFirmwareUpdate(device_id, info.latest_version);
+    } else if (offer_web_flasher) {
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd_, L"open", kWebFlasherUrl, nullptr, nullptr, SW_SHOWNORMAL)) <= 32) {
+            const auto error = std::wstring(L"Could not open the VoiceStick web flasher.\n\n") + kWebFlasherUrl;
+            MessageBoxW(hwnd_, error.c_str(), L"Firmware update required", MB_ICONWARNING | MB_OK | MB_SETFOREGROUND);
+        }
+    } else if (offer_app_update) {
+        win_sparkle_check_update_with_ui();
+    }
 }
 
 void Win32App::ShowAppUpdateRequiredForFirmware(const std::string& minimum_version) {
@@ -1219,7 +1274,9 @@ void Win32App::CheckDeviceFirmwareUpdates(std::string device_id) {
                 manual_firmware_check_device_.reset();
                 return;
             }
-            if (!result.required_app_version.empty()) {
+            if (result.requires_input_firmware) {
+                ShowFirmwareUpdatePrompt(device_id, std::move(result));
+            } else if (!result.required_app_version.empty()) {
                 ShowAppUpdateRequiredForFirmware(result.required_app_version);
             } else if (result.update_available) {
                 if (result.reported_on_connection || !result.device_uuid.empty()) {

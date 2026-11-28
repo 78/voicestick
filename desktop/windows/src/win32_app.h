@@ -114,6 +114,7 @@ private:
     std::uint64_t firmware_info_revision_ = 0;
     std::optional<std::string> manual_firmware_check_device_;
     std::set<std::pair<std::string, std::string>> seen_firmware_reminders_;
+    std::set<std::string> shown_firmware_requirements_;
     std::optional<PairedDeviceEntry> pending_pairing_entry_;
     bool has_recoverable_input_ = false;
     bool is_shutting_down_ = false;
