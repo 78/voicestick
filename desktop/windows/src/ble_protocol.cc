@@ -447,6 +447,11 @@ ByteVector BleProtocol::LegacyGetDeviceInfoPayload() {
     return ByteVector(json.begin(), json.end());
 }
 
+ByteVector BleProtocol::LegacyUiStateReadyPayload() {
+    const std::string_view json = R"({"event":"ui_state","state":"ready","text":""})";
+    return ByteVector(json.begin(), json.end());
+}
+
 ByteVector BleProtocol::OtaBeginPayload(std::uint32_t image_size, std::uint32_t transfer_id) {
     ByteVector data = {1, ota_type_begin, 12, 0};
     AppendLe32(data, image_size);

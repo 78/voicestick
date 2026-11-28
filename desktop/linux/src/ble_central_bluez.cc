@@ -513,8 +513,11 @@ struct BleCentralBluez::Impl {
             if (it == control_paths.end()) return;
             control_path = it->second;
         }
-        WriteFramesAsync(connection, control_path, {BleProtocol::LegacyGetDeviceInfoPayload()});
-        LogBle("Legacy get_device_info sent to " + device_id);
+        WriteFramesAsync(connection, control_path, {
+            BleProtocol::LegacyGetDeviceInfoPayload(),
+            BleProtocol::LegacyUiStateReadyPayload(),
+        });
+        LogBle("Legacy get_device_info + ready sent to " + device_id);
     }
 
     void StartV2Handshake(const std::string& device_id) {
@@ -765,6 +768,16 @@ struct BleCentralBluez::Impl {
                 } else if (UuidMatch(uuid, kControlTxUuid)) {
                     if (payload.size() >= 4 && payload[0] == 1 && payload[1] == 0x10) {
                         if (auto legacy = BleProtocol::ParseLegacyDeviceInfo(payload)) {
+                            std::string control_path;
+                            {
+                                std::lock_guard lock(impl->mutex);
+                                auto it = impl->control_paths.find(dev_id);
+                                if (it != impl->control_paths.end()) control_path = it->second;
+                            }
+                            if (!control_path.empty()) {
+                                WriteFramesAsync(impl->connection, control_path,
+                                                 {BleProtocol::LegacyUiStateReadyPayload()});
+                            }
                             RunOnUiThread([owner, dev_id, info = std::move(*legacy)] {
                                 if (owner->on_legacy_device_info) owner->on_legacy_device_info(dev_id, info);
                             });

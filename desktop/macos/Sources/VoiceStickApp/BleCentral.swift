@@ -77,6 +77,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         var initialized = false
         var info: DeviceInfoResult?
         var legacyInfo: LegacyDeviceInfo?
+        var legacyReadySentAt: TimeInterval?
 
         var nextRpcID = 1
         var nextTxMessageID: UInt8 = 0
@@ -120,6 +121,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var otaCharacteristics: [UUID: CBCharacteristic] = [:]
     private var sessions: [UUID: PeripheralSession] = [:]
     private var firmwareUpdateSession: FirmwareUpdateSession?
+    private var pendingFirmwareStartWorkItem: DispatchWorkItem?
     private var isWorkspaceSleeping = false
 
     var onConnectionChange: (([ConnectedVoiceStickDevice]) -> Void)?
@@ -471,9 +473,15 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             completion(.failure(FirmwareUpdateError.otaWriteTooSmall))
             return
         }
+        let transferID = UInt32.random(in: 1...UInt32.max)
+        let isLegacy = sessions[peripheralID]?.info == nil
+        if isLegacy {
+            sendLegacyReadyIfNeeded(for: peripheralID)
+        }
+        NSLog("BLE OTA start dev=VS-\(deviceID) bytes=\(image.count) chunk=\(chunkSize) legacy=\(isLegacy)")
         firmwareUpdateSession = FirmwareUpdateSession(
             peripheralID: peripheralID,
-            transferID: UInt32.random(in: 1...UInt32.max),
+            transferID: transferID,
             image: image,
             chunkSize: chunkSize,
             progress: progress,
@@ -484,6 +492,21 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             totalBytes: image.count,
             isDeviceConfirmed: true
         ))
+        pendingFirmwareStartWorkItem?.cancel()
+        pendingFirmwareStartWorkItem = nil
+        if isLegacy, let sentAt = sessions[peripheralID]?.legacyReadySentAt {
+            let settleDelay = max(0, 0.8 - (ProcessInfo.processInfo.systemUptime - sentAt))
+            if settleDelay > 0.05 {
+                let workItem = DispatchWorkItem { [weak self] in
+                    guard let self, self.firmwareUpdateSession?.transferID == transferID else { return }
+                    self.pendingFirmwareStartWorkItem = nil
+                    self.sendNextFirmwareUpdateFrame()
+                }
+                pendingFirmwareStartWorkItem = workItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay, execute: workItem)
+                return
+            }
+        }
         sendNextFirmwareUpdateFrame()
     }
 
@@ -564,8 +587,11 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     private func handleConnectionClosed(_ peripheral: CBPeripheral, error: Error?) {
+        let deviceID = deviceID(for: peripheral.identifier) ?? "unknown"
+        if let error {
+            NSLog("BLE VS-\(deviceID) disconnected error=\(error.localizedDescription)")
+        }
         if (error as? CBError)?.code == .peerRemovedPairingInformation {
-            let deviceID = deviceID(for: peripheral.identifier) ?? "unknown"
             NSLog("BLE VS-\(deviceID) removed its pairing with this Mac; forget it in Bluetooth settings and pair again")
             peerRemovedPairingIDs.insert(peripheral.identifier)
         }
@@ -692,10 +718,26 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private func probeLegacyDeviceInfo(for peripheralID: UUID) {
         guard sessions[peripheralID]?.info == nil,
-              sessions[peripheralID]?.legacyInfo == nil,
               let peripheral = peripherals[peripheralID],
               let control = controlCharacteristics[peripheralID] else { return }
-        peripheral.writeValue(BleProtocol.legacyDeviceInfoRequest, for: control, type: .withoutResponse)
+        if sessions[peripheralID]?.legacyInfo == nil {
+            peripheral.writeValue(BleProtocol.legacyDeviceInfoRequest, for: control, type: .withoutResponse)
+        }
+        sendLegacyReadyIfNeeded(for: peripheralID)
+    }
+
+    private func sendLegacyReadyIfNeeded(for peripheralID: UUID) {
+        guard let session = sessions[peripheralID],
+              session.info == nil,
+              session.legacyReadySentAt == nil,
+              let peripheral = peripherals[peripheralID],
+              let control = controlCharacteristics[peripheralID] else { return }
+        // Legacy 0.4.x firmware only raises the BLE supervision timeout to 6s
+        // (via voice_ble_request_slow_interval) after receiving ui_state=ready.
+        // Without it, synchronous flash erase in esp_ota_begin drops the link.
+        peripheral.writeValue(BleProtocol.legacyUIStateReady, for: control, type: .withoutResponse)
+        session.legacyReadySentAt = ProcessInfo.processInfo.systemUptime
+        NSLog("BLE sent legacy ui_state=ready dev=VS-\(deviceID(for: peripheralID) ?? "unknown")")
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -731,6 +773,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         if data[0] == 1 {
             if let legacy = BleProtocol.parseLegacyDeviceInfo(data), session.info == nil {
                 session.legacyInfo = legacy
+                sendLegacyReadyIfNeeded(for: peripheralID)
                 onLegacyDeviceInfo?(peripheralID, legacy)
             }
             return
@@ -938,7 +981,10 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     private func failFirmwareUpdate(_ error: Error) {
+        pendingFirmwareStartWorkItem?.cancel()
+        pendingFirmwareStartWorkItem = nil
         guard let session = firmwareUpdateSession else { return }
+        NSLog("BLE OTA failed dev=VS-\(deviceID(for: session.peripheralID) ?? "unknown"): \(error.localizedDescription)")
         if let peripheral = peripherals[session.peripheralID],
            let characteristic = otaCharacteristics[session.peripheralID] {
             let payload = BleProtocol.otaAbortPayload(transferID: session.transferID)

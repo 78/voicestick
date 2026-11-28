@@ -2,11 +2,12 @@ import AppKit
 
 final class FirmwareUpdateWindowController: NSWindowController {
     private let titleLabel = NSTextField(labelWithString: "Updating Firmware")
-    private let detailLabel = NSTextField(labelWithString: "Preparing update...")
+    private let detailLabel = NSTextField(wrappingLabelWithString: "Preparing update...")
     private let progressIndicator = NSProgressIndicator()
     private let percentLabel = NSTextField(labelWithString: "0%")
     private let speedLabel = NSTextField(labelWithString: "Speed --")
-    private let timeLabel = NSTextField(labelWithString: "Estimating time remaining")
+    private let timeLabel = NSTextField(wrappingLabelWithString: "Estimating time remaining")
+    private let webFlasherButton = NSButton(title: "Open Web Flasher", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let closeButton = NSButton(title: "Close", target: nil, action: nil)
     private let startedAt = Date()
@@ -15,7 +16,7 @@ final class FirmwareUpdateWindowController: NSWindowController {
 
     init(fileName: String) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 190),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 220),
             styleMask: [.titled],
             backing: .buffered,
             defer: false
@@ -78,9 +79,21 @@ final class FirmwareUpdateWindowController: NSWindowController {
             percentLabel.stringValue = "100%"
             timeLabel.stringValue = "Done"
         case .failure(let error):
-            titleLabel.stringValue = "Update Failed"
+            let isCancelled: Bool
+            if case .firmwareUpdateCancelled = error as? BleCentral.FirmwareUpdateError {
+                isCancelled = true
+            } else {
+                isCancelled = false
+            }
+            titleLabel.stringValue = isCancelled ? "Update Cancelled" : "Update Failed"
             detailLabel.stringValue = error.localizedDescription
-            timeLabel.stringValue = "The device kept its current firmware."
+            speedLabel.isHidden = true
+            timeLabel.stringValue = isCancelled
+                ? "The device kept its current firmware."
+                : "The device kept its current firmware. You can also flash over USB on the VoiceStick website."
+            webFlasherButton.isHidden = isCancelled
+            webFlasherButton.keyEquivalent = isCancelled ? "" : "\r"
+            closeButton.keyEquivalent = isCancelled ? "\r" : "\u{1b}"
         }
     }
 
@@ -98,7 +111,7 @@ final class FirmwareUpdateWindowController: NSWindowController {
         detailLabel.stringValue = fileName
         detailLabel.lineBreakMode = .byTruncatingMiddle
         detailLabel.textColor = .secondaryLabelColor
-        detailLabel.maximumNumberOfLines = 1
+        detailLabel.maximumNumberOfLines = 2
 
         progressIndicator.isIndeterminate = false
         progressIndicator.minValue = 0
@@ -116,12 +129,14 @@ final class FirmwareUpdateWindowController: NSWindowController {
         percentLabel.widthAnchor.constraint(equalToConstant: 42).isActive = true
 
         timeLabel.textColor = .secondaryLabelColor
+        timeLabel.maximumNumberOfLines = 3
         speedLabel.textColor = .secondaryLabelColor
 
         let detailRow = NSStackView()
         detailRow.orientation = .horizontal
-        detailRow.alignment = .centerY
+        detailRow.alignment = .top
         detailRow.spacing = 12
+        detailRow.detachesHiddenViews = true
         detailRow.addArrangedSubview(speedLabel)
         detailRow.addArrangedSubview(timeLabel)
 
@@ -129,13 +144,18 @@ final class FirmwareUpdateWindowController: NSWindowController {
         buttonRow.orientation = .horizontal
         buttonRow.alignment = .centerY
         buttonRow.spacing = 8
+        buttonRow.detachesHiddenViews = true
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        webFlasherButton.target = self
+        webFlasherButton.action = #selector(openWebFlasher)
+        webFlasherButton.isHidden = true
         cancelButton.target = self
         cancelButton.action = #selector(cancelUpdate)
         closeButton.target = self
         closeButton.action = #selector(closeWindow)
         closeButton.isEnabled = false
+        buttonRow.addArrangedSubview(webFlasherButton)
         buttonRow.addArrangedSubview(spacer)
         buttonRow.addArrangedSubview(cancelButton)
         buttonRow.addArrangedSubview(closeButton)
@@ -151,10 +171,17 @@ final class FirmwareUpdateWindowController: NSWindowController {
             stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
             stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 22),
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -18),
-            progressIndicator.widthAnchor.constraint(greaterThanOrEqualToConstant: 300),
+            detailLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            progressIndicator.widthAnchor.constraint(greaterThanOrEqualToConstant: 320),
             progressRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            detailRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             buttonRow.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
+    }
+
+    @objc private func openWebFlasher() {
+        let url = URL(string: "#flash", relativeTo: AppConfig.websiteURL)?.absoluteURL ?? AppConfig.websiteURL
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func closeWindow() {

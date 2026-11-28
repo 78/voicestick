@@ -1328,6 +1328,12 @@ void Win32App::StartFirmwareUpdate(const std::string& device_id, std::string_vie
     firmware_update_dialog_->on_cancel = [this] {
         if (coordinator_) coordinator_->CancelFirmwareUpdate();
     };
+    firmware_update_dialog_->on_open_web_flasher = [this] {
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd_, L"open", kWebFlasherUrl, nullptr, nullptr, SW_SHOWNORMAL)) <= 32) {
+            const auto error = std::wstring(L"Could not open the VoiceStick web flasher.\n\n") + kWebFlasherUrl;
+            MessageBoxW(hwnd_, error.c_str(), L"Firmware update failed", MB_ICONWARNING | MB_OK | MB_SETFOREGROUND);
+        }
+    };
     firmware_update_dialog_->Show();
     coordinator_->UpdateFirmwareFromLatest(
         device_id,

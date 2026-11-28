@@ -82,6 +82,7 @@ private:
         bool control_tx_subscribed = false;
         bool ota_state_subscribed = false;
         std::atomic_bool ready{false};
+        std::atomic_bool legacy_ready_sent{false};
         bool initialized = false;
         ControlReassembler control_reassembler;
         std::uint8_t next_control_msg_id = 1;

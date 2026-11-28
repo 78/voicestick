@@ -21,6 +21,7 @@ public:
     void Finish(bool success, const std::string& message);
 
     std::function<void()> on_cancel;
+    std::function<void()> on_open_web_flasher;
 
 private:
     static INT_PTR CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
@@ -39,6 +40,7 @@ private:
     HWND detail_label_ = nullptr;
     HWND progress_bar_ = nullptr;
     HWND percent_label_ = nullptr;
+    HWND web_flasher_button_ = nullptr;
     HWND cancel_button_ = nullptr;
     HWND close_button_ = nullptr;
     HFONT ui_font_ = nullptr;
@@ -48,8 +50,8 @@ private:
     std::vector<BYTE> dialog_template_;
     std::vector<HWND> all_controls_;
 
-    static constexpr int kClientWidth = 430;
-    static constexpr int kClientHeight = 190;
+    static constexpr int kClientWidth = 440;
+    static constexpr int kClientHeight = 205;
 };
 
 } // namespace voicestick

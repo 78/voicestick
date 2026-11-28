@@ -398,6 +398,7 @@ enum BleProtocol {
     private static let otaDataHeaderLength: UInt8 = 12
 
     static let legacyDeviceInfoRequest = Data(#"{"event":"get_device_info"}"#.utf8)
+    static let legacyUIStateReady = Data(#"{"event":"ui_state","state":"ready","text":""}"#.utf8)
 
     static func encodeControlFrames(jsonData: Data, maximumWriteLength: Int, messageID: inout UInt8) -> [Data] {
         guard !jsonData.isEmpty, jsonData.count <= maxControlMessageBytes else { return [] }

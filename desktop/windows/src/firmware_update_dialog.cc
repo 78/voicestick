@@ -15,6 +15,7 @@ namespace {
 
 constexpr UINT kCancelId = 101;
 constexpr UINT kCloseId = 102;
+constexpr UINT kWebFlasherId = 103;
 
 std::wstring Utf16(std::string_view text) {
     if (text.empty()) return {};
@@ -107,8 +108,16 @@ void FirmwareUpdateDialog::Finish(bool success, const std::string& message) {
         SendMessageW(progress_bar_, PBM_SETPOS, 100, 0);
         SetText(percent_label_, L"100%");
     } else {
-        SetText(title_label_, L"Update Failed");
-        SetText(detail_label_, Utf16(message.empty() ? "Firmware update failed." : message));
+        const bool cancelled = message == "Firmware update cancelled.";
+        SetText(title_label_, cancelled ? L"Update Cancelled" : L"Update Failed");
+        std::wstring detail = Utf16(message.empty() ? "Firmware update failed." : message);
+        if (!cancelled) {
+            detail += L"\nYou can also flash firmware over USB on the VoiceStick website.";
+        }
+        SetText(detail_label_, detail);
+        if (web_flasher_button_ && !cancelled) {
+            ShowWindow(web_flasher_button_, SW_SHOW);
+        }
     }
 }
 
@@ -129,6 +138,10 @@ INT_PTR CALLBACK FirmwareUpdateDialog::DialogProc(HWND hwnd, UINT message, WPARA
 INT_PTR FirmwareUpdateDialog::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
     switch (message) {
     case WM_COMMAND:
+        if (LOWORD(w_param) == kWebFlasherId) {
+            if (on_open_web_flasher) on_open_web_flasher();
+            return TRUE;
+        }
         if (LOWORD(w_param) == kCancelId) {
             EnableWindow(cancel_button_, FALSE);
             SetText(title_label_, L"Cancelling Firmware Update");
@@ -214,23 +227,28 @@ void FirmwareUpdateDialog::BuildUi() {
                                             hwnd_, nullptr, instance_, nullptr));
     const auto detail = L"Downloading OTA firmware " + Utf16(version_) + L"...";
     detail_label_ = remember(CreateWindowExW(0, L"STATIC", detail.c_str(),
-                                             WS_CHILD | WS_VISIBLE, Dp(24), Dp(52), Dp(380), Dp(36),
+                                             WS_CHILD | WS_VISIBLE, Dp(24), Dp(50), Dp(390), Dp(52),
                                              hwnd_, nullptr, instance_, nullptr));
     progress_bar_ = remember(CreateWindowExW(0, PROGRESS_CLASSW, L"",
-                                             WS_CHILD | WS_VISIBLE, Dp(24), Dp(100), Dp(320), Dp(20),
+                                             WS_CHILD | WS_VISIBLE, Dp(24), Dp(112), Dp(330), Dp(20),
                                              hwnd_, nullptr, instance_, nullptr));
     SendMessageW(progress_bar_, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
     percent_label_ = remember(CreateWindowExW(0, L"STATIC", L"0%",
-                                              WS_CHILD | WS_VISIBLE | SS_RIGHT, Dp(350), Dp(100), Dp(55), Dp(20),
+                                              WS_CHILD | WS_VISIBLE | SS_RIGHT, Dp(360), Dp(112), Dp(55), Dp(20),
                                               hwnd_, nullptr, instance_, nullptr));
+    web_flasher_button_ = remember(CreateWindowExW(0, L"BUTTON", L"Open Web Flasher",
+                                                   WS_CHILD | BS_PUSHBUTTON,
+                                                   Dp(24), Dp(156), Dp(140), Dp(28),
+                                                   hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kWebFlasherId)),
+                                                   instance_, nullptr));
     cancel_button_ = remember(CreateWindowExW(0, L"BUTTON", L"Cancel",
                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                              Dp(235), Dp(145), Dp(80), Dp(28),
+                                              Dp(245), Dp(156), Dp(80), Dp(28),
                                               hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCancelId)),
                                               instance_, nullptr));
     close_button_ = remember(CreateWindowExW(0, L"BUTTON", L"Close",
                                              WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                             Dp(325), Dp(145), Dp(80), Dp(28),
+                                             Dp(335), Dp(156), Dp(80), Dp(28),
                                              hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCloseId)),
                                              instance_, nullptr));
     EnableWindow(close_button_, FALSE);
@@ -245,6 +263,7 @@ void FirmwareUpdateDialog::DestroyControls() {
     detail_label_ = nullptr;
     progress_bar_ = nullptr;
     percent_label_ = nullptr;
+    web_flasher_button_ = nullptr;
     cancel_button_ = nullptr;
     close_button_ = nullptr;
     if (ui_font_) {

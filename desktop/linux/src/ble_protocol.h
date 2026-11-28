@@ -181,6 +181,7 @@ public:
     static std::string RpcStreamStop(std::uint32_t id, std::uint16_t stream_id);
     static std::string RpcDisplaySet(std::uint32_t id, std::string_view scene, std::string_view text);
     static ByteVector LegacyGetDeviceInfoPayload();
+    static ByteVector LegacyUiStateReadyPayload();
 
     static ByteVector OtaBeginPayload(std::uint32_t image_size, std::uint32_t transfer_id);
     static ByteVector OtaDataPayload(std::uint32_t transfer_id, std::uint32_t offset, std::span<const std::uint8_t> chunk);

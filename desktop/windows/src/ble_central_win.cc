@@ -1361,6 +1361,10 @@ winrt::fire_and_forget BleCentralWin::ConnectDeviceAsync(std::uint64_t bluetooth
                            " preview=" + PreviewBytes(bytes));
                 if (bytes.size() >= 4 && bytes[0] == 1 && bytes[1] == 0x10) {
                     if (auto legacy = BleProtocol::ParseLegacyDeviceInfo(bytes)) {
+                        if (const auto current = weak_session.lock();
+                            current && current->ready && !current->legacy_ready_sent.exchange(true)) {
+                            WriteControlFramesAsync(current, {BleProtocol::LegacyUiStateReadyPayload()});
+                        }
                         DispatchToUiThread([this, device_id, info = std::move(*legacy)]() {
                             if (on_legacy_device_info) on_legacy_device_info(device_id, info);
                         });
@@ -1516,6 +1520,9 @@ void BleCentralWin::StartV2Handshake(const std::string& device_id, std::shared_p
 void BleCentralWin::ProbeLegacyDeviceInfo(const std::string& device_id, std::shared_ptr<DeviceSession> session) {
     if (!session || !session->ready) return;
     std::vector<ByteVector> frames = {BleProtocol::LegacyGetDeviceInfoPayload()};
+    if (!session->legacy_ready_sent.exchange(true)) {
+        frames.push_back(BleProtocol::LegacyUiStateReadyPayload());
+    }
     WriteControlFramesAsync(std::move(session), std::move(frames));
     LogBleLine("legacy get_device_info sent VS-" + device_id);
 }

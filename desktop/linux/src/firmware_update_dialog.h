@@ -21,6 +21,7 @@ private:
     GtkWindow* window_ = nullptr;
     GtkWidget* status_ = nullptr;
     GtkWidget* bar_ = nullptr;
+    GtkWidget* flasher_button_ = nullptr;
 };
 
 } // namespace voicestick

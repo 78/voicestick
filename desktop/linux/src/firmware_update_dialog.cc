@@ -15,6 +15,8 @@ FirmwareUpdateDialog::FirmwareUpdateDialog(GtkWindow* parent) {
     gtk_label_set_wrap(GTK_LABEL(status_), TRUE);
     bar_ = GTK_WIDGET(gtk_progress_bar_new());
     auto* start = gtk_button_new_with_label("Update");
+    flasher_button_ = gtk_button_new_with_label("Open Web Flasher");
+    gtk_widget_set_visible(flasher_button_, FALSE);
     auto* cancel = gtk_button_new_with_label("Cancel");
     auto* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_top(box, 16);
@@ -23,6 +25,7 @@ FirmwareUpdateDialog::FirmwareUpdateDialog(GtkWindow* parent) {
     gtk_box_append(GTK_BOX(box), status_);
     gtk_box_append(GTK_BOX(box), bar_);
     gtk_box_append(GTK_BOX(box), start);
+    gtk_box_append(GTK_BOX(box), flasher_button_);
     gtk_box_append(GTK_BOX(box), cancel);
     adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), box);
     adw_window_set_content(ADW_WINDOW(window_), toolbar);
@@ -30,6 +33,9 @@ FirmwareUpdateDialog::FirmwareUpdateDialog(GtkWindow* parent) {
     g_signal_connect(start, "clicked", reinterpret_cast<GCallback>(+[](GtkButton*, gpointer data) {
         auto* self = static_cast<FirmwareUpdateDialog*>(data);
         if (self->on_start) self->on_start();
+    }), this);
+    g_signal_connect(flasher_button_, "clicked", reinterpret_cast<GCallback>(+[](GtkButton*, gpointer) {
+        g_app_info_launch_default_for_uri("https://78.github.io/voicestick/#flash", nullptr, nullptr);
     }), this);
     g_signal_connect(cancel, "clicked", reinterpret_cast<GCallback>(+[](GtkButton*, gpointer data) {
         auto* self = static_cast<FirmwareUpdateDialog*>(data);
@@ -56,7 +62,15 @@ void FirmwareUpdateDialog::SetProgress(const FirmwareUpdateProgress& progress) {
 }
 
 void FirmwareUpdateDialog::Finish(bool success, const std::string& message) {
-    gtk_label_set_text(GTK_LABEL(status_), success ? "Update complete." : message.c_str());
+    if (success) {
+        gtk_label_set_text(GTK_LABEL(status_), "Update complete.");
+        if (flasher_button_) gtk_widget_set_visible(flasher_button_, FALSE);
+    } else {
+        std::string text = message.empty() ? "Firmware update failed." : message;
+        text += "\nYou can also flash firmware over USB on the VoiceStick website.";
+        gtk_label_set_text(GTK_LABEL(status_), text.c_str());
+        if (flasher_button_) gtk_widget_set_visible(flasher_button_, TRUE);
+    }
 }
 
 } // namespace voicestick
