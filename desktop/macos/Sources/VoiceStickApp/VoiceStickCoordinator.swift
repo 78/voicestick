@@ -248,7 +248,7 @@ final class VoiceStickCoordinator {
         } catch {
             NSLog("Failed to start MotionWebBridge: %@", error.localizedDescription)
         }
-        statusController.onOpenTennisStudio = { [weak self] in
+        statusController.onOpenGames = { [weak self] in
             guard let self else { return }
             do {
                 try self.motionWebBridge.start { [weak self] in

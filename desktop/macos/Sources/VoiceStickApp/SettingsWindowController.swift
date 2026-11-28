@@ -8,6 +8,8 @@ final class SettingsWindowController: NSWindowController {
     private let hotwordsScrollView = NSScrollView()
     private let debugAudioButton = NSButton(checkboxWithTitle: "Save debug audio files", target: nil, action: nil)
     private let debugAudioDirectoryField = NSTextField()
+    private let authorizedSitesLabel = NSTextField(labelWithString: "None")
+    private let revokeSitesButton = NSButton(title: "Revoke All", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
     private var currentDisplayedProvider: ASRProvider
     var onConfigChanged: ((AppConfig) -> Void)?
@@ -18,7 +20,7 @@ final class SettingsWindowController: NSWindowController {
         self.config = config
         currentDisplayedProvider = config.asrProvider
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 490),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 550),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -47,6 +49,7 @@ final class SettingsWindowController: NSWindowController {
     func show() {
         config = AppConfig.load()
         loadConfigIntoFields()
+        refreshAuthorizedSitesUI()
         showWindow(nil)
         window?.makeFirstResponder(providerPopup)
         window?.center()
@@ -85,6 +88,21 @@ final class SettingsWindowController: NSWindowController {
         debugDirRow.addArrangedSubview(chooseButton)
         debugAudioDirectoryField.widthAnchor.constraint(equalToConstant: 260).isActive = true
         stack.addArrangedSubview(row(label: "Audio Folder", control: debugDirRow))
+
+        stack.addArrangedSubview(sectionTitle("Games"))
+        let sitesRow = NSStackView()
+        sitesRow.orientation = .horizontal
+        sitesRow.alignment = .centerY
+        sitesRow.spacing = 8
+        authorizedSitesLabel.textColor = .secondaryLabelColor
+        authorizedSitesLabel.lineBreakMode = .byTruncatingTail
+        authorizedSitesLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 210).isActive = true
+        revokeSitesButton.target = self
+        revokeSitesButton.action = #selector(revokeAuthorizedWebsites)
+        sitesRow.addArrangedSubview(authorizedSitesLabel)
+        sitesRow.addArrangedSubview(revokeSitesButton)
+        stack.addArrangedSubview(row(label: "Websites", control: sitesRow))
+        stack.addArrangedSubview(hintRow("Websites authorized to use VoiceStick motion and buttons over ws://127.0.0.1:47892."))
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -264,6 +282,26 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func openConfigFolder() {
         AppConfig.openConfigDirectory()
+    }
+
+    @objc private func revokeAuthorizedWebsites() {
+        MotionWebBridge.revokeAllAuthorizedOrigins()
+        refreshAuthorizedSitesUI()
+        statusLabel.stringValue = "Authorized websites cleared."
+    }
+
+    private func refreshAuthorizedSitesUI() {
+        let sites = MotionWebBridge.authorizedOrigins()
+        if sites.isEmpty {
+            authorizedSitesLabel.stringValue = "None"
+            revokeSitesButton.isEnabled = false
+        } else if sites.count == 1 {
+            authorizedSitesLabel.stringValue = sites[0]
+            revokeSitesButton.isEnabled = true
+        } else {
+            authorizedSitesLabel.stringValue = "\(sites.count) authorized websites"
+            revokeSitesButton.isEnabled = true
+        }
     }
 
     private func selectedProvider() -> ASRProvider {

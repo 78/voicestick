@@ -211,6 +211,7 @@ struct AppConfig {
 
     static let defaultVoiceStickCloudURL = "wss://api.xiaozhi.me/voicestick/asr/"
     static let websiteURL = URL(string: "https://78.github.io/voicestick/")!
+    static let gamesURL = URL(string: "https://78.github.io/voicestick-games/")!
     static let firmwareManifestURLs: [String: URL] = {
         let base = websiteURL.appendingPathComponent("firmwares", isDirectory: true)
         return [

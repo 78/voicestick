@@ -672,20 +672,24 @@ See `docs/volcengine-asr.md` for the trimmed Volcengine API notes used by the de
 
 ---
 
-## Local Motion Game & Browser Bridge (macOS)
+## Open Local WebSocket Motion Bridge
 
-The macOS app owns all BLE connections and bridges 6-axis `imu` and `input` streams to local games and the browser studio:
+The desktop app owns all BLE connections and exposes an open loopback-only WebSocket bridge (`ws://127.0.0.1:47892`) so web games (including the official Games lobby at `https://78.github.io/voicestick-games/` and third-party websites in Chromium-based browsers) can use 6-axis `imu` and `input` streams without URL tokens:
 
-- **Native game transport**: Launches the game executable with a private bidirectional Unix datagram socket on stdin (`--motion-stdin`). Each datagram is one message.
-- **Discovery & role assignment**:
-  - The game sends a JSON role request such as `{"roles":["racket"]}` or `{"roles":["leftHand","rightHand"]}` (with optional `"swingToJoin":true`).
-  - The host returns an `InputRoster` with all authorized 6-axis IMU-capable devices (gated by `device.get_info` capabilities, not hardware model names), their local CoreBluetooth UUIDs, display names, role assignments, streaming IDs, and availability.
-  - Explicit selection sends the same `roles` plus an `assignments` object mapping each role to a distinct device UUID (empty object releases all roles). Single candidate + single role auto-binds; multiple candidates or two-role games require player choice. Assignments last for the game process lifetime.
-- **Local binary datagrams**:
-  - IMU sample: 36-byte datagram carrying the 20-byte normalized 6-axis motion sample (`01 11`, `uint16 seq`, `uint32 timestamp_ms`, 6 × `int16` accel/gyro) followed by the source device's 16-byte RFC UUID.
-  - Physical identification: 18-byte datagram (`01 13` followed by the 16-byte source UUID), derived by the host from a short `secondary` button press (`< 3000 ms`) on the `input` stream.
-- **Swing-to-join (host-side detection)**:
-  - When `"swingToJoin":true` is requested, the host opens 50 Hz 6-axis `imu` streams (with 3 s leases renewed every 0.8 s) on connected, non-busy candidates and runs quiet-grip + sustained-turn detection locally.
-  - The host waits 350 ms from the first swing report to detect ambiguity, retries with a fresh attempt ID if ambiguous, excludes previously bound devices for two-hand roles, and stops unselected `imu` streams on bind, 12-second timeout, cancellation, or game exit.
-  - Selected devices transition to 100 Hz `imu` streams and show their role label (`Racket`, `Left Hand`, or `Right Hand`) via `display.set`.
-- **Browser WebSocket bridge**: Exposes a loopback-only HTTP + WebSocket bridge forwarding roster updates, binary IMU samples, identification events, and button edges (`button`, `action`, `timestamp_ms`) for assigned devices.
+- **Authorization & security boundary**:
+  - No URL token is required; the host validates the browser-supplied HTTP `Origin` header (`scheme://host[:port]`).
+  - Loopback origins (`127.0.0.1`, `localhost`) are trusted automatically for local development.
+  - First-time external origins receive `{"type":"auth_required","origin":"..."}` while the desktop app shows a single modal prompt (**Allow Always** / **Allow Once** / **Deny**). While a prompt is open, concurrent unauthorized requests are rejected without stacking duplicate prompts. Users can revoke authorized origins anytime in Settings.
+  - Only 6-axis `imu` samples, `button` edges, and `identify` events are exposed; microphone audio, OTA, and pairing/settings are never exposed over WebSocket.
+- **Passive observation vs. game claim**:
+  - Upon authorization, the host sends `{"type":"welcome","protocol":1,"sampleRateHz":100,...}` followed by periodic `{"type":"roster","roster":{...}}` updates listing connected 6-axis-capable devices (gated by `device.get_info` capabilities).
+  - Merely connecting to the bridge (for example, while browsing the Games lobby) **does not claim any device**; all devices remain active for voice dictation until a game requests roles.
+- **Role assignment & swing-to-join**:
+  - A game claims 1 or 2 devices by sending a JSON `InputRequest`: `{"roles":["racket"],"swingToJoin":true}` (single-hand games like Tennis/Bowling) or `{"roles":["leftHand","rightHand"],"swingToJoin":true}` (two-hand games like Boxing/Dance), or explicit `{"roles":[...],"assignments":{"racket":"<uuid>"}}`.
+  - When `"swingToJoin":true` is requested, the host opens 50 Hz 6-axis `imu` streams (3 s leases renewed every 0.8 s) on non-busy candidates, detects quiet-grip + sustained-turn swings, settles ambiguity after 350 ms, and sequentially binds left/right roles for two-hand games.
+  - Bound devices switch to 100 Hz 6-axis `imu` streaming, pause `audio_in`, and display their role label (`Racket`, `Left Hand`, `Right Hand`) via `display.set`.
+  - Sending `{"action":"release"}` or closing the WebSocket immediately stops `imu` streaming and restores voice dictation.
+- **Data frames**:
+  - **Binary IMU sample (36 bytes)**: 20-byte normalized 6-axis motion sample (`01 11`, `uint16 seq`, `uint32 timestamp_ms`, 6 × `int16` accel/gyro) followed by the source device's 16-byte RFC UUID.
+  - **Button events (JSON text)**: `{"type":"button","deviceId":"...","button":"primary"|"secondary","action":"down"|"up","timestamp_ms":...}` forwarded for bound devices so games can support full remote menu navigation and in-game controls.
+  - **Identify event (JSON text)**: `{"type":"identify","deviceId":"..."}` emitted on short `secondary` clicks (`< 3000 ms`) while a game is bound.

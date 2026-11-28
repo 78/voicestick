@@ -3,19 +3,25 @@ import Foundation
 import MotionInput
 import Network
 
-/// Exposes a loopback-only HTTP + WebSocket bridge so Chrome (Three.js studio/game)
-/// can receive 100 Hz binary IMU frames, run swing-to-join binding, and save datasets.
+/// Exposes an open loopback WebSocket bridge (`ws://127.0.0.1:47892`) so web games
+/// can receive 100 Hz binary 6-axis IMU frames, run swing-to-join binding, and handle buttons
+/// after one-time user authorization per website Origin.
 final class MotionWebBridge {
     static let defaultHTTPPort: UInt16 = 47891
     static let defaultWSPort: UInt16 = 47892
+    static let authorizedOriginsDefaultsKey = "authorizedMotionOrigins"
+    static let didRevokeOriginsNotification = Notification.Name("VoiceStickMotionWebBridgeDidRevokeOrigins")
 
     private let ble: BleCentral
     private let queue = DispatchQueue(label: "VoiceStickApp.MotionWebBridge")
-    private let sessionToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
 
     private var httpListener: NWListener?
     private var wsListener: NWListener?
     private var activeClient: NWConnection?
+    private var activeClientOrigin: String?
+    private var pendingOrigins: [String] = []
+    private var sessionAuthorizedOrigins = Set<String>()
+    private var isPromptingAuthorization = false
     private var inFlightBinaryFrames = 0
 
     // Motion session state (mirrors MotionGameSession, driven on main queue)
@@ -40,6 +46,44 @@ final class MotionWebBridge {
         self.ble = ble
         self.httpPort = httpPort
         self.wsPort = wsPort
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleOriginsRevoked),
+            name: Self.didRevokeOriginsNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    static func authorizedOrigins() -> [String] {
+        UserDefaults.standard.stringArray(forKey: authorizedOriginsDefaultsKey) ?? []
+    }
+
+    static func saveAuthorizedOrigin(_ origin: String) {
+        var list = authorizedOrigins()
+        if !list.contains(origin) {
+            list.append(origin)
+            list.sort()
+            UserDefaults.standard.set(list, forKey: authorizedOriginsDefaultsKey)
+        }
+    }
+
+    static func revokeAllAuthorizedOrigins() {
+        UserDefaults.standard.removeObject(forKey: authorizedOriginsDefaultsKey)
+        NotificationCenter.default.post(name: didRevokeOriginsNotification, object: nil)
+    }
+
+    @objc private func handleOriginsRevoked() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.sessionAuthorizedOrigins.removeAll()
+            if let origin = self.activeClientOrigin, !Self.isLoopbackOrigin(origin) {
+                self.disconnectClient()
+            }
+        }
     }
 
     var hasActiveClient: Bool { activeClient != nil }
@@ -71,21 +115,15 @@ final class MotionWebBridge {
     }
 
     func openInBrowser() {
-        let urlString = "http://127.0.0.1:\(httpPort)/?ws=ws://127.0.0.1:\(wsPort)&token=\(sessionToken)"
-        guard let url = URL(string: urlString) else { return }
-        let chromeBundleID = "com.google.Chrome"
-        if let chromeURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: chromeBundleID) {
-            let config = NSWorkspace.OpenConfiguration()
-            config.activates = true
-            NSWorkspace.shared.open([url], withApplicationAt: chromeURL, configuration: config) { _, error in
-                if let error {
-                    NSLog("Failed to open in Chrome (%@), falling back to default browser", error.localizedDescription)
-                    NSWorkspace.shared.open(url)
-                }
-            }
+        let url: URL
+        if let custom = ProcessInfo.processInfo.environment["VOICESTICK_GAMES_URL"],
+           !custom.isEmpty,
+           let envURL = URL(string: custom) {
+            url = envURL
         } else {
-            NSWorkspace.shared.open(url)
+            url = AppConfig.gamesURL
         }
+        NSWorkspace.shared.open(url)
     }
 
     // MARK: - BLE hooks (called on main queue from VoiceStickCoordinator)
@@ -159,13 +197,14 @@ final class MotionWebBridge {
     private func startWSListener() throws {
         let wsOptions = NWProtocolWebSocket.Options()
         wsOptions.autoReplyPing = true
-        wsOptions.setClientRequestHandler(queue) { _, headers in
-            if let origin = headers.first(where: { $0.name.caseInsensitiveCompare("Origin") == .orderedSame })?.value {
-                guard Self.isAllowedOrigin(origin) else {
-                    NSLog("MotionWebBridge rejected WS origin: %@", origin)
-                    return .init(status: .reject, subprotocol: nil, additionalHeaders: nil)
-                }
+        wsOptions.setClientRequestHandler(queue) { [weak self] _, headers in
+            let rawOrigin = headers.first(where: { $0.name.caseInsensitiveCompare("Origin") == .orderedSame })?.value ?? ""
+            let normalized = Self.normalizeOrigin(rawOrigin)
+            guard Self.isStructurallyValidOrigin(normalized) else {
+                NSLog("MotionWebBridge rejected malformed WS origin: %@", rawOrigin)
+                return .init(status: .reject, subprotocol: nil, additionalHeaders: nil)
             }
+            self?.pendingOrigins.append(normalized)
             return .init(status: .accept, subprotocol: nil, additionalHeaders: nil)
         }
         let params = NWParameters.tcp
@@ -190,35 +229,126 @@ final class MotionWebBridge {
     }
 
     private func acceptWSConnection(_ connection: NWConnection) {
+        let origin = pendingOrigins.isEmpty ? "" : pendingOrigins.removeFirst()
         DispatchQueue.main.async { [weak self] in
             guard let self else { connection.cancel(); return }
-            self.onClientActivated?()
-            self.disconnectClient(notifySuperseded: true)
-            self.activeClient = connection
-            self.inFlightBinaryFrames = 0
+            if self.isOriginAuthorized(origin) {
+                self.activateAuthorizedConnection(connection, origin: origin)
+                return
+            }
+            // If an authorization dialog is already open, do not stack another prompt.
+            if self.isPromptingAuthorization {
+                connection.cancel()
+                return
+            }
+            self.requestAuthorization(for: connection, origin: origin)
+        }
+    }
 
-            connection.stateUpdateHandler = { [weak self] state in
-                DispatchQueue.main.async {
-                    guard let self, self.activeClient === connection else { return }
-                    switch state {
-                    case .ready:
-                        self.startHeartbeat()
-                        self.sendJSONObject([
-                            "type": "welcome",
-                            "protocol": 1,
-                            "sampleRateHz": 100,
-                            "hostUptime": ProcessInfo.processInfo.systemUptime
-                        ])
-                        self.updateSession()
-                        self.receiveNextWSMessage(on: connection)
-                    case .failed, .cancelled:
-                        self.disconnectClient()
-                    default:
-                        break
-                    }
+    private func isOriginAuthorized(_ origin: String) -> Bool {
+        if Self.isLoopbackOrigin(origin) { return true }
+        if sessionAuthorizedOrigins.contains(origin) { return true }
+        return Self.authorizedOrigins().contains(origin)
+    }
+
+    private func requestAuthorization(for connection: NWConnection, origin: String) {
+        isPromptingAuthorization = true
+        let displayOrigin = origin.isEmpty ? "Unknown local client" : origin
+
+        var connectionClosed = false
+        connection.stateUpdateHandler = { state in
+            if case .failed = state { connectionClosed = true }
+            if case .cancelled = state { connectionClosed = true }
+            if case .ready = state {
+                let payload: [String: Any] = ["type": "auth_required", "origin": displayOrigin]
+                if let data = try? JSONSerialization.data(withJSONObject: payload) {
+                    let meta = NWProtocolWebSocket.Metadata(opcode: .text)
+                    let ctx = NWConnection.ContentContext(identifier: "auth_required", metadata: [meta])
+                    connection.send(content: data, contentContext: ctx, isComplete: true, completion: .contentProcessed { _ in })
                 }
             }
-            connection.start(queue: self.queue)
+        }
+        connection.start(queue: queue)
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Allow \"\(displayOrigin)\" to use VoiceStick?"
+        alert.informativeText = "This website wants to connect to your VoiceStick for 6-axis motion and button input in games. Microphone audio and firmware settings are never shared."
+        alert.addButton(withTitle: "Allow Always")
+        alert.addButton(withTitle: "Allow Once")
+        alert.addButton(withTitle: "Deny")
+
+        let response = alert.runModal()
+        isPromptingAuthorization = false
+
+        guard !connectionClosed else {
+            connection.cancel()
+            return
+        }
+
+        switch response {
+        case .alertFirstButtonReturn:
+            if !origin.isEmpty { Self.saveAuthorizedOrigin(origin) }
+            activateAuthorizedConnection(connection, origin: origin, alreadyStarted: true)
+        case .alertSecondButtonReturn:
+            if !origin.isEmpty { sessionAuthorizedOrigins.insert(origin) }
+            activateAuthorizedConnection(connection, origin: origin, alreadyStarted: true)
+        default:
+            let payload: [String: Any] = ["type": "auth_denied", "origin": displayOrigin]
+            if let data = try? JSONSerialization.data(withJSONObject: payload) {
+                let meta = NWProtocolWebSocket.Metadata(opcode: .text)
+                let ctx = NWConnection.ContentContext(identifier: "auth_denied", metadata: [meta])
+                connection.send(content: data, contentContext: ctx, isComplete: true, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
+            } else {
+                connection.cancel()
+            }
+        }
+    }
+
+    private func activateAuthorizedConnection(_ connection: NWConnection, origin: String, alreadyStarted: Bool = false) {
+        onClientActivated?()
+        disconnectClient(notifySuperseded: true)
+        activeClient = connection
+        activeClientOrigin = origin
+        inFlightBinaryFrames = 0
+
+        let onReady = { [weak self] in
+            guard let self, self.activeClient === connection else { return }
+            self.startHeartbeat()
+            self.sendJSONObject([
+                "type": "welcome",
+                "protocol": 1,
+                "sampleRateHz": 100,
+                "origin": origin,
+                "hostUptime": ProcessInfo.processInfo.systemUptime
+            ])
+            self.updateSession()
+            self.receiveNextWSMessage(on: connection)
+        }
+
+        connection.stateUpdateHandler = { [weak self] state in
+            DispatchQueue.main.async {
+                guard let self, self.activeClient === connection else { return }
+                switch state {
+                case .ready:
+                    onReady()
+                case .failed, .cancelled:
+                    self.disconnectClient()
+                default:
+                    break
+                }
+            }
+        }
+
+        if alreadyStarted {
+            if connection.state == .ready {
+                onReady()
+            }
+        } else {
+            connection.start(queue: queue)
         }
     }
 
@@ -427,6 +557,7 @@ final class MotionWebBridge {
         inFlightBinaryFrames = 0
         let old = activeClient
         activeClient = nil
+        activeClientOrigin = nil
         for id in released {
             onDeviceReleased?(id)
         }
@@ -661,9 +792,29 @@ final class MotionWebBridge {
             .appendingPathComponent("VoiceStick/TennisDatasets", isDirectory: true)
     }
 
-    private static func isAllowedOrigin(_ origin: String) -> Bool {
-        if origin.isEmpty || origin == "null" { return true }
-        guard let url = URL(string: origin), let host = url.host?.lowercased() else { return false }
+    private static func normalizeOrigin(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.lowercased() != "null",
+              let comps = URLComponents(string: trimmed),
+              let scheme = comps.scheme?.lowercased(),
+              let host = comps.host?.lowercased() else {
+            return ""
+        }
+        if let port = comps.port {
+            return "\(scheme)://\(host):\(port)"
+        }
+        return "\(scheme)://\(host)"
+    }
+
+    private static func isStructurallyValidOrigin(_ normalized: String) -> Bool {
+        if normalized.isEmpty { return true }
+        return normalized.hasPrefix("https://") || normalized.hasPrefix("http://")
+    }
+
+    private static func isLoopbackOrigin(_ normalized: String) -> Bool {
+        guard !normalized.isEmpty, let url = URL(string: normalized), let host = url.host?.lowercased() else {
+            return false
+        }
         return host == "127.0.0.1" || host == "localhost" || host == "::1"
     }
 

@@ -72,7 +72,7 @@ final class StatusController {
     private var visibleOverlayKeys: Set<String> = []
 
     var onQuit: (() -> Void)?
-    var onOpenTennisStudio: (() -> Void)?
+    var onOpenGames: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onPairDevice: (() -> Void)?
     var onForgetDevice: ((String) -> Void)?
@@ -214,11 +214,6 @@ final class StatusController {
         menu.addItem(batteryPercentageItem)
 
         addInputItems()
-        menu.addItem(makeMenuItem(
-            title: "体感网球 · 动作训练室 (Chrome)",
-            symbolName: "figure.tennis",
-            action: #selector(openTennisStudio)
-        ))
 
         menu.addItem(makeMenuItem(
             title: "Pair Device...",
@@ -236,7 +231,13 @@ final class StatusController {
         menu.addItem(NSMenuItem.separator())
 
         menu.addItem(makeMenuItem(
-            title: "Website",
+            title: "Games",
+            symbolName: "gamecontroller",
+            action: #selector(openGames)
+        ))
+
+        menu.addItem(makeMenuItem(
+            title: "VoiceStick Website",
             symbolName: "safari",
             action: #selector(openWebsite)
         ))
@@ -786,7 +787,7 @@ final class StatusController {
         rebuildMenu()
     }
 
-    @objc private func openTennisStudio() { onOpenTennisStudio?() }
+    @objc private func openGames() { onOpenGames?() }
 
     @objc private func openSettings() {
         onOpenSettings?()
